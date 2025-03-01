@@ -1,86 +1,36 @@
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 use roaring::RoaringBitmap;
-use sha2::{Digest as _, Sha256};
 use stigmerge_fileindex::Index;
-use tokio::{select, time::Instant};
-use tokio_util::sync::CancellationToken;
-use veilid_core::{DHTRecordDescriptor, Target};
+use veilid_core::{Target, Timestamp};
 
 use crate::{
     peer::ShareKey,
-    proto::{encode_index, Digest, Header},
-    Error, Peer, Result,
+    proto::{Digest, Header},
 };
 
-pub struct Syncer<P: Peer> {
-    peer: P,
-    have_index: Index,
+struct Tracker {
+    /// Digest of the wanted index.
     want_index_digest: Digest,
+
+    /// The wanted index, once resolved with a peer.
+    /// It's authenticated by matching the index digest.
     want_index: Option<Index>,
-    members: Vec<ShareKey>,
 
-    seeker: Option<Seeker>,
-    sharer: Option<Sharer>,
-
-    // Are there held by the sharer?
-    share_key: Option<DHTRecordDescriptor>,
-    peermap_key: Option<DHTRecordDescriptor>,
-
-    // Is this held by the seeker?
-    havemap_key: Option<DHTRecordDescriptor>,
+    /// Collection of known remote peers.
+    peers: HashMap<ShareKey, RemotePeerInfo>,
 }
 
-impl<P: Peer> Syncer<P> {
-    /// Create a new Syncer with the digest of the desired content state, a
-    /// local index representing local filesystem state (which could be anything
-    /// from empty to complete), and some peer DHT keys to synchronize with.
-    pub fn new(
-        peer: P,
-        want_index_digest: Digest,
-        have_index: Index,
-        members: &[ShareKey],
-    ) -> Result<Self> {
-        // Do we already have what we want?
-        let mut have_index_digest = Sha256::new();
-        have_index_digest.update(encode_index(&have_index).map_err(Error::other)?.as_slice());
-        let have_index_digest_bytes: Digest = have_index_digest.finalize().into();
-
-        Ok(Self {
-            peer,
+impl Tracker {
+    fn new(want_index_digest: Digest, share_keys: Vec<ShareKey>) -> Tracker {
+        Tracker {
             want_index_digest,
-            want_index: if have_index_digest_bytes == want_index_digest {
-                Some(have_index.clone())
-            } else {
-                None
-            },
-            have_index,
-            members: members.to_vec(),
-
-            seeker: None,
-            sharer: None,
-            havemap_key: None,
-            peermap_key: None,
-            share_key: None,
-        })
-    }
-
-    pub async fn swarm(&mut self, cancel: CancellationToken) -> Result<()> {
-        loop {
-            select! {
-                _ = cancel.cancelled() => {
-                    return Ok(())
-                }
-                // react to sharer events?
-                // react to seeker events?
-            }
+            want_index: None,
+            peers: share_keys
+                .iter()
+                .map(|k| (k.clone(), RemotePeerInfo::new(*k)))
+                .collect(),
         }
-    }
-
-    /// The DHT share key for this peer, with which other peers can swarm on the
-    /// content.
-    pub fn share_key(&self) -> Option<ShareKey> {
-        todo!()
     }
 }
 
@@ -167,30 +117,3 @@ struct AdvertisedPeer {
     share_key: ShareKey,
     updated_at: Timestamp,
 }
-
-struct Tracker {
-    /// Digest of the wanted index.
-    want_index_digest: Digest,
-
-    /// The wanted index, once resolved with a peer.
-    /// It's authenticated by matching the index digest.
-    want_index: Option<Index>,
-
-    /// Collection of known remote peers.
-    peers: HashMap<ShareKey, RemotePeerInfo>,
-}
-
-impl Tracker {
-    fn new(want_index_digest: Digest, share_keys: Vec<ShareKey>) -> Tracker {
-        Tracker {
-            want_index_digest,
-            want_index: None,
-            peers: share_keys
-                .map(|k| (k.clone(), RemotePeerInfo::new(k)))
-                .collect(),
-        }
-    }
-}
-
-/// Sharer advertises peers and serves blocks to others.
-struct Sharer {}

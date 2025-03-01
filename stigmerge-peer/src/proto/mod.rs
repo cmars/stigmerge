@@ -20,6 +20,8 @@ use self::stigmerge_capnp::{block_request, header, index};
 const MAX_RECORD_DATA_SIZE: usize = 1_048_576;
 const MAX_INDEX_BYTES: usize = MAX_RECORD_DATA_SIZE - ValueData::MAX_LEN;
 
+pub type Digest = [u8; 32];
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("{0}")]
@@ -131,7 +133,7 @@ pub fn encode_block_request(req: &BlockRequest) -> Result<Vec<u8>> {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Header {
-    payload_digest: [u8; 32],
+    payload_digest: Digest,
     payload_length: usize,
     subkeys: u16,
     route_data: Vec<u8>,
@@ -139,7 +141,7 @@ pub struct Header {
 
 impl Header {
     pub fn new(
-        payload_digest: [u8; 32],
+        payload_digest: Digest,
         payload_length: usize,
         subkeys: u16,
         route_data: &[u8],
@@ -168,7 +170,7 @@ impl Header {
         )
     }
 
-    pub fn payload_digest(&self) -> [u8; 32] {
+    pub fn payload_digest(&self) -> Digest {
         self.payload_digest.clone()
     }
 
