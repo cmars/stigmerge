@@ -6,13 +6,16 @@ use backoff::ExponentialBackoff;
 use tokio::sync::broadcast::Receiver;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use veilid_core::{CryptoKey, CryptoTyped, OperationId, Target, VeilidUpdate};
+use veilid_core::{
+    CryptoKey, CryptoTyped, OperationId, Target, TimestampDuration, ValueSubkeyRangeSet,
+    VeilidUpdate,
+};
 
 use stigmerge_fileindex::Index;
 
 use crate::{proto::Header, Result};
 
-pub type ShareKey = CryptoTyped<CryptoKey>;
+pub type TypedKey = CryptoTyped<CryptoKey>;
 
 pub trait Peer: Clone + Send {
     fn subscribe_veilid_update(&self) -> Receiver<VeilidUpdate>;
@@ -23,10 +26,10 @@ pub trait Peer: Clone + Send {
     fn announce(
         &mut self,
         index: &Index,
-    ) -> impl std::future::Future<Output = Result<(ShareKey, Target, Header)>> + Send;
+    ) -> impl std::future::Future<Output = Result<(TypedKey, Target, Header)>> + Send;
     fn reannounce_route(
         &mut self,
-        key: &ShareKey,
+        key: &TypedKey,
         prior_route: Option<Target>,
         index: &Index,
         header: &Header,
@@ -34,12 +37,12 @@ pub trait Peer: Clone + Send {
 
     fn resolve(
         &mut self,
-        key: &ShareKey,
+        key: &TypedKey,
         root: &Path,
     ) -> impl std::future::Future<Output = Result<(Target, Header, Index)>> + Send;
     fn reresolve_route(
         &mut self,
-        key: &ShareKey,
+        key: &TypedKey,
         prior_route: Option<Target>,
     ) -> impl Future<Output = Result<(Target, Header)>> + Send;
 
@@ -49,10 +52,27 @@ pub trait Peer: Clone + Send {
         piece: usize,
         block: usize,
     ) -> impl Future<Output = Result<Vec<u8>>> + Send;
+
     fn reply_block_contents(
         &mut self,
         call_id: OperationId,
         contents: &[u8],
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    fn watch(
+        &mut self,
+        key: TypedKey,
+        values: ValueSubkeyRangeSet,
+        period: TimestampDuration,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    fn cancel_watch(&mut self, key: &TypedKey);
+
+    fn merge_have_map(
+        &mut self,
+        key: TypedKey,
+        subkeys: ValueSubkeyRangeSet,
+        have_map: &mut roaring::RoaringBitmap,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
@@ -94,7 +114,8 @@ pub fn reset_backoff() -> ExponentialBackoff {
 
 macro_rules! with_backoff_retry {
     ($op:expr) => {{
-        let mut retry_backoff = crate::retry_backoff();
+        use backoff::backoff::Backoff as _;
+        let mut retry_backoff = crate::peer::retry_backoff();
         let mut result = $op;
         loop {
             match result {
@@ -102,7 +123,7 @@ macro_rules! with_backoff_retry {
                 Err(ref e) => {
                     tracing::warn!(err = format!("{}", e));
                     match retry_backoff.next_backoff() {
-                        Some(delay) => sleep(delay).await,
+                        Some(delay) => tokio::time::sleep(delay).await,
                         None => {
                             tracing::warn!("operation retries exceeded");
                             break;
@@ -118,6 +139,7 @@ macro_rules! with_backoff_retry {
 
 macro_rules! with_backoff_reset {
     ($peer:expr, $op:expr) => {{
+        use backoff::backoff::Backoff as _;
         let mut retry_backoff = crate::retry_backoff();
         let mut reset_backoff = crate::reset_backoff();
         let mut result = $op;
@@ -129,7 +151,7 @@ macro_rules! with_backoff_reset {
                     Err(ref e) => {
                         tracing::warn!(err = format!("{}", e));
                         match retry_backoff.next_backoff() {
-                            Some(delay) => sleep(delay).await,
+                            Some(delay) => tokio::time::sleep(delay).await,
                             None => {
                                 break 'operation;
                             }
@@ -148,7 +170,7 @@ macro_rules! with_backoff_reset {
                         }
                         tracing::warn!(err = format!("{}", e));
                         match reset_backoff.next_backoff() {
-                            Some(delay) => sleep(delay).await,
+                            Some(delay) => tokio::time::sleep(delay).await,
                             None => {
                                 break 'retry;
                             }

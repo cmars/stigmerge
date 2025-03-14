@@ -20,7 +20,7 @@ use veilid_core::{Target, TypedKey};
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS, PIECE_SIZE_BYTES};
 
 use crate::error::Unexpected;
-use crate::peer::{with_backoff_reset, with_backoff_retry, Peer, ShareKey};
+use crate::peer::{with_backoff_reset, with_backoff_retry, Peer};
 use crate::proto::Header;
 use crate::{reset_with_backoff, Error, Result};
 
@@ -28,7 +28,7 @@ const N_FETCHERS: u8 = 20;
 
 pub struct Fetcher<P: Peer> {
     peer: P,
-    share_key: ShareKey,
+    share_key: TypedKey,
     route: Arc<RwLock<(Target, Header)>>,
     have_index: Index,
     want_index: Index,
@@ -569,7 +569,7 @@ mod tests {
     use veilid_core::{TimestampDuration, VeilidStateAttachment, VeilidUpdate};
 
     use crate::{
-        proto::encode_index,
+        proto::Encoder,
         tests::{temp_file, StubPeer},
         Observable,
     };
@@ -591,7 +591,7 @@ mod tests {
             let index_internal = index.clone();
             let route_key =
                 TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").unwrap();
-            let index_bytes = encode_index(&index_internal).expect("encode index");
+            let index_bytes = index_internal.encode().expect("encode index");
             Ok((
                 Target::PrivateRoute(route_key.value),
                 Header::from_index(
