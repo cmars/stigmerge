@@ -1,41 +1,46 @@
-use std::{cmp::min, path::Path, sync::Arc};
+use std::{cmp::min, collections::HashMap, path::Path, sync::Arc, time::Duration};
 
-use tokio::sync::{
-    broadcast::{Receiver, Sender},
-    RwLock,
+use tokio::{
+    select,
+    sync::{broadcast, RwLock},
+    task::JoinSet,
+    time::{sleep, sleep_until, Instant},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 use veilid_core::{
-    DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Target, ValueData,
-    VeilidAPIError, VeilidUpdate,
+    DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Target, Timestamp,
+    TimestampDuration, ValueData, ValueSubkeyRangeSet, VeilidAPIError, VeilidUpdate,
 };
 
-use stigmerge_fileindex::Index;
+use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
 
 use crate::{
-    proto::{
-        decode_header, decode_index, encode_block_request, encode_header, encode_index,
-        BlockRequest, Header,
-    },
+    proto::{BlockRequest, Decoder, Encoder, Header},
     Error, Result,
 };
 
-use super::{Peer, ShareKey};
+use super::{with_backoff_retry, Peer, TypedKey};
 
 pub struct Veilid {
     routing_context: Arc<RwLock<RoutingContext>>,
 
-    update_tx: Sender<VeilidUpdate>,
+    update_tx: broadcast::Sender<VeilidUpdate>,
+
+    watchers: JoinSet<Result<()>>,
+    watch_cancels: HashMap<TypedKey, CancellationToken>,
 }
 
 impl Veilid {
     pub async fn new(
         routing_context: RoutingContext,
-        update_tx: Sender<VeilidUpdate>,
+        update_tx: broadcast::Sender<VeilidUpdate>,
     ) -> Result<Self> {
         Ok(Veilid {
             routing_context: Arc::new(RwLock::new(routing_context)),
             update_tx,
+            watchers: JoinSet::new(),
+            watch_cancels: HashMap::new(),
         })
     }
 
@@ -74,13 +79,11 @@ impl Veilid {
     async fn write_header(
         &self,
         rc: &RoutingContext,
-        key: &ShareKey,
-        index: &Index,
+        key: &TypedKey,
         header: &Header,
     ) -> Result<()> {
         // Encode the header
-        let header_bytes = encode_header(&index, header.subkeys(), header.route_data())
-            .map_err(Error::internal_protocol)?;
+        let header_bytes = header.encode().map_err(Error::internal_protocol)?;
         debug!(header_length = header_bytes.len(), "writing header");
 
         rc.set_dht_value(key.to_owned(), 0, header_bytes, None)
@@ -91,7 +94,7 @@ impl Veilid {
     async fn write_index_bytes(
         &self,
         rc: &RoutingContext,
-        dht_key: &ShareKey,
+        dht_key: &TypedKey,
         index_bytes: &[u8],
     ) -> Result<()> {
         let mut subkey = 1; // index starts at subkey 1 (header is subkey 0)
@@ -114,7 +117,7 @@ impl Veilid {
         }
     }
 
-    async fn read_header(&self, rc: &RoutingContext, key: &ShareKey) -> Result<Header> {
+    async fn read_header(&self, rc: &RoutingContext, key: &TypedKey) -> Result<Header> {
         let subkey_value = match rc.get_dht_value(key.to_owned(), 0, true).await? {
             Some(value) => value,
             None => {
@@ -124,13 +127,13 @@ impl Veilid {
                 .into())
             }
         };
-        Ok(decode_header(subkey_value.data()).map_err(Error::remote_protocol)?)
+        Ok(Header::decode(subkey_value.data()).map_err(Error::remote_protocol)?)
     }
 
     async fn read_index(
         &self,
         rc: &RoutingContext,
-        key: &ShareKey,
+        key: &TypedKey,
         header: &Header,
         root: &Path,
     ) -> Result<Index> {
@@ -150,15 +153,24 @@ impl Veilid {
             };
             index_bytes.extend_from_slice(subkey_value.data());
         }
-        Ok(
-            decode_index(root.to_path_buf(), header, index_bytes.as_slice())
-                .map_err(Error::remote_protocol)?,
-        )
+        let (payload_pieces, payload_files) =
+            <(Vec<PayloadPiece>, Vec<FileSpec>)>::decode(index_bytes.as_slice())
+                .map_err(Error::remote_protocol)?;
+        Ok(Index::new(
+            root.to_path_buf(),
+            PayloadSpec::new(
+                header.payload_digest(),
+                header.payload_length(),
+                payload_pieces,
+            ),
+            payload_files,
+        ))
     }
 
     async fn release_prior_route(&self, rc: &RoutingContext, prior_route: Option<Target>) {
         match prior_route {
             Some(Target::PrivateRoute(target)) => {
+                // Log the error at a low level (like trace?)
                 let _ = rc.api().release_private_route(target);
             }
             _ => {}
@@ -171,12 +183,14 @@ impl Clone for Veilid {
         Veilid {
             routing_context: self.routing_context.clone(),
             update_tx: self.update_tx.clone(),
+            watchers: JoinSet::new(),
+            watch_cancels: HashMap::new(),
         }
     }
 }
 
 impl Peer for Veilid {
-    fn subscribe_veilid_update(&self) -> Receiver<VeilidUpdate> {
+    fn subscribe_veilid_update(&self) -> broadcast::Receiver<VeilidUpdate> {
         self.update_tx.subscribe()
     }
 
@@ -189,16 +203,17 @@ impl Peer for Veilid {
         Ok(())
     }
 
-    async fn shutdown(self) -> Result<()> {
+    async fn shutdown(mut self) -> Result<()> {
+        self.watchers.shutdown().await;
         let rc = self.routing_context.write().await;
         rc.api().shutdown().await;
         Ok(())
     }
 
-    async fn announce(&mut self, index: &Index) -> Result<(ShareKey, Target, Header)> {
+    async fn announce(&mut self, index: &Index) -> Result<(TypedKey, Target, Header)> {
         let rc = self.routing_context.read().await;
         // Serialize index to index_bytes
-        let index_bytes = encode_index(index).map_err(Error::internal_protocol)?;
+        let index_bytes = index.encode().map_err(Error::internal_protocol)?;
         let (announce_route, route_data) = rc.api().new_private_route().await?;
         let header = Header::from_index(index, index_bytes.as_slice(), route_data.as_slice());
         trace!(header = format!("{:?}", header));
@@ -206,26 +221,26 @@ impl Peer for Veilid {
         let dht_key = dht_rec.key().to_owned();
         self.write_index_bytes(&rc, &dht_key, index_bytes.as_slice())
             .await?;
-        self.write_header(&rc, &dht_key, &index, &header).await?;
+        self.write_header(&rc, &dht_key, &header).await?;
         Ok((dht_key, Target::PrivateRoute(announce_route), header))
     }
 
     async fn reannounce_route(
         &mut self,
-        key: &ShareKey,
+        key: &TypedKey,
         prior_route: Option<Target>,
-        index: &Index,
+        _index: &Index,
         header: &Header,
     ) -> Result<(Target, Header)> {
         let rc = self.routing_context.read().await;
         self.release_prior_route(&rc, prior_route).await;
         let (announce_route, route_data) = rc.api().new_private_route().await?;
         let header = header.with_route_data(route_data);
-        self.write_header(&rc, &key, &index, &header).await?;
+        self.write_header(&rc, &key, &header).await?;
         Ok((Target::PrivateRoute(announce_route), header))
     }
 
-    async fn resolve(&mut self, key: &ShareKey, root: &Path) -> Result<(Target, Header, Index)> {
+    async fn resolve(&mut self, key: &TypedKey, root: &Path) -> Result<(Target, Header, Index)> {
         let rc = self.routing_context.read().await;
         let _ = rc.open_dht_record(key.to_owned(), None).await?;
         let header = self.read_header(&rc, key).await?;
@@ -238,7 +253,7 @@ impl Peer for Veilid {
 
     async fn reresolve_route(
         &mut self,
-        key: &ShareKey,
+        key: &TypedKey,
         prior_route: Option<Target>,
     ) -> Result<(Target, Header)> {
         let rc = self.routing_context.read().await;
@@ -261,7 +276,7 @@ impl Peer for Veilid {
             piece: piece as u32,
             block: block as u8,
         };
-        let block_req_bytes = encode_block_request(&block_req).map_err(Error::internal_protocol)?;
+        let block_req_bytes = block_req.encode().map_err(Error::internal_protocol)?;
         let resp_bytes = rc.app_call(target, block_req_bytes).await?;
         Ok(resp_bytes)
     }
@@ -270,5 +285,62 @@ impl Peer for Veilid {
         let rc = self.routing_context.read().await;
         rc.api().app_call_reply(call_id, contents.to_vec()).await?;
         Ok(())
+    }
+
+    async fn watch(
+        &mut self,
+        key: TypedKey,
+        values: ValueSubkeyRangeSet,
+        period: TimestampDuration,
+    ) -> Result<()> {
+        let rc = self.routing_context.clone();
+        let watch_cancel = CancellationToken::new();
+        if let Some(prior) = self.watch_cancels.insert(key.clone(), watch_cancel.clone()) {
+            // Replace prior watch with this one
+            prior.cancel();
+        }
+        self.watchers.spawn(async move {
+            loop {
+                let routing_context = rc.read().await;
+                let now = Timestamp::now();
+                let expiration = match with_backoff_retry!({
+                    if watch_cancel.is_cancelled() {
+                        return Ok(());
+                    }
+                    routing_context
+                        .watch_dht_values(
+                            key,
+                            values.clone(),
+                            // TODO: configurable?
+                            now + period,
+                            16,
+                        )
+                        .await
+                }) {
+                    Ok(res) => res,
+                    Err(_e) => {
+                        sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+                let deadline =
+                    Instant::now() + Duration::from_micros(expiration.saturating_sub(now).as_u64());
+                select! {
+                    _ = sleep_until(deadline) => {
+                        continue;
+                    }
+                    _ = watch_cancel.cancelled() => {
+                        return Ok(());
+                    }
+                };
+            }
+        });
+        Ok(())
+    }
+
+    fn cancel_watch(&mut self, key: &TypedKey) {
+        if let Some(prior) = self.watch_cancels.remove(key) {
+            prior.cancel();
+        }
     }
 }
