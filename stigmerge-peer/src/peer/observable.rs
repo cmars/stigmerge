@@ -7,11 +7,11 @@ use tokio::{
     time::interval,
 };
 use tracing::{debug, instrument, warn};
-use veilid_core::{OperationId, Target, VeilidUpdate};
+use veilid_core::{OperationId, Target, TimestampDuration, VeilidUpdate};
 
 use crate::{error::Error, error::NodeState, error::Result, proto::Header, Peer};
 
-use super::ShareKey;
+use super::TypedKey;
 
 pub struct Observable<P: Peer> {
     peer: P,
@@ -102,7 +102,7 @@ impl<P: Peer + 'static> Observable<P> {
     }
 }
 
-impl<P: Peer + 'static> Peer for Observable<P> {
+impl<P: Peer + Sync + 'static> Peer for Observable<P> {
     fn subscribe_veilid_update(&self) -> Receiver<VeilidUpdate> {
         self.peer.subscribe_veilid_update()
     }
@@ -137,14 +137,14 @@ impl<P: Peer + 'static> Peer for Observable<P> {
     }
 
     #[instrument(skip(self, index), level = "debug", err)]
-    async fn announce(&mut self, index: &Index) -> Result<(ShareKey, Target, Header)> {
+    async fn announce(&mut self, index: &Index) -> Result<(TypedKey, Target, Header)> {
         self.peer.announce(index).await
     }
 
     #[instrument(skip(self, index, header), level = "debug", err)]
     async fn reannounce_route(
         &mut self,
-        key: &ShareKey,
+        key: &TypedKey,
         prior_route: Option<Target>,
         index: &Index,
         header: &Header,
@@ -155,14 +155,14 @@ impl<P: Peer + 'static> Peer for Observable<P> {
     }
 
     #[instrument(skip(self), level = "debug", err)]
-    async fn resolve(&mut self, key: &ShareKey, root: &Path) -> Result<(Target, Header, Index)> {
+    async fn resolve(&mut self, key: &TypedKey, root: &Path) -> Result<(Target, Header, Index)> {
         self.peer.resolve(key, root).await
     }
 
     #[instrument(skip(self), level = "debug", err)]
     async fn reresolve_route(
         &mut self,
-        key: &ShareKey,
+        key: &TypedKey,
         prior_route: Option<Target>,
     ) -> Result<(Target, Header)> {
         self.peer.reresolve_route(key, prior_route).await
@@ -181,6 +181,19 @@ impl<P: Peer + 'static> Peer for Observable<P> {
     #[instrument(skip(self, contents), level = "trace", err)]
     async fn reply_block_contents(&mut self, call_id: OperationId, contents: &[u8]) -> Result<()> {
         self.peer.reply_block_contents(call_id, contents).await
+    }
+
+    async fn watch(
+        &mut self,
+        key: TypedKey,
+        values: veilid_core::ValueSubkeyRangeSet,
+        period: TimestampDuration,
+    ) -> Result<()> {
+        self.peer.watch(key, values, period).await
+    }
+
+    fn cancel_watch(&mut self, key: &TypedKey) {
+        self.peer.cancel_watch(key);
     }
 }
 

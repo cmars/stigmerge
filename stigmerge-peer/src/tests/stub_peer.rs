@@ -7,7 +7,7 @@ use stigmerge_fileindex::Index;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use veilid_core::{OperationId, Target, VeilidUpdate};
 
-use crate::{error::Result, peer::ShareKey};
+use crate::{error::Result, peer::TypedKey};
 use crate::{proto::Header, Peer};
 
 pub struct StubPeer {
@@ -15,12 +15,14 @@ pub struct StubPeer {
     pub reset_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub shutdown_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub announce_result:
-        Arc<Mutex<dyn Fn() -> Result<(ShareKey, Target, Header)> + Send + 'static>>,
+        Arc<Mutex<dyn Fn() -> Result<(TypedKey, Target, Header)> + Send + 'static>>,
     pub reannounce_route_result: Arc<Mutex<dyn Fn() -> Result<(Target, Header)> + Send + 'static>>,
     pub resolve_result: Arc<Mutex<dyn Fn() -> Result<(Target, Header, Index)> + Send + 'static>>,
     pub reresolve_route_result: Arc<Mutex<dyn Fn() -> Result<(Target, Header)> + Send + 'static>>,
     pub request_block_result: Arc<Mutex<dyn Fn() -> Result<Vec<u8>> + Send + 'static>>,
     pub reply_block_contents_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
+    pub watch_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
+    pub cancel_watch_result: Arc<Mutex<dyn Fn() + Send + 'static>>,
 }
 
 impl StubPeer {
@@ -44,6 +46,8 @@ impl StubPeer {
             reply_block_contents_result: Arc::new(Mutex::new(|| {
                 panic!("unexpected call to reply_block_contents")
             })),
+            watch_result: Arc::new(Mutex::new(|| panic!("unexpected call to watch"))),
+            cancel_watch_result: Arc::new(Mutex::new(|| panic!("unexpected call to cancel_watch"))),
         }
     }
 }
@@ -61,13 +65,13 @@ impl Peer for StubPeer {
         (*(self.shutdown_result.lock().unwrap()))()
     }
 
-    async fn announce(&mut self, _index: &Index) -> Result<(ShareKey, Target, Header)> {
+    async fn announce(&mut self, _index: &Index) -> Result<(TypedKey, Target, Header)> {
         (*(self.announce_result.lock().unwrap()))()
     }
 
     async fn reannounce_route(
         &mut self,
-        _key: &ShareKey,
+        _key: &TypedKey,
         _prior_route: Option<Target>,
         _index: &Index,
         _header: &Header,
@@ -75,13 +79,13 @@ impl Peer for StubPeer {
         (*(self.reannounce_route_result.lock().unwrap()))()
     }
 
-    async fn resolve(&mut self, _key: &ShareKey, _root: &Path) -> Result<(Target, Header, Index)> {
+    async fn resolve(&mut self, _key: &TypedKey, _root: &Path) -> Result<(Target, Header, Index)> {
         (*(self.resolve_result.lock().unwrap()))()
     }
 
     async fn reresolve_route(
         &mut self,
-        _key: &ShareKey,
+        _key: &TypedKey,
         _prior_route: Option<Target>,
     ) -> Result<(Target, Header)> {
         (*(self.reresolve_route_result.lock().unwrap()))()
@@ -103,6 +107,19 @@ impl Peer for StubPeer {
     ) -> Result<()> {
         (*(self.reply_block_contents_result.lock().unwrap()))()
     }
+
+    async fn watch(
+        &mut self,
+        _key: TypedKey,
+        _values: veilid_core::ValueSubkeyRangeSet,
+        _period: veilid_core::TimestampDuration,
+    ) -> Result<()> {
+        (*(self.watch_result.lock().unwrap()))()
+    }
+
+    fn cancel_watch(&mut self, _key: &TypedKey) {
+        (*(self.cancel_watch_result.lock().unwrap()))()
+    }
 }
 
 impl Clone for StubPeer {
@@ -118,6 +135,9 @@ impl Clone for StubPeer {
 
             request_block_result: self.request_block_result.clone(),
             reply_block_contents_result: self.reply_block_contents_result.clone(),
+
+            watch_result: self.watch_result.clone(),
+            cancel_watch_result: self.cancel_watch_result.clone(),
         }
     }
 }
