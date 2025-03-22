@@ -67,6 +67,13 @@ pub trait Peer: Clone + Send {
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn cancel_watch(&mut self, key: &TypedKey);
+
+    fn merge_have_map(
+        &mut self,
+        key: TypedKey,
+        subkeys: ValueSubkeyRangeSet,
+        have_map: &mut roaring::RoaringBitmap,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 mod veilid;
