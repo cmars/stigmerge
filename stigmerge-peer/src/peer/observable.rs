@@ -195,6 +195,15 @@ impl<P: Peer + Sync + 'static> Peer for Observable<P> {
     fn cancel_watch(&mut self, key: &TypedKey) {
         self.peer.cancel_watch(key);
     }
+
+    async fn merge_have_map(
+        &mut self,
+        key: TypedKey,
+        subkeys: veilid_core::ValueSubkeyRangeSet,
+        have_map: &mut roaring::RoaringBitmap,
+    ) -> Result<()> {
+        self.peer.merge_have_map(key, subkeys, have_map).await
+    }
 }
 
 fn warn_err<T, E: Display>(result: std::result::Result<T, E>) {
