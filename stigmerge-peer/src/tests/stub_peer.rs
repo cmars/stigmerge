@@ -23,6 +23,7 @@ pub struct StubPeer {
     pub reply_block_contents_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub watch_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub cancel_watch_result: Arc<Mutex<dyn Fn() + Send + 'static>>,
+    pub merge_have_map_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
 }
 
 impl StubPeer {
@@ -48,6 +49,9 @@ impl StubPeer {
             })),
             watch_result: Arc::new(Mutex::new(|| panic!("unexpected call to watch"))),
             cancel_watch_result: Arc::new(Mutex::new(|| panic!("unexpected call to cancel_watch"))),
+            merge_have_map_result: Arc::new(Mutex::new(|| {
+                panic!("unexpected call to merge_have_map")
+            })),
         }
     }
 }
@@ -120,6 +124,15 @@ impl Peer for StubPeer {
     fn cancel_watch(&mut self, _key: &TypedKey) {
         (*(self.cancel_watch_result.lock().unwrap()))()
     }
+
+    async fn merge_have_map(
+        &mut self,
+        key: TypedKey,
+        subkeys: veilid_core::ValueSubkeyRangeSet,
+        have_map: &mut roaring::RoaringBitmap,
+    ) -> Result<()> {
+        (*(self.merge_have_map_result.lock().unwrap()))()
+    }
 }
 
 impl Clone for StubPeer {
@@ -138,6 +151,7 @@ impl Clone for StubPeer {
 
             watch_result: self.watch_result.clone(),
             cancel_watch_result: self.cancel_watch_result.clone(),
+            merge_have_map_result: self.merge_have_map_result.clone(),
         }
     }
 }

@@ -343,4 +343,33 @@ impl Peer for Veilid {
             prior.cancel();
         }
     }
+
+    async fn merge_have_map(
+        &mut self,
+        key: TypedKey,
+        subkeys: ValueSubkeyRangeSet,
+        have_map: &mut roaring::RoaringBitmap,
+    ) -> Result<()> {
+        let rc = self.routing_context.read().await;
+        for subkey in subkeys.iter() {
+            match rc.get_dht_value(key, subkey, true).await? {
+                Some(data) => {
+                    for (byte_index, byte) in data.data().iter().enumerate() {
+                        for bit_pos in 0..8 {
+                            let piece_index = ((subkey as usize) * ValueData::MAX_LEN)
+                                + (byte_index * 8)
+                                + bit_pos;
+                            if byte & (0x01u8 << bit_pos) == 0u8 {
+                                have_map.remove(piece_index as u32);
+                            } else {
+                                have_map.insert(piece_index as u32);
+                            }
+                        }
+                    }
+                }
+                None => break,
+            }
+        }
+        Ok(())
+    }
 }

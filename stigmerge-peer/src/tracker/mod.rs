@@ -12,6 +12,7 @@ use crate::{
     Peer, Result,
 };
 
+mod have_resolver;
 mod share_resolver;
 
 pub struct Tracker<P: Peer> {
