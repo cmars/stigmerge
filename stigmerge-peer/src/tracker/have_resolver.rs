@@ -1,16 +1,10 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, sync::Arc};
 
-use sha2::{Digest as _, Sha256};
-use stigmerge_fileindex::Index;
-use tokio::select;
+use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
-use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet};
+use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
-use crate::{
-    peer::TypedKey,
-    proto::{Digest, Encoder, Header},
-    Error, Peer, Result,
-};
+use crate::{peer::TypedKey, Error, Peer, Result};
 
 use super::ChanServer;
 
@@ -37,7 +31,7 @@ pub(super) enum Response {
     },
     Resolve {
         key: TypedKey,
-        pieces: roaring::RoaringBitmap,
+        pieces: Arc<RwLock<roaring::RoaringBitmap>>,
     },
     Watching {
         key: TypedKey,
@@ -50,6 +44,7 @@ pub(super) enum Response {
 pub(super) struct Service<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
+    pieces_map: HashMap<TypedKey, Arc<RwLock<roaring::RoaringBitmap>>>,
 }
 
 impl<P> Service<P>
@@ -57,7 +52,11 @@ where
     P: Peer,
 {
     pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
-        Self { peer, ch }
+        Self {
+            peer,
+            ch,
+            pieces_map: HashMap::new(),
+        }
     }
 
     pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
@@ -83,9 +82,12 @@ where
                     let update = res.map_err(Error::other)?;
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
-                            // TODO: keep track of have_map per key
-                            self.peer.merge_have_map(ch.key, ch.subkeys, todo!()).await?;
-                            self.ch.tx.send(todo!()).await.map_err(Error::other)?;
+                            let have_map_lock = self.assert_have_map(&ch.key);
+                            {
+                                let mut have_map = have_map_lock.write().await;
+                                self.peer.merge_have_map(ch.key, ch.subkeys, &mut *have_map).await?;
+                            }
+                            self.ch.tx.send(Response::Resolve{ key: ch.key, pieces: have_map_lock }).await.map_err(Error::other)?;
                         }
                         veilid_core::VeilidUpdate::Shutdown => {
                             return Ok(());
@@ -97,11 +99,48 @@ where
         }
     }
 
+    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<roaring::RoaringBitmap>> {
+        if let Some(value) = self.pieces_map.get(key) {
+            return value.to_owned();
+        }
+        let value = Arc::new(RwLock::new(roaring::RoaringBitmap::new()));
+        self.pieces_map.insert(key.to_owned(), value.to_owned());
+        value
+    }
+
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
-            Request::Resolve { key } => todo!(),
-            Request::Watch { key } => todo!(),
-            Request::Remove { key } => todo!(),
+            Request::Resolve { key } => {
+                let have_map_lock = self.assert_have_map(key);
+                {
+                    let mut have_map = have_map_lock.write().await;
+                    self.peer
+                        .merge_have_map(key.to_owned(), ValueSubkeyRangeSet::full(), &mut *have_map)
+                        .await?;
+                }
+                Response::Resolve {
+                    key: key.to_owned(),
+                    pieces: have_map_lock,
+                }
+            }
+            Request::Watch { key } => {
+                self.peer
+                    .watch(
+                        key.to_owned(),
+                        ValueSubkeyRangeSet::full(),
+                        TimestampDuration::new_secs(60),
+                    )
+                    .await?;
+                Response::Watching {
+                    key: key.to_owned(),
+                }
+            }
+            Request::Remove { key } => {
+                self.peer.cancel_watch(key);
+                Response::Removed {
+                    key: key.to_owned(),
+                }
+            }
         })
     }
 }
