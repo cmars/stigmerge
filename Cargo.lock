@@ -3658,7 +3658,6 @@ dependencies = [
  "backoff",
  "capnp 0.20.6",
  "capnpc 0.20.1",
- "deranged",
  "flume",
  "hex",
  "path-absolutize",
