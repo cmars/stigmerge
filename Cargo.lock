@@ -1020,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "discovery-test"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1205,9 +1205,9 @@ dependencies = [
 
 [[package]]
 name = "event-listener-strategy"
-version = "0.5.3"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3e4e0dd3673c1139bf041f3008816d9cf2946bbfac2945c09e523b8d7b05b2"
+checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener 5.4.0",
  "pin-project-lite",
@@ -2609,9 +2609,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.1"
+version = "1.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d75b0bedcc4fe52caa0e03d9f1151a323e4aa5e2d78ba3580400cd3c9e2bc4bc"
+checksum = "c2806eaa3524762875e21c3dcd057bc4b7bfa01ce4da8d46be1cd43649e1cc6b"
 
 [[package]]
 name = "opaque-debug"
@@ -3617,7 +3617,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stigmerge"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "backoff",
@@ -3637,7 +3637,7 @@ dependencies = [
 
 [[package]]
 name = "stigmerge_fileindex"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "flume",
@@ -3651,7 +3651,7 @@ dependencies = [
 
 [[package]]
 name = "stigmerge_peer"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "backoff",
