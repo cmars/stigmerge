@@ -47,3 +47,7 @@ sha2 = "0.10"
 [dev-dependencies]
 tempfile = "3.13"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Deranged 0.4.1 breaks type inference in other dependencies. Patch it to 0.4.0 commit hash.
+[patch.crates-io]
+deranged = { git = "https://github.com/jhpratt/deranged", rev = "3c95431a375bca409a4731ae8749acc84e076267" }
