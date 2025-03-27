@@ -47,7 +47,3 @@ sha2 = "0.10"
 [dev-dependencies]
 tempfile = "3.13"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Deranged is being true to its namesake, https://github.com/jhpratt/deranged/issues/18
-[patch.crates-io]
-deranged = { git = "https://github.com/jhpratt/deranged", rev = "3c95431a375bca409a4731ae8749acc84e076267" }
