@@ -6,7 +6,7 @@ changelog_config = "cliff.toml"
 changelog_update = true
 
 # update dependencies with `cargo update`
-dependencies_update = true
+dependencies_update = false
 
 # create tags for the releases
 git_tag_enable = true
