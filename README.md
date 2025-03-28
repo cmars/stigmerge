@@ -31,7 +31,7 @@ Install a [binary release](https://github.com/cmars/stigmerge/releases) on Linux
 
 ## Rust crate
 
-Build and install from crates.io with `cargo install stigmerge`.
+Build and install from crates.io with `cargo install --locked stigmerge`.
 
 Crate dependencies may require system packages to be installed depending on the target platform.
 

@@ -940,7 +940,8 @@ dependencies = [
 [[package]]
 name = "deranged"
 version = "0.4.0"
-source = "git+https://github.com/jhpratt/deranged?rev=3c95431a375bca409a4731ae8749acc84e076267#3c95431a375bca409a4731ae8749acc84e076267"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c9e6a11ca8224451684bc0d7d5a7adbf8f2fd6887261a1cfc3c0432f9d4068e"
 dependencies = [
  "powerfmt",
 ]
