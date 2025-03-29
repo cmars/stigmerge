@@ -12,6 +12,7 @@ use crate::{
     Peer, Result,
 };
 
+mod have_announcer;
 mod have_resolver;
 mod share_resolver;
 
