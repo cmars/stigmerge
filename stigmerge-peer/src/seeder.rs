@@ -35,7 +35,7 @@ pub struct Seeder<P: Peer> {
 
 impl<P: Peer> Seeder<P> {
     pub async fn new(mut peer: P, index: Index) -> Result<Seeder<P>> {
-        let (share_key, target, header) = with_backoff_reset!(peer, peer.announce(&index).await)?;
+        let (share_key, target, header) = with_backoff_reset!(peer, peer.announce_index(&index).await)?;
         Ok(Seeder {
             peer,
             index,

@@ -9,7 +9,12 @@ use tokio::{
 use tracing::{debug, instrument, warn};
 use veilid_core::{OperationId, Target, TimestampDuration, VeilidUpdate};
 
-use crate::{error::Error, error::NodeState, error::Result, proto::Header, Peer};
+use crate::{
+    error::{Error, NodeState, Result},
+    have_map::HaveMap,
+    proto::Header,
+    Peer,
+};
 
 use super::TypedKey;
 
@@ -137,8 +142,8 @@ impl<P: Peer + Sync + 'static> Peer for Observable<P> {
     }
 
     #[instrument(skip(self, index), level = "debug", err)]
-    async fn announce(&mut self, index: &Index) -> Result<(TypedKey, Target, Header)> {
-        self.peer.announce(index).await
+    async fn announce_index(&mut self, index: &Index) -> Result<(TypedKey, Target, Header)> {
+        self.peer.announce_index(index).await
     }
 
     #[instrument(skip(self, index, header), level = "debug", err)]
@@ -200,9 +205,13 @@ impl<P: Peer + Sync + 'static> Peer for Observable<P> {
         &mut self,
         key: TypedKey,
         subkeys: veilid_core::ValueSubkeyRangeSet,
-        have_map: &mut roaring::RoaringBitmap,
+        have_map: &mut HaveMap,
     ) -> Result<()> {
         self.peer.merge_have_map(key, subkeys, have_map).await
+    }
+
+    async fn announce_have_map(&mut self, key: TypedKey, have_map: &HaveMap) -> Result<()> {
+        self.peer.announce_have_map(key, have_map).await
     }
 }
 

@@ -4,9 +4,7 @@ use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
-use crate::{peer::TypedKey, Error, Peer, Result};
-
-use super::ChanServer;
+use crate::{chan_rpc::ChanServer, have_map::HaveMap, peer::TypedKey, Error, Peer, Result};
 
 pub(super) enum Request {
     Resolve { key: TypedKey },
@@ -31,7 +29,7 @@ pub(super) enum Response {
     },
     Resolve {
         key: TypedKey,
-        pieces: Arc<RwLock<roaring::RoaringBitmap>>,
+        pieces: Arc<RwLock<HaveMap>>,
     },
     Watching {
         key: TypedKey,
@@ -44,7 +42,7 @@ pub(super) enum Response {
 pub(super) struct Service<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
-    pieces_map: HashMap<TypedKey, Arc<RwLock<roaring::RoaringBitmap>>>,
+    pieces_maps: HashMap<TypedKey, Arc<RwLock<HaveMap>>>,
 }
 
 impl<P> Service<P>
@@ -55,7 +53,7 @@ where
         Self {
             peer,
             ch,
-            pieces_map: HashMap::new(),
+            pieces_maps: HashMap::new(),
         }
     }
 
@@ -99,12 +97,12 @@ where
         }
     }
 
-    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<roaring::RoaringBitmap>> {
-        if let Some(value) = self.pieces_map.get(key) {
+    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<HaveMap>> {
+        if let Some(value) = self.pieces_maps.get(key) {
             return value.to_owned();
         }
-        let value = Arc::new(RwLock::new(roaring::RoaringBitmap::new()));
-        self.pieces_map.insert(key.to_owned(), value.to_owned());
+        let value = Arc::new(RwLock::new(HaveMap::new()));
+        self.pieces_maps.insert(key.to_owned(), value.to_owned());
         value
     }
 
