@@ -16,6 +16,7 @@ use veilid_core::{
 use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
 
 use crate::{
+    have_map::HaveMap,
     proto::{BlockRequest, Decoder, Encoder, Header},
     Error, Result,
 };
@@ -210,7 +211,7 @@ impl Peer for Veilid {
         Ok(())
     }
 
-    async fn announce(&mut self, index: &Index) -> Result<(TypedKey, Target, Header)> {
+    async fn announce_index(&mut self, index: &Index) -> Result<(TypedKey, Target, Header)> {
         let rc = self.routing_context.read().await;
         // Serialize index to index_bytes
         let index_bytes = index.encode().map_err(Error::internal_protocol)?;
@@ -348,7 +349,7 @@ impl Peer for Veilid {
         &mut self,
         key: TypedKey,
         subkeys: ValueSubkeyRangeSet,
-        have_map: &mut roaring::RoaringBitmap,
+        have_map: &mut HaveMap,
     ) -> Result<()> {
         let rc = self.routing_context.read().await;
         for subkey in subkeys.iter() {
@@ -360,9 +361,9 @@ impl Peer for Veilid {
                                 + (byte_index * 8)
                                 + bit_pos;
                             if byte & (0x01u8 << bit_pos) == 0u8 {
-                                have_map.remove(piece_index as u32);
+                                have_map.clear(piece_index.try_into().unwrap());
                             } else {
-                                have_map.insert(piece_index as u32);
+                                have_map.set(piece_index.try_into().unwrap());
                             }
                         }
                     }
@@ -371,5 +372,9 @@ impl Peer for Veilid {
             }
         }
         Ok(())
+    }
+
+    async fn announce_have_map(&mut self, key: TypedKey, have_map: &HaveMap) -> Result<()> {
+        todo!();
     }
 }

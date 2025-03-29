@@ -7,12 +7,11 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
+    chan_rpc::ChanServer,
     peer::TypedKey,
     proto::{Digest, Encoder, Header},
     Error, Peer, Result,
 };
-
-use super::ChanServer;
 
 pub(super) enum Request {
     Index {
@@ -197,7 +196,7 @@ mod tests {
         proto::{Encoder, HaveMapRef, Header, PeerMapRef},
         tests::{temp_file, StubPeer},
         tracker::{
-            chan_rpc,
+            pipe,
             share_resolver::{Request, Response, Service},
         },
     };
@@ -231,7 +230,7 @@ mod tests {
         peer.watch_result = Arc::new(Mutex::new(move || Ok(())));
         peer.cancel_watch_result = Arc::new(Mutex::new(move || {}));
 
-        let (mut share_client, share_server) = chan_rpc(32);
+        let (mut share_client, share_server) = pipe(32);
         let svc = Service::new(peer, share_server);
         let cancel = CancellationToken::new();
         let svc_task = spawn(svc.run(cancel.clone()));
@@ -320,7 +319,7 @@ mod tests {
         }));
         peer.watch_result = Arc::new(Mutex::new(move || Ok(())));
 
-        let (mut share_client, share_server) = chan_rpc(32);
+        let (mut share_client, share_server) = pipe(32);
         let svc = Service::new(peer, share_server);
         let cancel = CancellationToken::new();
         let svc_task = spawn(svc.run(cancel.clone()));
