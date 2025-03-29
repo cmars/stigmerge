@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
-use roaring::RoaringBitmap;
 use stigmerge_fileindex::Index;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use veilid_core::{Target, Timestamp};
 
 use crate::{
+    chan_rpc::{pipe, ChanClient},
+    have_map::HaveMap,
     peer::TypedKey,
     proto::{Digest, Header},
     Peer, Result,
@@ -41,7 +42,7 @@ impl<P: Peer + Clone + 'static> Tracker<P> {
         let cancel = CancellationToken::new();
         let mut tasks = JoinSet::new();
 
-        let (share_client, share_server) = chan_rpc(32);
+        let (share_client, share_server) = pipe(32);
         let share_svc = share_resolver::Service::new(peer.clone(), share_server);
         let share_cancel = cancel.clone();
         tasks.spawn(async move { share_svc.run(share_cancel).await });
@@ -98,7 +99,7 @@ struct RemotePeerInfo {
 
     /// Last known advertisted
     /// May be updated by watches on an active peer.
-    havemap: Option<RoaringBitmap>,
+    havemap: Option<HaveMap>,
 
     /// Last known advertised peermap.
     /// May be updated by watches on an active peer.
@@ -153,31 +154,4 @@ impl RemotePeerInfo {
 struct AdvertisedPeer {
     share_key: TypedKey,
     updated_at: Timestamp,
-}
-
-struct ChanClient<Request, Response> {
-    tx: mpsc::Sender<Request>,
-    rx: mpsc::Receiver<Response>,
-}
-
-struct ChanServer<Request, Response> {
-    tx: mpsc::Sender<Response>,
-    rx: mpsc::Receiver<Request>,
-}
-
-fn chan_rpc<Request, Response>(
-    capacity: usize,
-) -> (ChanClient<Request, Response>, ChanServer<Request, Response>) {
-    let (client_tx, client_rx) = mpsc::channel(capacity);
-    let (server_tx, server_rx) = mpsc::channel(capacity);
-    (
-        ChanClient {
-            tx: client_tx,
-            rx: server_rx,
-        },
-        ChanServer {
-            tx: server_tx,
-            rx: client_rx,
-        },
-    )
 }

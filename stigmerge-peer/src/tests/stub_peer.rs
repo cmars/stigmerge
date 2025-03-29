@@ -7,9 +7,10 @@ use stigmerge_fileindex::Index;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use veilid_core::{OperationId, Target, VeilidUpdate};
 
-use crate::{error::Result, peer::TypedKey};
+use crate::{error::Result, have_map::HaveMap, peer::TypedKey};
 use crate::{proto::Header, Peer};
 
+#[derive(Clone)]
 pub struct StubPeer {
     pub update_tx: Sender<VeilidUpdate>,
     pub reset_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
@@ -24,6 +25,7 @@ pub struct StubPeer {
     pub watch_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub cancel_watch_result: Arc<Mutex<dyn Fn() + Send + 'static>>,
     pub merge_have_map_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
+    pub announce_have_map_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
 }
 
 impl StubPeer {
@@ -52,6 +54,9 @@ impl StubPeer {
             merge_have_map_result: Arc::new(Mutex::new(|| {
                 panic!("unexpected call to merge_have_map")
             })),
+            announce_have_map_result: Arc::new(Mutex::new(|| {
+                panic!("unexpected call to merge_have_map")
+            })),
         }
     }
 }
@@ -69,7 +74,7 @@ impl Peer for StubPeer {
         (*(self.shutdown_result.lock().unwrap()))()
     }
 
-    async fn announce(&mut self, _index: &Index) -> Result<(TypedKey, Target, Header)> {
+    async fn announce_index(&mut self, _index: &Index) -> Result<(TypedKey, Target, Header)> {
         (*(self.announce_result.lock().unwrap()))()
     }
 
@@ -127,31 +132,18 @@ impl Peer for StubPeer {
 
     async fn merge_have_map(
         &mut self,
-        key: TypedKey,
-        subkeys: veilid_core::ValueSubkeyRangeSet,
-        have_map: &mut roaring::RoaringBitmap,
+        _key: TypedKey,
+        _subkeys: veilid_core::ValueSubkeyRangeSet,
+        _have_map: &mut HaveMap,
     ) -> Result<()> {
         (*(self.merge_have_map_result.lock().unwrap()))()
     }
-}
 
-impl Clone for StubPeer {
-    fn clone(&self) -> Self {
-        StubPeer {
-            update_tx: self.update_tx.clone(),
-            reset_result: self.reset_result.clone(),
-            shutdown_result: self.shutdown_result.clone(),
-            announce_result: self.announce_result.clone(),
-            reannounce_route_result: self.reannounce_route_result.clone(),
-            resolve_result: self.resolve_result.clone(),
-            reresolve_route_result: self.reresolve_route_result.clone(),
-
-            request_block_result: self.request_block_result.clone(),
-            reply_block_contents_result: self.reply_block_contents_result.clone(),
-
-            watch_result: self.watch_result.clone(),
-            cancel_watch_result: self.cancel_watch_result.clone(),
-            merge_have_map_result: self.merge_have_map_result.clone(),
-        }
+    async fn announce_have_map(
+        &mut self,
+        _key: TypedKey,
+        _have_map: &crate::have_map::HaveMap,
+    ) -> Result<()> {
+        (*(self.announce_have_map_result.lock().unwrap()))()
     }
 }

@@ -1,7 +1,9 @@
 #![recursion_limit = "256"]
 
+mod chan_rpc;
 mod error;
 mod fetcher;
+mod have_map;
 mod peer;
 mod proto;
 mod seeder;
