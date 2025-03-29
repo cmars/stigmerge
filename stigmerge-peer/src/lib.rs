@@ -1,10 +1,13 @@
 #![recursion_limit = "256"]
 
+mod chan_rpc;
 mod error;
 mod fetcher;
+mod have_map;
 mod peer;
 mod proto;
 mod seeder;
+mod tracker;
 pub mod veilid_config;
 
 use std::sync::Arc;
