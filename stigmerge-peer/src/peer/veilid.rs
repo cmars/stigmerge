@@ -355,18 +355,10 @@ impl Peer for Veilid {
         for subkey in subkeys.iter() {
             match rc.get_dht_value(key, subkey, true).await? {
                 Some(data) => {
-                    for (byte_index, byte) in data.data().iter().enumerate() {
-                        for bit_pos in 0..8 {
-                            let piece_index = ((subkey as usize) * ValueData::MAX_LEN)
-                                + (byte_index * 8)
-                                + bit_pos;
-                            if byte & (0x01u8 << bit_pos) == 0u8 {
-                                have_map.clear(piece_index.try_into().unwrap());
-                            } else {
-                                have_map.set(piece_index.try_into().unwrap());
-                            }
-                        }
-                    }
+                    have_map.write_bytes(
+                        TryInto::<usize>::try_into(subkey).unwrap() * ValueData::MAX_LEN,
+                        data.data(),
+                    );
                 }
                 None => break,
             }
@@ -375,6 +367,25 @@ impl Peer for Veilid {
     }
 
     async fn announce_have_map(&mut self, key: TypedKey, have_map: &HaveMap) -> Result<()> {
-        todo!();
+        let rc = self.routing_context.read().await;
+        let data = have_map.as_ref();
+        let subkeys = (data.len() / ValueData::MAX_LEN)
+            + if data.len() % ValueData::MAX_LEN > 0 {
+                1
+            } else {
+                0
+            };
+        for subkey in 0..subkeys {
+            let offset = subkey * ValueData::MAX_LEN;
+            let limit = min(ValueData::MAX_LEN, data.len());
+            rc.set_dht_value(
+                key,
+                TryInto::<u32>::try_into(subkey).unwrap(),
+                data[offset..limit].to_owned(),
+                None,
+            )
+            .await?;
+        }
+        Ok(())
     }
 }

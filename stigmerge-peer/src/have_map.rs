@@ -40,6 +40,16 @@ impl HaveMap {
     pub fn reset(&mut self) {
         self.0 = vec![];
     }
+
+    pub fn write_bytes(&mut self, byte_offset: usize, bytes: &[u8]) {
+        let required_len = byte_offset + bytes.len();
+        if self.0.len() <= required_len {
+            self.0.extend(repeat(0u8).take(required_len - self.0.len()));
+        }
+        for (i, b) in bytes.iter().enumerate() {
+            self.0[byte_offset + i] = *b;
+        }
+    }
 }
 
 impl From<Vec<u8>> for HaveMap {
@@ -57,6 +67,12 @@ impl From<&[u8]> for HaveMap {
 impl From<HaveMap> for Vec<u8> {
     fn from(value: HaveMap) -> Self {
         value.0
+    }
+}
+
+impl AsRef<[u8]> for HaveMap {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
     }
 }
 
@@ -124,5 +140,28 @@ mod tests {
                 have_map.get(i)
             );
         }
+    }
+
+    #[test]
+    fn byte_manipulation() {
+        let mut have_map: HaveMap = [0x55u8; 32].as_slice().into();
+        assert_eq!(have_map.get(56), true);
+        assert_eq!(have_map.get(57), false);
+        assert_eq!(have_map.get(64), true);
+        assert_eq!(have_map.get(65), false);
+
+        have_map.write_bytes(7, [0xaau8; 2].as_slice());
+        assert_eq!(have_map.get(56), false);
+        assert_eq!(have_map.get(57), true);
+        assert_eq!(have_map.get(64), false);
+        assert_eq!(have_map.get(65), true);
+    }
+
+    #[test]
+    fn byte_extension() {
+        let mut have_map: HaveMap = [0x55u8; 32].as_slice().into();
+        assert_eq!(have_map.as_ref().len(), 32);
+        have_map.write_bytes(32, [0xaau8; 24].as_slice().into());
+        assert_eq!(have_map.as_ref().len(), 56);
     }
 }
