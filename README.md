@@ -106,6 +106,8 @@ Github is used for CICD and especially [release automation](https://blog.orhun.d
 
 ## Contributions
 
-Branches and releases are regularly mirrored to [Gitlab](https://gitlab.com/cmars232/stigmerge). Pull requests might be accepted from either, if they fit with the project plans and goals.
+Branches and releases are regularly mirrored to [Codeberg](https://codeberg.org/cmars/stigmerge). Pull requests might be accepted from either, if they fit with the project plans and goals.
+
+This project used to be hosted on Gitlab, but I've deleted my original account there, and will only use Gitlab for contributions when necessary. Why? [Gitlab is a collaborator](https://archive.is/okSlz).
 
 Open an issue and ask before picking up a branch and proposing, for best results.
