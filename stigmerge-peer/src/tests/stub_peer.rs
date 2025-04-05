@@ -7,20 +7,26 @@ use stigmerge_fileindex::Index;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use veilid_core::{OperationId, Target, VeilidUpdate};
 
-use crate::{error::Result, peer::ShareKey};
+use crate::{error::Result, peer::TypedKey, piece_map::PieceMap, proto::PeerInfo};
 use crate::{proto::Header, Peer};
 
+#[derive(Clone)]
 pub struct StubPeer {
     pub update_tx: Sender<VeilidUpdate>,
     pub reset_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub shutdown_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub announce_result:
-        Arc<Mutex<dyn Fn() -> Result<(ShareKey, Target, Header)> + Send + 'static>>,
+        Arc<Mutex<dyn Fn() -> Result<(TypedKey, Target, Header)> + Send + 'static>>,
     pub reannounce_route_result: Arc<Mutex<dyn Fn() -> Result<(Target, Header)> + Send + 'static>>,
     pub resolve_result: Arc<Mutex<dyn Fn() -> Result<(Target, Header, Index)> + Send + 'static>>,
     pub reresolve_route_result: Arc<Mutex<dyn Fn() -> Result<(Target, Header)> + Send + 'static>>,
     pub request_block_result: Arc<Mutex<dyn Fn() -> Result<Vec<u8>> + Send + 'static>>,
     pub reply_block_contents_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
+    pub watch_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
+    pub cancel_watch_result: Arc<Mutex<dyn Fn() + Send + 'static>>,
+    pub merge_have_map_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
+    pub announce_have_map_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
+    pub resolve_peer_info_result: Arc<Mutex<dyn Fn() -> Result<PeerInfo> + Send + 'static>>,
 }
 
 impl StubPeer {
@@ -44,6 +50,17 @@ impl StubPeer {
             reply_block_contents_result: Arc::new(Mutex::new(|| {
                 panic!("unexpected call to reply_block_contents")
             })),
+            watch_result: Arc::new(Mutex::new(|| panic!("unexpected call to watch"))),
+            cancel_watch_result: Arc::new(Mutex::new(|| panic!("unexpected call to cancel_watch"))),
+            merge_have_map_result: Arc::new(Mutex::new(|| {
+                panic!("unexpected call to merge_have_map")
+            })),
+            announce_have_map_result: Arc::new(Mutex::new(|| {
+                panic!("unexpected call to announce_have_map")
+            })),
+            resolve_peer_info_result: Arc::new(Mutex::new(|| {
+                panic!("unexpected call to resolve_peer_info")
+            })),
         }
     }
 }
@@ -61,13 +78,13 @@ impl Peer for StubPeer {
         (*(self.shutdown_result.lock().unwrap()))()
     }
 
-    async fn announce(&mut self, _index: &Index) -> Result<(ShareKey, Target, Header)> {
+    async fn announce_index(&mut self, _index: &Index) -> Result<(TypedKey, Target, Header)> {
         (*(self.announce_result.lock().unwrap()))()
     }
 
     async fn reannounce_route(
         &mut self,
-        _key: &ShareKey,
+        _key: &TypedKey,
         _prior_route: Option<Target>,
         _index: &Index,
         _header: &Header,
@@ -75,13 +92,13 @@ impl Peer for StubPeer {
         (*(self.reannounce_route_result.lock().unwrap()))()
     }
 
-    async fn resolve(&mut self, _key: &ShareKey, _root: &Path) -> Result<(Target, Header, Index)> {
+    async fn resolve(&mut self, _key: &TypedKey, _root: &Path) -> Result<(Target, Header, Index)> {
         (*(self.resolve_result.lock().unwrap()))()
     }
 
     async fn reresolve_route(
         &mut self,
-        _key: &ShareKey,
+        _key: &TypedKey,
         _prior_route: Option<Target>,
     ) -> Result<(Target, Header)> {
         (*(self.reresolve_route_result.lock().unwrap()))()
@@ -103,21 +120,34 @@ impl Peer for StubPeer {
     ) -> Result<()> {
         (*(self.reply_block_contents_result.lock().unwrap()))()
     }
-}
 
-impl Clone for StubPeer {
-    fn clone(&self) -> Self {
-        StubPeer {
-            update_tx: self.update_tx.clone(),
-            reset_result: self.reset_result.clone(),
-            shutdown_result: self.shutdown_result.clone(),
-            announce_result: self.announce_result.clone(),
-            reannounce_route_result: self.reannounce_route_result.clone(),
-            resolve_result: self.resolve_result.clone(),
-            reresolve_route_result: self.reresolve_route_result.clone(),
+    async fn watch(
+        &mut self,
+        _key: TypedKey,
+        _values: veilid_core::ValueSubkeyRangeSet,
+        _period: veilid_core::TimestampDuration,
+    ) -> Result<()> {
+        (*(self.watch_result.lock().unwrap()))()
+    }
 
-            request_block_result: self.request_block_result.clone(),
-            reply_block_contents_result: self.reply_block_contents_result.clone(),
-        }
+    fn cancel_watch(&mut self, _key: &TypedKey) {
+        (*(self.cancel_watch_result.lock().unwrap()))()
+    }
+
+    async fn merge_have_map(
+        &mut self,
+        _key: TypedKey,
+        _subkeys: veilid_core::ValueSubkeyRangeSet,
+        _have_map: &mut PieceMap,
+    ) -> Result<()> {
+        (*(self.merge_have_map_result.lock().unwrap()))()
+    }
+
+    async fn announce_have_map(&mut self, _key: TypedKey, _have_map: &PieceMap) -> Result<()> {
+        (*(self.announce_have_map_result.lock().unwrap()))()
+    }
+
+    async fn resolve_peer_info(&mut self, _key: TypedKey, _subkey: u16) -> Result<PeerInfo> {
+        (*(self.resolve_peer_info_result.lock().unwrap()))()
     }
 }
