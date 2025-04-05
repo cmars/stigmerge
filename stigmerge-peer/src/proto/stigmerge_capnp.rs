@@ -2218,11 +2218,15 @@ pub mod have_map {
     pub fn has_key(&self) -> bool {
       !self.reader.get_pointer_field(0).is_null()
     }
+    #[inline]
+    pub fn get_subkeys(self) -> u16 {
+      self.reader.get_data_field::<u16>(0)
+    }
   }
 
   pub struct Builder<'a> { builder: ::capnp::private::layout::StructBuilder<'a> }
   impl <> ::capnp::traits::HasStructSize for Builder<'_,>  {
-    const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 0, pointers: 1 };
+    const STRUCT_SIZE: ::capnp::private::layout::StructSize = ::capnp::private::layout::StructSize { data: 1, pointers: 1 };
   }
   impl <> ::capnp::traits::HasTypeId for Builder<'_,>  {
     const TYPE_ID: u64 = _private::TYPE_ID;
@@ -2288,6 +2292,14 @@ pub mod have_map {
     pub fn has_key(&self) -> bool {
       !self.builder.is_pointer_field_null(0)
     }
+    #[inline]
+    pub fn get_subkeys(self) -> u16 {
+      self.builder.get_data_field::<u16>(0)
+    }
+    #[inline]
+    pub fn set_subkeys(&mut self, value: u16)  {
+      self.builder.set_data_field::<u16>(0, value);
+    }
   }
 
   pub struct Pipeline { _typeless: ::capnp::any_pointer::Pipeline }
@@ -2302,17 +2314,17 @@ pub mod have_map {
     }
   }
   mod _private {
-    pub static ENCODED_NODE: [::capnp::Word; 33] = [
+    pub static ENCODED_NODE: [::capnp::Word; 48] = [
       ::capnp::word(0, 0, 0, 0, 5, 0, 6, 0),
       ::capnp::word(188, 108, 163, 156, 134, 199, 246, 165),
-      ::capnp::word(22, 0, 0, 0, 1, 0, 0, 0),
+      ::capnp::word(22, 0, 0, 0, 1, 0, 1, 0),
       ::capnp::word(24, 246, 157, 183, 194, 151, 111, 196),
       ::capnp::word(1, 0, 7, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(21, 0, 0, 0, 242, 0, 0, 0),
       ::capnp::word(33, 0, 0, 0, 7, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-      ::capnp::word(29, 0, 0, 0, 63, 0, 0, 0),
+      ::capnp::word(29, 0, 0, 0, 119, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(112, 114, 111, 116, 111, 47, 115, 116),
@@ -2320,14 +2332,21 @@ pub mod have_map {
       ::capnp::word(99, 97, 112, 110, 112, 58, 72, 97),
       ::capnp::word(118, 101, 77, 97, 112, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 1, 0, 1, 0),
-      ::capnp::word(4, 0, 0, 0, 3, 0, 4, 0),
+      ::capnp::word(8, 0, 0, 0, 3, 0, 4, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 1, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-      ::capnp::word(13, 0, 0, 0, 34, 0, 0, 0),
+      ::capnp::word(41, 0, 0, 0, 34, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-      ::capnp::word(8, 0, 0, 0, 3, 0, 1, 0),
-      ::capnp::word(20, 0, 0, 0, 2, 0, 1, 0),
+      ::capnp::word(36, 0, 0, 0, 3, 0, 1, 0),
+      ::capnp::word(48, 0, 0, 0, 2, 0, 1, 0),
+      ::capnp::word(1, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(0, 0, 1, 0, 1, 0, 0, 0),
+      ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(45, 0, 0, 0, 66, 0, 0, 0),
+      ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(40, 0, 0, 0, 3, 0, 1, 0),
+      ::capnp::word(52, 0, 0, 0, 2, 0, 1, 0),
       ::capnp::word(107, 101, 121, 0, 0, 0, 0, 0),
       ::capnp::word(16, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(21, 88, 57, 241, 87, 24, 43, 188),
@@ -2336,10 +2355,19 @@ pub mod have_map {
       ::capnp::word(16, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(115, 117, 98, 107, 101, 121, 115, 0),
+      ::capnp::word(7, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(7, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
     ];
     pub fn get_field_types(index: u16) -> ::capnp::introspect::Type {
       match index {
         0 => <crate::proto::stigmerge_capnp::typed_key::Owned as ::capnp::introspect::Introspect>::introspect(),
+        1 => <u16 as ::capnp::introspect::Introspect>::introspect(),
         _ => panic!("invalid field index {}", index),
       }
     }
@@ -2352,9 +2380,9 @@ pub mod have_map {
       members_by_discriminant: MEMBERS_BY_DISCRIMINANT,
       members_by_name: MEMBERS_BY_NAME,
     };
-    pub static NONUNION_MEMBERS : &[u16] = &[0];
+    pub static NONUNION_MEMBERS : &[u16] = &[0,1];
     pub static MEMBERS_BY_DISCRIMINANT : &[u16] = &[];
-    pub static MEMBERS_BY_NAME : &[u16] = &[0];
+    pub static MEMBERS_BY_NAME : &[u16] = &[0,1];
     pub const TYPE_ID: u64 = 0xa5f6_c786_9ca3_6cbc;
   }
 }
@@ -2659,7 +2687,7 @@ pub mod peer_info {
       self.reader.total_size()
     }
     #[inline]
-    pub fn get_key(self) -> ::capnp::Result<crate::proto::stigmerge_capnp::key256::Reader<'a>> {
+    pub fn get_key(self) -> ::capnp::Result<crate::proto::stigmerge_capnp::typed_key::Reader<'a>> {
       ::capnp::traits::FromPointerReader::get_from_pointer(&self.reader.get_pointer_field(0), ::core::option::Option::None)
     }
     #[inline]
@@ -2725,15 +2753,15 @@ pub mod peer_info {
       self.builder.as_reader().total_size()
     }
     #[inline]
-    pub fn get_key(self) -> ::capnp::Result<crate::proto::stigmerge_capnp::key256::Builder<'a>> {
+    pub fn get_key(self) -> ::capnp::Result<crate::proto::stigmerge_capnp::typed_key::Builder<'a>> {
       ::capnp::traits::FromPointerBuilder::get_from_pointer(self.builder.get_pointer_field(0), ::core::option::Option::None)
     }
     #[inline]
-    pub fn set_key(&mut self, value: crate::proto::stigmerge_capnp::key256::Reader<'_>) -> ::capnp::Result<()> {
+    pub fn set_key(&mut self, value: crate::proto::stigmerge_capnp::typed_key::Reader<'_>) -> ::capnp::Result<()> {
       ::capnp::traits::SetterInput::set_pointer_builder(self.builder.reborrow().get_pointer_field(0), value, false)
     }
     #[inline]
-    pub fn init_key(self, ) -> crate::proto::stigmerge_capnp::key256::Builder<'a> {
+    pub fn init_key(self, ) -> crate::proto::stigmerge_capnp::typed_key::Builder<'a> {
       ::capnp::traits::FromPointerBuilder::init_pointer(self.builder.get_pointer_field(0), 0)
     }
     #[inline]
@@ -2757,7 +2785,7 @@ pub mod peer_info {
     }
   }
   impl Pipeline  {
-    pub fn get_key(&self) -> crate::proto::stigmerge_capnp::key256::Pipeline {
+    pub fn get_key(&self) -> crate::proto::stigmerge_capnp::typed_key::Pipeline {
       ::capnp::capability::FromTypelessPipeline::new(self._typeless.get_pointer_field(0))
     }
   }
@@ -2797,7 +2825,7 @@ pub mod peer_info {
       ::capnp::word(56, 0, 0, 0, 2, 0, 1, 0),
       ::capnp::word(107, 101, 121, 0, 0, 0, 0, 0),
       ::capnp::word(16, 0, 0, 0, 0, 0, 0, 0),
-      ::capnp::word(195, 45, 200, 35, 53, 55, 125, 196),
+      ::capnp::word(21, 88, 57, 241, 87, 24, 43, 188),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(16, 0, 0, 0, 0, 0, 0, 0),
@@ -2815,7 +2843,7 @@ pub mod peer_info {
     ];
     pub fn get_field_types(index: u16) -> ::capnp::introspect::Type {
       match index {
-        0 => <crate::proto::stigmerge_capnp::key256::Owned as ::capnp::introspect::Introspect>::introspect(),
+        0 => <crate::proto::stigmerge_capnp::typed_key::Owned as ::capnp::introspect::Introspect>::introspect(),
         1 => <u64 as ::capnp::introspect::Introspect>::introspect(),
         _ => panic!("invalid field index {}", index),
       }
@@ -3118,4 +3146,4 @@ pub mod block_request {
   }
 }
 
-//BUILDHASH:023cc94a90d735ceaf0c5f946bdbdb8effd9cc1ba0904443741389eb3ca4747d
+//BUILDHASH:b1091a664433d408f0bc25093536a89e4669d98f7e238485f3e40e903dc4599c

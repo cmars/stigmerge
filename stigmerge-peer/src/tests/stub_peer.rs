@@ -7,7 +7,7 @@ use stigmerge_fileindex::Index;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use veilid_core::{OperationId, Target, VeilidUpdate};
 
-use crate::{error::Result, have_map::HaveMap, peer::TypedKey};
+use crate::{error::Result, peer::TypedKey, piece_map::PieceMap, proto::PeerInfo};
 use crate::{proto::Header, Peer};
 
 #[derive(Clone)]
@@ -26,6 +26,7 @@ pub struct StubPeer {
     pub cancel_watch_result: Arc<Mutex<dyn Fn() + Send + 'static>>,
     pub merge_have_map_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub announce_have_map_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
+    pub resolve_peer_info_result: Arc<Mutex<dyn Fn() -> Result<PeerInfo> + Send + 'static>>,
 }
 
 impl StubPeer {
@@ -55,7 +56,10 @@ impl StubPeer {
                 panic!("unexpected call to merge_have_map")
             })),
             announce_have_map_result: Arc::new(Mutex::new(|| {
-                panic!("unexpected call to merge_have_map")
+                panic!("unexpected call to announce_have_map")
+            })),
+            resolve_peer_info_result: Arc::new(Mutex::new(|| {
+                panic!("unexpected call to resolve_peer_info")
             })),
         }
     }
@@ -134,16 +138,16 @@ impl Peer for StubPeer {
         &mut self,
         _key: TypedKey,
         _subkeys: veilid_core::ValueSubkeyRangeSet,
-        _have_map: &mut HaveMap,
+        _have_map: &mut PieceMap,
     ) -> Result<()> {
         (*(self.merge_have_map_result.lock().unwrap()))()
     }
 
-    async fn announce_have_map(
-        &mut self,
-        _key: TypedKey,
-        _have_map: &crate::have_map::HaveMap,
-    ) -> Result<()> {
+    async fn announce_have_map(&mut self, _key: TypedKey, _have_map: &PieceMap) -> Result<()> {
         (*(self.announce_have_map_result.lock().unwrap()))()
+    }
+
+    async fn resolve_peer_info(&mut self, _key: TypedKey, _subkey: u16) -> Result<PeerInfo> {
+        (*(self.resolve_peer_info_result.lock().unwrap()))()
     }
 }

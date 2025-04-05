@@ -1,6 +1,7 @@
 mod block_request;
 mod header;
 mod index;
+mod peerinfo;
 
 #[allow(dead_code)]
 mod stigmerge_capnp;
@@ -11,6 +12,7 @@ use veilid_core::ValueData;
 
 pub use block_request::BlockRequest;
 pub use header::{HaveMapRef, Header, PeerMapRef};
+pub use peerinfo::PeerInfo;
 
 const MAX_RECORD_DATA_SIZE: usize = 1_048_576;
 const MAX_INDEX_BYTES: usize = MAX_RECORD_DATA_SIZE - ValueData::MAX_LEN;

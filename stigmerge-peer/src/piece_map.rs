@@ -1,10 +1,10 @@
 use std::iter::repeat;
 
 #[derive(Clone, Debug)]
-pub struct HaveMap(Vec<u8>);
+pub struct PieceMap(Vec<u8>);
 
-impl HaveMap {
-    pub fn new() -> HaveMap {
+impl PieceMap {
+    pub fn new() -> PieceMap {
         Self(vec![])
     }
 
@@ -52,25 +52,25 @@ impl HaveMap {
     }
 }
 
-impl From<Vec<u8>> for HaveMap {
+impl From<Vec<u8>> for PieceMap {
     fn from(value: Vec<u8>) -> Self {
         Self(value)
     }
 }
 
-impl From<&[u8]> for HaveMap {
+impl From<&[u8]> for PieceMap {
     fn from(value: &[u8]) -> Self {
         Self(value.to_vec())
     }
 }
 
-impl From<HaveMap> for Vec<u8> {
-    fn from(value: HaveMap) -> Self {
+impl From<PieceMap> for Vec<u8> {
+    fn from(value: PieceMap) -> Self {
         value.0
     }
 }
 
-impl AsRef<[u8]> for HaveMap {
+impl AsRef<[u8]> for PieceMap {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
     }
@@ -78,18 +78,18 @@ impl AsRef<[u8]> for HaveMap {
 
 #[cfg(test)]
 mod tests {
-    use super::HaveMap;
+    use super::PieceMap;
 
     #[test]
     fn empty_havemap() {
-        let have_map = HaveMap::new();
+        let have_map = PieceMap::new();
         assert_eq!(have_map.get(0), false);
         assert_eq!(have_map.get(21389213), false);
     }
 
     #[test]
     fn non_empty_havemap() {
-        let mut have_map = HaveMap::new();
+        let mut have_map = PieceMap::new();
         have_map.set(999);
         assert_eq!(have_map.get(999), true);
 
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn reset_havemap() {
-        let mut have_map = HaveMap::new();
+        let mut have_map = PieceMap::new();
         have_map.set(1000);
         have_map.reset();
         assert_eq!(have_map.get(1000), false);
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn byte_representation() {
-        let have_map: HaveMap = [0x55u8; 32].as_slice().into();
+        let have_map: PieceMap = [0x55u8; 32].as_slice().into();
         for i in 0..256 {
             assert_eq!(
                 have_map.get(i),
@@ -130,7 +130,7 @@ mod tests {
             );
         }
 
-        let have_map: HaveMap = [0xaau8; 32].as_slice().into();
+        let have_map: PieceMap = [0xaau8; 32].as_slice().into();
         for i in 0..256 {
             assert_eq!(
                 have_map.get(i),
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn byte_manipulation() {
-        let mut have_map: HaveMap = [0x55u8; 32].as_slice().into();
+        let mut have_map: PieceMap = [0x55u8; 32].as_slice().into();
         assert_eq!(have_map.get(56), true);
         assert_eq!(have_map.get(57), false);
         assert_eq!(have_map.get(64), true);
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn byte_extension() {
-        let mut have_map: HaveMap = [0x55u8; 32].as_slice().into();
+        let mut have_map: PieceMap = [0x55u8; 32].as_slice().into();
         assert_eq!(have_map.as_ref().len(), 32);
         have_map.write_bytes(32, [0xaau8; 24].as_slice().into());
         assert_eq!(have_map.as_ref().len(), 56);

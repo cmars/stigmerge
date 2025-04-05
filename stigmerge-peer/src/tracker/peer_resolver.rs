@@ -4,20 +4,35 @@ use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
-use crate::{chan_rpc::ChanServer, have_map::HaveMap, peer::TypedKey, Error, Peer, Result};
+use crate::{
+    chan_rpc::ChanServer,
+    peer::TypedKey,
+    proto::{Decoder, PeerInfo},
+    Error, Peer, Result,
+};
 
 pub(super) enum Request {
-    Resolve { key: TypedKey },
+    /// Resolve the peer information stored at the given peer map key. This will
+    /// result in a response containing the peer info, or a not available
+    /// indicator.
+    ///
+    /// The peer map key and subkeys come from the main share header.
+    Resolve { key: TypedKey, subkeys: u16 },
+
+    /// Watch for peer updates at the given peer map key. This will result in a
+    /// series of peer info responses being sent as the peers change.
     Watch { key: TypedKey },
-    Remove { key: TypedKey },
+
+    /// Cancel the watch on the peer map key.
+    CancelWatch { key: TypedKey },
 }
 
 impl Request {
     fn key(&self) -> &TypedKey {
         match self {
-            Request::Resolve { key } => key,
+            Request::Resolve { key, subkeys: _ } => key,
             Request::Watch { key } => key,
-            Request::Remove { key } => key,
+            Request::CancelWatch { key } => key,
         }
     }
 }
@@ -29,34 +44,38 @@ pub(super) enum Response {
     },
     Resolve {
         key: TypedKey,
-        peers: Arc<RwLock<HashMap<TypedKey, PeerInfo>>>,
+        peers: HashMap<TypedKey, PeerInfo>,
     },
     Watching {
         key: TypedKey,
     },
-    Removed {
+    WatchCancelled {
         key: TypedKey,
     },
 }
 
+/// The peer_resolver service handles requests for remote peer maps, which
+/// indicate which other peers a remote peer knows about.
 pub(super) struct Service<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
-    pieces_maps: HashMap<TypedKey, Arc<RwLock<HaveMap>>>,
+    peer_maps: HashMap<TypedKey, Arc<RwLock<HashMap<TypedKey, PeerInfo>>>>,
 }
 
 impl<P> Service<P>
 where
     P: Peer,
 {
+    /// Create a new peer_resolver service.
     pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
         Self {
             peer,
             ch,
-            pieces_maps: HashMap::new(),
+            peer_maps: HashMap::new(),
         }
     }
 
+    /// Run the service until cancelled.
     pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let mut updates = self.peer.subscribe_veilid_update();
         loop {
@@ -80,12 +99,15 @@ where
                     let update = res.map_err(Error::other)?;
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
-                            let have_map_lock = self.assert_have_map(&ch.key);
-                            {
-                                let mut have_map = have_map_lock.write().await;
-                                self.peer.merge_have_map(ch.key, ch.subkeys, &mut *have_map).await?;
+                            if let Some(data) = ch.value {
+                                if let Ok(peer_info) = PeerInfo::decode(data.data()) {
+                                    self.ch.tx.send(Response::Resolve{
+                                        key: ch.key,
+                                        peers: [(peer_info.key().to_owned(), peer_info)].into_iter().collect::<HashMap<_,_>>()
+                                    }).await.map_err(Error::other)?;
+                                }
                             }
-                            self.ch.tx.send(Response::Resolve{ key: ch.key, pieces: have_map_lock }).await.map_err(Error::other)?;
+                            todo!();
                         }
                         veilid_core::VeilidUpdate::Shutdown => {
                             return Ok(());
@@ -97,28 +119,20 @@ where
         }
     }
 
-    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<HaveMap>> {
-        if let Some(value) = self.pieces_maps.get(key) {
-            return value.to_owned();
-        }
-        let value = Arc::new(RwLock::new(HaveMap::new()));
-        self.pieces_maps.insert(key.to_owned(), value.to_owned());
-        value
-    }
-
+    /// Handle a peer_resolver request, provide a response.
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
-            Request::Resolve { key } => {
-                let have_map_lock = self.assert_have_map(key);
-                {
-                    let mut have_map = have_map_lock.write().await;
-                    self.peer
-                        .merge_have_map(key.to_owned(), ValueSubkeyRangeSet::full(), &mut *have_map)
-                        .await?;
+            Request::Resolve { key, subkeys } => {
+                let mut result = HashMap::new();
+                for subkey in 0u16..*subkeys {
+                    if let Ok(peer_info) = self.peer.resolve_peer_info(key.to_owned(), subkey).await
+                    {
+                        result.insert(peer_info.key().clone(), peer_info);
+                    }
                 }
                 Response::Resolve {
                     key: key.to_owned(),
-                    pieces: have_map_lock,
+                    peers: result,
                 }
             }
             Request::Watch { key } => {
@@ -133,9 +147,9 @@ where
                     key: key.to_owned(),
                 }
             }
-            Request::Remove { key } => {
+            Request::CancelWatch { key } => {
                 self.peer.cancel_watch(key);
-                Response::Removed {
+                Response::WatchCancelled {
                     key: key.to_owned(),
                 }
             }

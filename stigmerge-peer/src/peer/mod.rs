@@ -13,7 +13,8 @@ use veilid_core::{
 
 use stigmerge_fileindex::Index;
 
-use crate::have_map::HaveMap;
+use crate::piece_map::PieceMap;
+use crate::proto::PeerInfo;
 use crate::{proto::Header, Result};
 
 pub type TypedKey = CryptoTyped<CryptoKey>;
@@ -73,14 +74,20 @@ pub trait Peer: Clone + Send {
         &mut self,
         key: TypedKey,
         subkeys: ValueSubkeyRangeSet,
-        have_map: &mut HaveMap,
+        have_map: &mut PieceMap,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn announce_have_map(
         &mut self,
         key: TypedKey,
-        have_map: &HaveMap,
+        have_map: &PieceMap,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    fn resolve_peer_info(
+        &mut self,
+        key: TypedKey,
+        subkey: u16,
+    ) -> impl std::future::Future<Output = Result<PeerInfo>> + Send;
 }
 
 mod veilid;

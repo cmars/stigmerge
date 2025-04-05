@@ -3,8 +3,8 @@
 mod chan_rpc;
 mod error;
 mod fetcher;
-mod have_map;
 mod peer;
+mod piece_map;
 mod proto;
 mod seeder;
 mod tracker;

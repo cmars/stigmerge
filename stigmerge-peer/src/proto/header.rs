@@ -39,7 +39,49 @@ impl Encoder for Header {
         header_builder.set_subkeys(self.subkeys);
         header_builder.set_route(&self.route_data);
 
-        // TODO: write have and peer map refs
+        // Write the have map ref
+        if let Some(have_map_ref) = self.have_map() {
+            let mut have_map_builder = header_builder.reborrow().init_have_map();
+
+            let mut typed_key_builder = have_map_builder.reborrow().init_key();
+            typed_key_builder.set_kind(have_map_ref.key.kind.into());
+
+            let mut key_builder = typed_key_builder.reborrow().init_key();
+            key_builder.set_p0(u64::from_be_bytes(have_map_ref.key.value[0..8].try_into()?));
+            key_builder.set_p1(u64::from_be_bytes(
+                have_map_ref.key.value[8..16].try_into()?,
+            ));
+            key_builder.set_p2(u64::from_be_bytes(
+                have_map_ref.key.value[16..24].try_into()?,
+            ));
+            key_builder.set_p3(u64::from_be_bytes(
+                have_map_ref.key.value[24..32].try_into()?,
+            ));
+
+            have_map_builder.set_subkeys(have_map_ref.subkeys);
+        }
+
+        // Write the peer map ref
+        if let Some(peer_map_ref) = self.peer_map() {
+            let mut peer_map_builder = header_builder.reborrow().init_peer_map();
+
+            let mut typed_key_builder = peer_map_builder.reborrow().init_key();
+            typed_key_builder.set_kind(peer_map_ref.key.kind.into());
+
+            let mut key_builder = typed_key_builder.reborrow().init_key();
+            key_builder.set_p0(u64::from_be_bytes(peer_map_ref.key.value[0..8].try_into()?));
+            key_builder.set_p1(u64::from_be_bytes(
+                peer_map_ref.key.value[8..16].try_into()?,
+            ));
+            key_builder.set_p2(u64::from_be_bytes(
+                peer_map_ref.key.value[16..24].try_into()?,
+            ));
+            key_builder.set_p3(u64::from_be_bytes(
+                peer_map_ref.key.value[24..32].try_into()?,
+            ));
+
+            peer_map_builder.set_subkeys(peer_map_ref.subkeys);
+        }
 
         let message = serialize::write_message_segments_to_words(&builder);
         if message.len() > MAX_INDEX_BYTES {
@@ -84,6 +126,7 @@ impl Decoder for Header {
                     key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
                     header = header.with_have_map(HaveMapRef {
                         key: TypedKey::new(typed_key_reader.get_kind().into(), key.into()),
+                        subkeys: have_map_ref_reader.get_subkeys(),
                     });
                 }
             }
@@ -115,15 +158,20 @@ impl Decoder for Header {
 #[derive(Debug, PartialEq, Clone)]
 pub struct HaveMapRef {
     key: TypedKey,
+    subkeys: u16,
 }
 
 impl HaveMapRef {
-    pub fn new(key: TypedKey) -> Self {
-        Self { key }
+    pub fn new(key: TypedKey, subkeys: u16) -> Self {
+        Self { key, subkeys }
     }
 
     pub fn key(&self) -> &TypedKey {
         &self.key
+    }
+
+    pub fn subkeys(&self) -> u16 {
+        self.subkeys
     }
 }
 

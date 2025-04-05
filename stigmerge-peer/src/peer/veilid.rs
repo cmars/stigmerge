@@ -16,8 +16,8 @@ use veilid_core::{
 use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
 
 use crate::{
-    have_map::HaveMap,
-    proto::{BlockRequest, Decoder, Encoder, Header},
+    piece_map::PieceMap,
+    proto::{BlockRequest, Decoder, Encoder, Header, PeerInfo},
     Error, Result,
 };
 
@@ -349,7 +349,7 @@ impl Peer for Veilid {
         &mut self,
         key: TypedKey,
         subkeys: ValueSubkeyRangeSet,
-        have_map: &mut HaveMap,
+        have_map: &mut PieceMap,
     ) -> Result<()> {
         let rc = self.routing_context.read().await;
         for subkey in subkeys.iter() {
@@ -366,7 +366,7 @@ impl Peer for Veilid {
         Ok(())
     }
 
-    async fn announce_have_map(&mut self, key: TypedKey, have_map: &HaveMap) -> Result<()> {
+    async fn announce_have_map(&mut self, key: TypedKey, have_map: &PieceMap) -> Result<()> {
         let rc = self.routing_context.read().await;
         let data = have_map.as_ref();
         let subkeys = (data.len() / ValueData::MAX_LEN)
@@ -387,5 +387,15 @@ impl Peer for Veilid {
             .await?;
         }
         Ok(())
+    }
+
+    async fn resolve_peer_info(&mut self, key: TypedKey, subkey: u16) -> Result<PeerInfo> {
+        let rc = self.routing_context.read().await;
+        let data = rc
+            .get_dht_value(key, subkey.into(), true)
+            .await?
+            .ok_or(Error::other(anyhow::Error::msg("not found")))?;
+        let peer_info = PeerInfo::decode(data.data()).map_err(Error::other)?;
+        Ok(peer_info)
     }
 }
