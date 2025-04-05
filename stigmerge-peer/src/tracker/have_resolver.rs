@@ -4,51 +4,66 @@ use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
-use crate::{chan_rpc::ChanServer, have_map::HaveMap, peer::TypedKey, Error, Peer, Result};
+use crate::{chan_rpc::ChanServer, peer::TypedKey, piece_map::PieceMap, Error, Peer, Result};
 
+/// Have-map resolver request messages.
 pub(super) enum Request {
-    Resolve { key: TypedKey },
+    /// Resolve the have-map key to get a map of which pieces the remote peer has.
+    Resolve { key: TypedKey, subkeys: u16 },
+
+    /// Watch the peer's have-map for changes.
     Watch { key: TypedKey },
-    Remove { key: TypedKey },
+
+    /// Cancel the watch on the peer's have-map.
+    CancelWatch { key: TypedKey },
 }
 
 impl Request {
+    /// Get the have-map key specified in the request.
     fn key(&self) -> &TypedKey {
         match self {
-            Request::Resolve { key } => key,
+            Request::Resolve { key, subkeys: _ } => key,
             Request::Watch { key } => key,
-            Request::Remove { key } => key,
+            Request::CancelWatch { key } => key,
         }
     }
 }
 
+/// Have-map resolver response messages.
 pub(super) enum Response {
-    NotAvailable {
-        key: TypedKey,
-        err: Error,
-    },
+    /// Have-map is not available at the given key, with error cause.
+    NotAvailable { key: TypedKey, err: Error },
+
+    /// Have-map response.
     Resolve {
         key: TypedKey,
-        pieces: Arc<RwLock<HaveMap>>,
+        pieces: Arc<RwLock<PieceMap>>,
     },
-    Watching {
-        key: TypedKey,
-    },
-    Removed {
-        key: TypedKey,
-    },
+
+    /// Acknowledge that the have-map at the remote peer key is being monitored
+    /// for changes, with an automatically-renewed watch.
+    Watching { key: TypedKey },
+
+    /// Acknowledge that the watch on the have-map at remote peer key has been cancelled.
+    WatchCancelled { key: TypedKey },
 }
 
+/// The have_resolver service handles requests for remote peer have-maps, which
+/// indicate what pieces of a share the peer might have.
+///
+/// This service operates on the have-map reference keys indicated in the main
+/// share DHT header (subkey 0) as haveMapRef.
 pub(super) struct Service<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
-    pieces_maps: HashMap<TypedKey, Arc<RwLock<HaveMap>>>,
+    pieces_maps: HashMap<TypedKey, Arc<RwLock<PieceMap>>>,
 }
 
 impl<P> Service<P>
 where
     P: Peer,
 {
+    /// Create a new have_resolver service.
     pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
         Self {
             peer,
@@ -57,6 +72,7 @@ where
         }
     }
 
+    /// Run the service until cancelled.
     pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let mut updates = self.peer.subscribe_veilid_update();
         loop {
@@ -97,23 +113,32 @@ where
         }
     }
 
-    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<HaveMap>> {
+    /// Get or create a local have-map tracking what the remote peer has.
+    ///
+    /// Updates are merged with this local copy as it's initially fetched and
+    /// then watched for updates.
+    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<PieceMap>> {
         if let Some(value) = self.pieces_maps.get(key) {
             return value.to_owned();
         }
-        let value = Arc::new(RwLock::new(HaveMap::new()));
+        let value = Arc::new(RwLock::new(PieceMap::new()));
         self.pieces_maps.insert(key.to_owned(), value.to_owned());
         value
     }
 
+    /// Handle a have_resolver request, provide a response.
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
-            Request::Resolve { key } => {
+            Request::Resolve { key, subkeys } => {
                 let have_map_lock = self.assert_have_map(key);
                 {
                     let mut have_map = have_map_lock.write().await;
                     self.peer
-                        .merge_have_map(key.to_owned(), ValueSubkeyRangeSet::full(), &mut *have_map)
+                        .merge_have_map(
+                            key.to_owned(),
+                            ValueSubkeyRangeSet::single_range(0, (*subkeys - 1).into()),
+                            &mut *have_map,
+                        )
                         .await?;
                 }
                 Response::Resolve {
@@ -133,9 +158,9 @@ where
                     key: key.to_owned(),
                 }
             }
-            Request::Remove { key } => {
+            Request::CancelWatch { key } => {
                 self.peer.cancel_watch(key);
-                Response::Removed {
+                Response::WatchCancelled {
                     key: key.to_owned(),
                 }
             }

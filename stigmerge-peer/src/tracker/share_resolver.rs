@@ -13,22 +13,35 @@ use crate::{
     Error, Peer, Result,
 };
 
+/// Share resolver request messages.
 pub(super) enum Request {
+    /// Resolve the Index located at a remote share key, with a known index
+    /// digest, for merging into a local file share.
+    ///
+    /// If the remote share is valid, the share resolver will set up a
+    /// continual, automatically-renewed watch for this share key.
     Index {
         key: TypedKey,
         want_index_digest: Digest,
         root: PathBuf,
     },
+
+    /// Resolve the updated header for a remote share key, optionally providing
+    /// a prior known private route target to release if rotated.
+    ///
+    /// If the remote share is valid, the share resolver will set up a
+    /// continual, automatically-renewed watch for this share key.
     Header {
         key: TypedKey,
         prior_target: Option<Target>,
     },
-    Remove {
-        key: TypedKey,
-    },
+
+    /// Stop watching this share key.
+    Remove { key: TypedKey },
 }
 
 impl Request {
+    /// Get the share key specified in the request.
     fn key(&self) -> &TypedKey {
         match self {
             Request::Index {
@@ -45,31 +58,37 @@ impl Request {
     }
 }
 
+/// Share resolver response messages.
 pub(super) enum Response {
-    NotAvailable {
-        key: TypedKey,
-        err: Error,
-    },
-    BadIndex {
-        key: TypedKey,
-    },
+    /// Remote share is not available at the given key, with error cause.
+    NotAvailable { key: TypedKey, err: Error },
+
+    /// Remote share has a bad index. This could be caused by a defective or malicious peer,
+    /// or the wrong share key given for the desired index digest.
+    BadIndex { key: TypedKey },
+
+    /// Index is valid, in response to an Index request.
     Index {
         key: TypedKey,
         header: Header,
         index: Index,
         target: Target,
     },
+
+    /// Header is updated. Could be in response to a header request, or unrequested if
+    /// the watch detects a change.
     Header {
         key: TypedKey,
         header: Header,
         target: Target,
     },
-    Remove {
-        key: TypedKey,
-    },
+
+    /// Acknowledgement that the share key watch has been removed.
+    Remove { key: TypedKey },
 }
 
 impl Response {
+    /// Get the share key for a valid usable share.
     fn valid_key(&self) -> Option<&TypedKey> {
         match self {
             Response::NotAvailable { key: _, err: _ } => None,
@@ -90,16 +109,21 @@ impl Response {
     }
 }
 
+/// The share_resolver service maintains private routes to the route posted at remote
+/// peers' share keys. It also validates that the remote peer is sharing
+/// the expected index by verifying its content digest.
 pub(super) struct Service<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
 }
 
 impl<P: Peer> Service<P> {
+    /// Create a new share_resolver service.
     pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
         Self { peer, ch }
     }
 
+    /// Run the service until cancelled.
     pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let mut updates = self.peer.subscribe_veilid_update();
         loop {
@@ -112,11 +136,13 @@ impl<P: Peer> Service<P> {
                         None => return Ok(()),
                         Some(req) => req,
                     };
-                    match self.resolve(&req).await {
+                    match self.handle(&req).await {
                         Ok(resp) => {
                             if let Some(valid_key) = resp.valid_key() {
+                                /// Valid usable shares are watched.
                                 self.peer.watch(valid_key.clone(), ValueSubkeyRangeSet::single(0), TimestampDuration::new(60_000_000)).await?;
                             } else {
+                                /// Invalid or unusable shares are unwatched.
                                 self.peer.cancel_watch(req.key());
                             }
                             self.ch.tx.send(resp).await.map_err(Error::other)?
@@ -128,8 +154,9 @@ impl<P: Peer> Service<P> {
                     let update = res.map_err(Error::other)?;
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
+                            // FIXME: this may leak private routes.
                             // TODO: keep track of prior routes and pass them here?
-                            let resp = self.resolve(&Request::Header{ key: ch.key, prior_target: None }).await?;
+                            let resp = self.handle(&Request::Header{ key: ch.key, prior_target: None }).await?;
                             self.ch.tx.send(resp).await.map_err(Error::other)?;
                         }
                         veilid_core::VeilidUpdate::Shutdown => {
@@ -142,7 +169,8 @@ impl<P: Peer> Service<P> {
         }
     }
 
-    async fn resolve(&mut self, req: &Request) -> Result<Response> {
+    /// Handle a share_resolver request, provide a response.
+    async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Index {
                 key,
@@ -174,7 +202,10 @@ impl<P: Peer> Service<P> {
                     target,
                 }
             }
-            Request::Remove { key } => Response::Remove { key: key.clone() },
+            Request::Remove { key } => Response::Remove {
+                // No need to do anything; this response key is not valid, causing an unwatch
+                key: key.clone(),
+            },
         })
     }
 }
@@ -314,7 +345,7 @@ mod tests {
                 &[0xde, 0xad, 0xbe, 0xef],
             )
             .with_peer_map(PeerMapRef::new(mock_peer_map_key, 1u16))
-            .with_have_map(HaveMapRef::new(mock_have_map_key));
+            .with_have_map(HaveMapRef::new(mock_have_map_key, 1u16));
             Ok((Target::PrivateRoute(CryptoKey::new([0u8; 32])), header))
         }));
         peer.watch_result = Arc::new(Mutex::new(move || Ok(())));

@@ -7,14 +7,15 @@ use veilid_core::{Target, Timestamp};
 
 use crate::{
     chan_rpc::{pipe, ChanClient},
-    have_map::HaveMap,
     peer::TypedKey,
+    piece_map::PieceMap,
     proto::{Digest, Header},
     Peer, Result,
 };
 
 mod have_announcer;
 mod have_resolver;
+mod peer_resolver;
 mod share_resolver;
 
 pub struct Tracker<P: Peer> {
@@ -99,7 +100,7 @@ struct RemotePeerInfo {
 
     /// Last known advertisted
     /// May be updated by watches on an active peer.
-    havemap: Option<HaveMap>,
+    havemap: Option<PieceMap>,
 
     /// Last known advertised peermap.
     /// May be updated by watches on an active peer.

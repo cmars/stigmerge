@@ -83,6 +83,7 @@ struct HaveMap @0xa5f6c7869ca36cbc {
   # chunked into subkeys.
 
   key @0 :TypedKey;  # DHT key where the bitmap is published.
+  subkeys @1 :UInt16;  # Number of subkeys in the have DHT with a value.
 }
 
 struct PeerMap @0xd80917939a73ef16 {
@@ -90,7 +91,7 @@ struct PeerMap @0xd80917939a73ef16 {
   # The DHT key contains PeerInfo records at each subkey.
 
   key @0 :TypedKey;   # DHT key where the peer map is published.
-  subkeys @1 :UInt16;  # Max subkey in the peer DHT with a value.
+  subkeys @1 :UInt16;  # Number of subkeys in the peer DHT with a value.
 }
 
 struct PeerInfo @0xe0ab528e3440a34a {
@@ -110,7 +111,7 @@ struct PeerInfo @0xe0ab528e3440a34a {
   # Scores may be used for a multi-tiered prioritization of peer selection, based on the relative distance to self,
   # the difference in self's direct experience and those advertised by others, and the recency of the information.
 
-  key @0 :PublicKey;     # Peer's main DHT key for this share.
+  key @0 :TypedKey;     # Peer's main DHT key for this share.
   updatedAt @1 :UInt64;  # Timestamp (epoch millis) when this peer info was last updated.
 }
 

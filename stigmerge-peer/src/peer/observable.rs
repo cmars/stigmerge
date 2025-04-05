@@ -11,7 +11,7 @@ use veilid_core::{OperationId, Target, TimestampDuration, VeilidUpdate};
 
 use crate::{
     error::{Error, NodeState, Result},
-    have_map::HaveMap,
+    piece_map::PieceMap,
     proto::Header,
     Peer,
 };
@@ -205,13 +205,21 @@ impl<P: Peer + Sync + 'static> Peer for Observable<P> {
         &mut self,
         key: TypedKey,
         subkeys: veilid_core::ValueSubkeyRangeSet,
-        have_map: &mut HaveMap,
+        have_map: &mut PieceMap,
     ) -> Result<()> {
         self.peer.merge_have_map(key, subkeys, have_map).await
     }
 
-    async fn announce_have_map(&mut self, key: TypedKey, have_map: &HaveMap) -> Result<()> {
+    async fn announce_have_map(&mut self, key: TypedKey, have_map: &PieceMap) -> Result<()> {
         self.peer.announce_have_map(key, have_map).await
+    }
+
+    async fn resolve_peer_info(
+        &mut self,
+        key: TypedKey,
+        subkey: u16,
+    ) -> Result<crate::proto::PeerInfo> {
+        self.peer.resolve_peer_info(key, subkey).await
     }
 }
 
