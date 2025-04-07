@@ -15,6 +15,7 @@ use crate::{
 
 mod have_announcer;
 mod have_resolver;
+mod peer_announcer;
 mod peer_resolver;
 mod share_resolver;
 

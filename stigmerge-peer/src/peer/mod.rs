@@ -88,6 +88,19 @@ pub trait Peer: Clone + Send {
         key: TypedKey,
         subkey: u16,
     ) -> impl std::future::Future<Output = Result<PeerInfo>> + Send;
+
+    fn announce_peer(
+        &mut self,
+        peer_map_key: TypedKey,
+        peer_key: Option<TypedKey>,
+        subkey: u16,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    fn reset_peers(
+        &mut self,
+        peer_map_key: TypedKey,
+        max_subkey: u16,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 mod veilid;

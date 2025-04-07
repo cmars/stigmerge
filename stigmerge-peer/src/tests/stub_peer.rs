@@ -27,6 +27,8 @@ pub struct StubPeer {
     pub merge_have_map_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub announce_have_map_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub resolve_peer_info_result: Arc<Mutex<dyn Fn() -> Result<PeerInfo> + Send + 'static>>,
+    pub announce_peer_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
+    pub reset_peers_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
 }
 
 impl StubPeer {
@@ -61,6 +63,10 @@ impl StubPeer {
             resolve_peer_info_result: Arc::new(Mutex::new(|| {
                 panic!("unexpected call to resolve_peer_info")
             })),
+            announce_peer_result: Arc::new(Mutex::new(|| {
+                panic!("unexpected call to announce_peer")
+            })),
+            reset_peers_result: Arc::new(Mutex::new(|| panic!("unexpected call to reset_peers"))),
         }
     }
 }
@@ -149,5 +155,18 @@ impl Peer for StubPeer {
 
     async fn resolve_peer_info(&mut self, _key: TypedKey, _subkey: u16) -> Result<PeerInfo> {
         (*(self.resolve_peer_info_result.lock().unwrap()))()
+    }
+
+    async fn announce_peer(
+        &mut self,
+        _peer_map_key: TypedKey,
+        _peer_key: Option<TypedKey>,
+        _subkey: u16,
+    ) -> Result<()> {
+        (*(self.announce_peer_result.lock().unwrap()))()
+    }
+
+    async fn reset_peers(&mut self, _peer_map_key: TypedKey, _max_subkey: u16) -> Result<()> {
+        (*(self.reset_peers_result.lock().unwrap()))()
     }
 }

@@ -1,13 +1,11 @@
 use std::path::PathBuf;
 
-use backoff::backoff::Backoff;
 use path_absolutize::*;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
     sync::watch,
-    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
@@ -35,7 +33,8 @@ pub struct Seeder<P: Peer> {
 
 impl<P: Peer> Seeder<P> {
     pub async fn new(mut peer: P, index: Index) -> Result<Seeder<P>> {
-        let (share_key, target, header) = with_backoff_reset!(peer, peer.announce_index(&index).await)?;
+        let (share_key, target, header) =
+            with_backoff_reset!(peer, peer.announce_index(&index).await)?;
         Ok(Seeder {
             peer,
             index,
