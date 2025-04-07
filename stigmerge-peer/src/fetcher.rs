@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use backoff::backoff::Backoff;
 use flume::{unbounded, Receiver, Sender};
 use sha2::{Digest, Sha256};
 use tokio::fs::File;
@@ -12,7 +11,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::select;
 use tokio::sync::{watch, RwLock};
 use tokio::task::JoinSet;
-use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, trace, warn};
 use veilid_core::{Target, TypedKey};

@@ -398,4 +398,39 @@ impl Peer for Veilid {
         let peer_info = PeerInfo::decode(data.data()).map_err(Error::other)?;
         Ok(peer_info)
     }
+
+    async fn announce_peer(
+        &mut self,
+        peer_map_key: TypedKey,
+        peer_key: Option<TypedKey>,
+        subkey: u16,
+    ) -> Result<()> {
+        let rc = self.routing_context.read().await;
+        match peer_key {
+            Some(peer_key) => {
+                let peer_info = PeerInfo::new(peer_key);
+                rc.set_dht_value(
+                    peer_map_key,
+                    subkey.into(),
+                    peer_info.encode().map_err(Error::InternalProtocol)?,
+                    None,
+                )
+                .await?;
+            }
+            None => {
+                rc.set_dht_value(peer_map_key, subkey.into(), vec![], None)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn reset_peers(&mut self, peer_map_key: TypedKey, max_subkey: u16) -> Result<()> {
+        let rc = self.routing_context.read().await;
+        for subkey in 0..max_subkey {
+            rc.set_dht_value(peer_map_key, subkey.into(), vec![], None)
+                .await?;
+        }
+        Ok(())
+    }
 }

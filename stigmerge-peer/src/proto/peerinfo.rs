@@ -12,6 +12,17 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
+    pub fn new(key: TypedKey) -> Self {
+        Self {
+            key,
+            updated_at: Timestamp::now(),
+        }
+    }
+
+    pub fn new_updated_at(key: TypedKey, updated_at: Timestamp) -> Self {
+        Self { key, updated_at }
+    }
+
     pub fn key(&self) -> &TypedKey {
         &self.key
     }

@@ -221,6 +221,21 @@ impl<P: Peer + Sync + 'static> Peer for Observable<P> {
     ) -> Result<crate::proto::PeerInfo> {
         self.peer.resolve_peer_info(key, subkey).await
     }
+
+    async fn announce_peer(
+        &mut self,
+        peer_map_key: TypedKey,
+        peer_key: Option<TypedKey>,
+        subkey: u16,
+    ) -> Result<()> {
+        self.peer
+            .announce_peer(peer_map_key, peer_key, subkey)
+            .await
+    }
+
+    async fn reset_peers(&mut self, peer_map_key: TypedKey, max_subkey: u16) -> Result<()> {
+        self.peer.reset_peers(peer_map_key, max_subkey).await
+    }
 }
 
 fn warn_err<T, E: Display>(result: std::result::Result<T, E>) {
