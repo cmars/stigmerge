@@ -17,7 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = { workspace = true }
 backoff = { workspace = true }
-capnp = "0.20"
+capnp = "0.21"
 stigmerge_fileindex = { version = "0", path = "../stigmerge-fileindex" }
 flume = "0.11"
 hex = "0.4"
