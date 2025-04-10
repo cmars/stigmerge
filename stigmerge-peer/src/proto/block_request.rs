@@ -5,6 +5,7 @@ use capnp::{
 
 use super::{stigmerge_capnp::block_request, Decoder, Encoder, Error, Result, MAX_INDEX_BYTES};
 
+#[derive(Debug, PartialEq, Clone)]
 pub struct BlockRequest {
     pub piece: u32,
     pub block: u8,
@@ -33,5 +34,18 @@ impl Decoder for BlockRequest {
             piece: request_reader.get_piece(),
             block: request_reader.get_block(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::proto::{BlockRequest, Decoder, Encoder};
+
+    #[test]
+    fn test_encode_decode() {
+        let request = BlockRequest { piece: 1, block: 2 };
+        let encoded = request.encode().unwrap();
+        let decoded = BlockRequest::decode(&encoded).unwrap();
+        assert_eq!(request, decoded);
     }
 }
