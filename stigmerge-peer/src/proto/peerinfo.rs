@@ -6,6 +6,7 @@ use veilid_core::{Timestamp, TypedKey};
 
 use super::{stigmerge_capnp::peer_info, Decoder, Encoder, PublicKey};
 
+#[derive(Debug, PartialEq, Clone)]
 pub struct PeerInfo {
     key: TypedKey,
     updated_at: Timestamp,
@@ -46,6 +47,8 @@ impl Encoder for PeerInfo {
         key_builder.set_p2(u64::from_be_bytes(self.key.value[16..24].try_into()?));
         key_builder.set_p3(u64::from_be_bytes(self.key.value[24..32].try_into()?));
 
+        peer_info_builder.set_updated_at(self.updated_at.into());
+
         let message = serialize::write_message_segments_to_words(&builder);
         Ok(message)
     }
@@ -68,5 +71,21 @@ impl Decoder for PeerInfo {
             key: TypedKey::new(typed_key_reader.get_kind().into(), key.into()),
             updated_at: Timestamp::new(peer_info_reader.get_updated_at()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use veilid_core::CRYPTO_KIND_VLD0;
+
+    use crate::{peer::TypedKey, proto::{Decoder, Encoder, PeerInfo}};
+
+    #[test]
+    fn test_encode_decode() {
+        let key = TypedKey::new(CRYPTO_KIND_VLD0, [0x12; 32].into());
+        let peer_info = PeerInfo::new(key);
+        let encoded = peer_info.encode().unwrap();
+        let decoded = PeerInfo::decode(&encoded).unwrap();
+        assert_eq!(peer_info, decoded);
     }
 }
