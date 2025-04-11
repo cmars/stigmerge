@@ -3,10 +3,15 @@
 mod chan_rpc;
 mod error;
 mod fetcher;
+mod have_announcer;
+mod have_resolver;
 mod peer;
+mod peer_announcer;
+mod peer_resolver;
 mod piece_map;
 mod proto;
 mod seeder;
+mod share_resolver;
 mod tracker;
 pub mod veilid_config;
 
