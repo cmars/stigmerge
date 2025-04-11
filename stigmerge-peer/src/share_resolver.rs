@@ -136,10 +136,10 @@ impl<P: Peer> Service for ShareResolver<P> {
                     match self.handle(&req).await {
                         Ok(resp) => {
                             if let Some(valid_key) = resp.valid_key() {
-                                /// Valid usable shares are watched.
+                                // Valid usable shares are watched.
                                 self.peer.watch(valid_key.clone(), ValueSubkeyRangeSet::single(0), TimestampDuration::new(60_000_000)).await?;
                             } else {
-                                /// Invalid or unusable shares are unwatched.
+                                // Invalid or unusable shares are unwatched.
                                 self.peer.cancel_watch(req.key());
                             }
                             self.ch.tx.send(resp).await.map_err(Error::other)?
@@ -207,7 +207,6 @@ impl<P: Peer> Service for ShareResolver<P> {
             },
         })
     }
-
 }
 
 impl<P: Peer> ShareResolver<P> {
@@ -215,8 +214,6 @@ impl<P: Peer> ShareResolver<P> {
     pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
         Self { peer, ch }
     }
-
-
 }
 
 #[cfg(test)]
@@ -232,11 +229,12 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use veilid_core::{CryptoKey, Target, TypedKey};
 
+    use crate::chan_rpc::pipe;
     use crate::{
-        chan_rpc::Service, proto::{Encoder, HaveMapRef, Header, PeerMapRef}, tests::{temp_file, StubPeer}, tracker::{
-            pipe,
-            share_resolver::{Request, Response, ShareResolver},
-        }
+        chan_rpc::Service,
+        proto::{Encoder, HaveMapRef, Header, PeerMapRef},
+        share_resolver::{self, ShareResolver},
+        tests::{temp_file, StubPeer},
     };
 
     #[tokio::test]
@@ -279,7 +277,7 @@ mod tests {
         // Send a bad "want index digest"
         share_client
             .tx
-            .send(Request::Index {
+            .send(share_resolver::Request::Index {
                 key: fake_key,
                 want_index_digest: [0u8; 32],
                 root: index.root().to_path_buf(),
@@ -289,13 +287,13 @@ mod tests {
         let bad_index_resp = share_client.rx.recv().await;
         assert!(matches!(
             bad_index_resp,
-            Some(Response::BadIndex { key: _ })
+            Some(share_resolver::Response::BadIndex { key: _ })
         ));
 
         // Send a "want index digest" that matches the mock resolved index
         share_client
             .tx
-            .send(Request::Index {
+            .send(share_resolver::Request::Index {
                 key: fake_key,
                 want_index_digest: index_digest_bytes.into(),
                 root: index.root().to_path_buf(),
@@ -305,7 +303,7 @@ mod tests {
         let good_index_resp = share_client.rx.recv().await;
         assert!(matches!(
             good_index_resp,
-            Some(Response::Index {
+            Some(share_resolver::Response::Index {
                 key: _,
                 header: _,
                 index: _,
@@ -367,7 +365,7 @@ mod tests {
         // Send a "want index digest" that matches the mock resolved index
         share_client
             .tx
-            .send(Request::Header {
+            .send(share_resolver::Request::Header {
                 key: fake_key,
                 prior_target: None,
             })
@@ -375,7 +373,7 @@ mod tests {
             .expect("send request");
         let header_resp = share_client.rx.recv().await;
         let (header_resp_key, header_resp_header, header_resp_target) = match header_resp {
-            Some(Response::Header {
+            Some(share_resolver::Response::Header {
                 key,
                 header,
                 target,

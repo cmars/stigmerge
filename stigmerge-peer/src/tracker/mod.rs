@@ -10,14 +10,10 @@ use crate::{
     peer::TypedKey,
     piece_map::PieceMap,
     proto::{Digest, Header},
+    share_resolver,
+    share_resolver::ShareResolver,
     Peer, Result,
 };
-
-mod have_announcer;
-mod have_resolver;
-mod peer_announcer;
-mod peer_resolver;
-mod share_resolver;
 
 pub struct Tracker<P: Peer> {
     peer: P,
@@ -45,7 +41,7 @@ impl<P: Peer + Clone + 'static> Tracker<P> {
         let mut tasks = JoinSet::new();
 
         let (share_client, share_server) = pipe(32);
-        let share_svc = share_resolver::ShareResolver::new(peer.clone(), share_server);
+        let share_svc = ShareResolver::new(peer.clone(), share_server);
         let share_cancel = cancel.clone();
         tasks.spawn(async move { share_svc.run(share_cancel).await });
 
