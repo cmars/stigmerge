@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::{Target, Timestamp};
 
 use crate::{
-    chan_rpc::{pipe, ChanClient},
+    chan_rpc::{pipe, ChanClient, Service},
     peer::TypedKey,
     piece_map::PieceMap,
     proto::{Digest, Header},
@@ -45,7 +45,7 @@ impl<P: Peer + Clone + 'static> Tracker<P> {
         let mut tasks = JoinSet::new();
 
         let (share_client, share_server) = pipe(32);
-        let share_svc = share_resolver::Service::new(peer.clone(), share_server);
+        let share_svc = share_resolver::ShareResolver::new(peer.clone(), share_server);
         let share_cancel = cancel.clone();
         tasks.spawn(async move { share_svc.run(share_cancel).await });
 
