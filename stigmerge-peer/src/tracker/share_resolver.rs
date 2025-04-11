@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
-    chan_rpc::ChanServer,
+    chan_rpc::{ChanServer, Service},
     peer::TypedKey,
     proto::{Digest, Encoder, Header},
     Error, Peer, Result,
@@ -112,19 +112,16 @@ impl Response {
 /// The share_resolver service maintains private routes to the route posted at remote
 /// peers' share keys. It also validates that the remote peer is sharing
 /// the expected index by verifying its content digest.
-pub(super) struct Service<P: Peer> {
+pub(super) struct ShareResolver<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
 }
 
-impl<P: Peer> Service<P> {
-    /// Create a new share_resolver service.
-    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
-        Self { peer, ch }
-    }
+impl<P: Peer> Service for ShareResolver<P> {
+    type Request = Request;
+    type Response = Response;
 
-    /// Run the service until cancelled.
-    pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let mut updates = self.peer.subscribe_veilid_update();
         loop {
             select! {
@@ -147,7 +144,9 @@ impl<P: Peer> Service<P> {
                             }
                             self.ch.tx.send(resp).await.map_err(Error::other)?
                         }
-                        Err(err) => self.ch.tx.send(Response::NotAvailable{key: req.key().clone(), err}).await.map_err(Error::other)?,
+                        Err(e) => {
+                            self.ch.tx.send(Response::NotAvailable { key: req.key().to_owned(), err: e }).await.map_err(Error::other)?
+                        }
                     }
                 }
                 res = updates.recv() => {
@@ -208,6 +207,16 @@ impl<P: Peer> Service<P> {
             },
         })
     }
+
+}
+
+impl<P: Peer> ShareResolver<P> {
+    /// Create a new share_resolver service.
+    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+        Self { peer, ch }
+    }
+
+
 }
 
 #[cfg(test)]
@@ -224,12 +233,10 @@ mod tests {
     use veilid_core::{CryptoKey, Target, TypedKey};
 
     use crate::{
-        proto::{Encoder, HaveMapRef, Header, PeerMapRef},
-        tests::{temp_file, StubPeer},
-        tracker::{
+        chan_rpc::Service, proto::{Encoder, HaveMapRef, Header, PeerMapRef}, tests::{temp_file, StubPeer}, tracker::{
             pipe,
-            share_resolver::{Request, Response, Service},
-        },
+            share_resolver::{Request, Response, ShareResolver},
+        }
     };
 
     #[tokio::test]
@@ -262,7 +269,7 @@ mod tests {
         peer.cancel_watch_result = Arc::new(Mutex::new(move || {}));
 
         let (mut share_client, share_server) = pipe(32);
-        let svc = Service::new(peer, share_server);
+        let svc = ShareResolver::new(peer, share_server);
         let cancel = CancellationToken::new();
         let svc_task = spawn(svc.run(cancel.clone()));
 
@@ -325,7 +332,6 @@ mod tests {
         let index = indexer.index().await.expect("index");
         let mut index_digest = Sha256::new();
         index_digest.update(index.encode().expect("encode index"));
-        let index_digest_bytes = index_digest.finalize();
 
         let fake_peer_map_key =
             TypedKey::from_str("VLD0:hIfQGdXUq-oO5wwzODJukR7zOGwpNznKYaFoh6uTp2A").expect("key");
@@ -351,7 +357,7 @@ mod tests {
         peer.watch_result = Arc::new(Mutex::new(move || Ok(())));
 
         let (mut share_client, share_server) = pipe(32);
-        let svc = Service::new(peer, share_server);
+        let svc = ShareResolver::new(peer, share_server);
         let cancel = CancellationToken::new();
         let svc_task = spawn(svc.run(cancel.clone()));
 

@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
-    chan_rpc::ChanServer,
+    chan_rpc::{ChanServer, Service},
     peer::TypedKey,
     proto::{Decoder, PeerInfo},
     Error, Peer, Result,
@@ -56,27 +56,18 @@ pub(super) enum Response {
 
 /// The peer_resolver service handles requests for remote peer maps, which
 /// indicate which other peers a remote peer knows about.
-pub(super) struct Service<P: Peer> {
+pub(super) struct PeerResolver<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
     peer_maps: HashMap<TypedKey, Arc<RwLock<HashMap<TypedKey, PeerInfo>>>>,
 }
 
-impl<P> Service<P>
-where
-    P: Peer,
-{
-    /// Create a new peer_resolver service.
-    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
-        Self {
-            peer,
-            ch,
-            peer_maps: HashMap::new(),
-        }
-    }
+impl<P: Peer> Service for PeerResolver<P> {
+    type Request = Request;
+    type Response = Response;
 
     /// Run the service until cancelled.
-    pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let mut updates = self.peer.subscribe_veilid_update();
         loop {
             select! {
@@ -155,4 +146,19 @@ where
             }
         })
     }
+}
+
+impl<P> PeerResolver<P>
+where
+    P: Peer,
+{
+    /// Create a new peer_resolver service.
+    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+        Self {
+            peer,
+            ch,
+            peer_maps: HashMap::new(),
+        }
+    }
+
 }

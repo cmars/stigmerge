@@ -4,7 +4,7 @@ use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
-use crate::{chan_rpc::ChanServer, peer::TypedKey, piece_map::PieceMap, Error, Peer, Result};
+use crate::{chan_rpc::{ChanServer, Service}, peer::TypedKey, piece_map::PieceMap, Error, Peer, Result};
 
 /// Have-map resolver request messages.
 pub(super) enum Request {
@@ -53,27 +53,17 @@ pub(super) enum Response {
 ///
 /// This service operates on the have-map reference keys indicated in the main
 /// share DHT header (subkey 0) as haveMapRef.
-pub(super) struct Service<P: Peer> {
+pub(super) struct HaveResolver<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
     pieces_maps: HashMap<TypedKey, Arc<RwLock<PieceMap>>>,
 }
 
-impl<P> Service<P>
-where
-    P: Peer,
-{
-    /// Create a new have_resolver service.
-    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
-        Self {
-            peer,
-            ch,
-            pieces_maps: HashMap::new(),
-        }
-    }
+impl<P: Peer> Service for HaveResolver<P> {
+    type Request = Request;
+    type Response = Response;
 
-    /// Run the service until cancelled.
-    pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let mut updates = self.peer.subscribe_veilid_update();
         loop {
             select! {
@@ -89,7 +79,9 @@ where
                         Ok(resp) => {
                             self.ch.tx.send(resp).await.map_err(Error::other)?
                         }
-                        Err(err) => self.ch.tx.send(Response::NotAvailable{key: req.key().clone(), err}).await.map_err(Error::other)?,
+                        Err(err) => {
+                            self.ch.tx.send(Response::NotAvailable { key: req.key().to_owned(), err }).await.map_err(Error::other)?
+                        }
                     }
                 }
                 res = updates.recv() => {
@@ -113,20 +105,6 @@ where
         }
     }
 
-    /// Get or create a local have-map tracking what the remote peer has.
-    ///
-    /// Updates are merged with this local copy as it's initially fetched and
-    /// then watched for updates.
-    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<PieceMap>> {
-        if let Some(value) = self.pieces_maps.get(key) {
-            return value.to_owned();
-        }
-        let value = Arc::new(RwLock::new(PieceMap::new()));
-        self.pieces_maps.insert(key.to_owned(), value.to_owned());
-        value
-    }
-
-    /// Handle a have_resolver request, provide a response.
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Resolve { key, subkeys } => {
@@ -165,5 +143,32 @@ where
                 }
             }
         })
+    }
+}
+
+impl<P> HaveResolver<P>
+where
+    P: Peer,
+{
+    /// Create a new have_resolver service with the given peer.
+    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+        Self {
+            peer,
+            ch,
+            pieces_maps: HashMap::new(),
+        }
+    }
+
+    /// Get or create a local have-map tracking what the remote peer has.
+    ///
+    /// Updates are merged with this local copy as it's initially fetched and
+    /// then watched for updates.
+    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<PieceMap>> {
+        if let Some(value) = self.pieces_maps.get(key) {
+            return value.to_owned();
+        }
+        let value = Arc::new(RwLock::new(PieceMap::new()));
+        self.pieces_maps.insert(key.to_owned(), value.to_owned());
+        value
     }
 }

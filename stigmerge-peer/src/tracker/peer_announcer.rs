@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 
-use crate::{chan_rpc::ChanServer, peer::TypedKey, Error, Peer, Result};
+use crate::{chan_rpc::{ChanServer, Service}, peer::TypedKey, Error, Peer, Result};
 
 /// Peer-map announcer request messages.
 pub(super) enum Request {
@@ -26,7 +26,7 @@ pub type Response = Result<()>;
 ///
 /// Each remote peer is encoded to a separate subkey. Redacted peers are
 /// marked with empty contents.
-pub(super) struct Service<P: Peer> {
+pub(super) struct PeerAnnouncer<P: Peer> {
     peer: P,
     key: TypedKey,
     ch: ChanServer<Request, Response>,
@@ -34,20 +34,11 @@ pub(super) struct Service<P: Peer> {
     peers: Vec<Option<TypedKey>>,
 }
 
-impl<P: Peer> Service<P> {
-    /// Create a new have_announcer service.
-    pub(super) fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
-        Self {
-            peer,
-            key,
-            ch,
-            peer_indexes: HashMap::new(),
-            peers: vec![],
-        }
-    }
+impl<P: Peer> Service for PeerAnnouncer<P> {
+    type Request = Request;
+    type Response = Response;
 
-    /// Run the service until cancelled.
-    pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -58,15 +49,14 @@ impl<P: Peer> Service<P> {
                         None => return Ok(()),
                         Some(req) => req,
                     };
-                    let resp = self.handle(&req).await;
+                    let resp = self.handle(&req).await?;
                     self.ch.tx.send(resp).await.map_err(Error::other)?;
                 }
             }
         }
     }
 
-    /// Handle a have_announcer request, provide a response.
-    async fn handle(&mut self, req: &Request) -> Result<()> {
+    async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         Ok(match req {
             Request::Announce { key } => {
                 if !self.peer_indexes.contains_key(key) {
@@ -75,6 +65,7 @@ impl<P: Peer> Service<P> {
                         .announce_peer(self.key.to_owned(), Some(*key), index)
                         .await?;
                 }
+                Ok(())
             }
             Request::Redact { key } => {
                 if let Some(index) = self.peer_indexes.get(key) {
@@ -85,6 +76,7 @@ impl<P: Peer> Service<P> {
                     self.peers[*index] = None;
                     self.peer_indexes.remove(key);
                 }
+                Ok(())
             }
             Request::Reset => {
                 let max_subkey: u16 = (self.peers.len() - 1).try_into().unwrap();
@@ -93,8 +85,22 @@ impl<P: Peer> Service<P> {
                     .await?;
                 self.peers.clear();
                 self.peer_indexes.clear();
+                Ok(())
             }
         })
+    }
+}
+
+impl<P: Peer> PeerAnnouncer<P> {
+    /// Create a new peer_announcer service.
+    pub(super) fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
+        Self {
+            peer,
+            key,
+            ch,
+            peer_indexes: HashMap::new(),
+            peers: vec![],
+        }
     }
 
     fn assign_peer_index(&mut self, key: TypedKey) -> u16 {

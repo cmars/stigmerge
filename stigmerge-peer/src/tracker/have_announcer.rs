@@ -3,7 +3,7 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 
-use crate::{chan_rpc::ChanServer, peer::TypedKey, piece_map::PieceMap, Error, Peer, Result};
+use crate::{chan_rpc::{ChanServer, Service}, peer::TypedKey, piece_map::PieceMap, Error, Peer, Result};
 
 /// Have-map announcer request messages.
 pub(super) enum Request {
@@ -25,26 +25,18 @@ pub type Response = Result<()>;
 /// reference key, as an uncompressed bitmap of contiguous bits, indexed by
 /// piece index: a set bit (1) indicating the peer has the piece, a clear bit
 /// (0) indicating the peer does not have the piece.
-pub(super) struct Service<P: Peer> {
+pub(super) struct HaveAnnouncer<P: Peer> {
     peer: P,
     key: TypedKey,
     ch: ChanServer<Request, Response>,
     pieces_map: Arc<RwLock<PieceMap>>,
 }
 
-impl<P: Peer> Service<P> {
-    /// Create a new have_announcer service.
-    pub(super) fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
-        Self {
-            peer,
-            key,
-            ch,
-            pieces_map: Arc::new(RwLock::new(PieceMap::new())),
-        }
-    }
+impl<P: Peer> Service for HaveAnnouncer<P> {
+    type Request = Request;
+    type Response = Response;
 
-    /// Run the service until cancelled.
-    pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let mut changed = false;
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -57,7 +49,7 @@ impl<P: Peer> Service<P> {
                         None => return Ok(()),
                         Some(req) => req,
                     };
-                    let resp = self.handle(&req).await;
+                    let resp = self.handle(&req).await?;
                     changed = true;
                     self.ch.tx.send(resp).await.map_err(Error::other)?;
                 }
@@ -72,19 +64,33 @@ impl<P: Peer> Service<P> {
         }
     }
 
-    /// Handle a have_announcer request, provide a response.
-    async fn handle(&mut self, req: &Request) -> Result<()> {
+    async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         let mut pieces_map = self.pieces_map.write().await;
         Ok(match req {
             Request::Set { piece_index } => {
                 pieces_map.set(*piece_index);
+                Ok(())
             }
             Request::Clear { piece_index } => {
                 pieces_map.clear(*piece_index);
+                Ok(())
             }
             Request::Reset => {
                 pieces_map.reset();
+                Ok(())
             }
         })
+}
+}
+
+impl<P: Peer> HaveAnnouncer<P> {
+    /// Create a new have_announcer service.
+    pub(super) fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
+        Self {
+            peer,
+            key,
+            ch,
+            pieces_map: Arc::new(RwLock::new(PieceMap::new())),
+        }
     }
 }
