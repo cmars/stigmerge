@@ -3,6 +3,7 @@
 mod chan_rpc;
 mod error;
 mod fetcher;
+mod fetcher2;
 mod have_announcer;
 mod have_resolver;
 mod peer;
