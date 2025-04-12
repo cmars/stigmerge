@@ -71,7 +71,7 @@ impl Response {
     }
 }
 
-pub(super) struct Verifier<'a, P: Peer> {
+pub(super) struct PieceVerifier<'a, P: Peer> {
     peer: P,
     index: &'a Index,
     ch: ChanServer<Request, Response>,
@@ -79,7 +79,7 @@ pub(super) struct Verifier<'a, P: Peer> {
     verified_pieces: usize,
 }
 
-impl<'a, P: Peer> Service for Verifier<'a, P> {
+impl<'a, P: Peer> Service for PieceVerifier<'a, P> {
     type Request = Request;
     type Response = Response;
 
@@ -145,9 +145,9 @@ impl<'a, P: Peer> Service for Verifier<'a, P> {
     }
 }
 
-impl<'a, P: Peer> Verifier<'a, P> {
-    pub fn new(peer: P, index: &'a Index, ch: ChanServer<Request, Response>) -> Verifier<'a, P> {
-        Verifier {
+impl<'a, P: Peer> PieceVerifier<'a, P> {
+    pub fn new(peer: P, index: &'a Index, ch: ChanServer<Request, Response>) -> PieceVerifier<'a, P> {
+        PieceVerifier {
             peer,
             index,
             ch,
@@ -210,7 +210,7 @@ mod tests {
         let verifier_cancel = cancel.clone();
         let verifier_task = tokio::spawn(async move {
             let index = indexer.index().await.expect("index");
-            let verifier = Verifier::new(peer, &index, server_ch);
+            let verifier = PieceVerifier::new(peer, &index, server_ch);
             verifier.run(verifier_cancel).await
         });
 
@@ -274,7 +274,7 @@ mod tests {
         let verifier_cancel = cancel.clone();
         let verifier_task = tokio::spawn(async move {
             let index = indexer.index().await.expect("index");
-            let verifier = Verifier::new(peer, &index, server_ch);
+            let verifier = PieceVerifier::new(peer, &index, server_ch);
             verifier.run(verifier_cancel).await
         });
 
@@ -387,7 +387,7 @@ mod tests {
         let verifier_cancel = cancel.clone();
         let verifier_task = tokio::spawn(async move {
             let index = indexer.index().await.expect("index");
-            let verifier = Verifier::new(peer, &index, server_ch);
+            let verifier = PieceVerifier::new(peer, &index, server_ch);
             verifier.run(verifier_cancel).await
         });
 

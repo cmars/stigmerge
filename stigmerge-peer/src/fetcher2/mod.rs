@@ -1,2 +1,2 @@
 pub mod types;
-pub mod verifier;
+pub mod piece_verifier;
