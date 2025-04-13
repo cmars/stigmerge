@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use sha2::{Digest as _, Sha256};
 use stigmerge_fileindex::Index;
-use tokio::select;
+use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
@@ -115,6 +116,7 @@ impl Response {
 pub(super) struct ShareResolver<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
+    target_tx: broadcast::Sender<Target>,
 }
 
 impl<P: Peer> Service for ShareResolver<P> {
@@ -180,6 +182,7 @@ impl<P: Peer> Service for ShareResolver<P> {
                 let mut peer_index_digest = Sha256::new();
                 peer_index_digest.update(index.encode().map_err(Error::other)?);
                 if peer_index_digest.finalize().as_slice() == want_index_digest {
+                self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {warn!("no target subscribers: {}", e); 0});
                     Response::Index {
                         key: key.clone(),
                         header,
@@ -195,6 +198,7 @@ impl<P: Peer> Service for ShareResolver<P> {
                 prior_target,
             } => {
                 let (target, header) = self.peer.reresolve_route(key, *prior_target).await?;
+                self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {warn!("no target subscribers: {}", e); 0});
                 Response::Header {
                     key: key.clone(),
                     header,
@@ -209,10 +213,20 @@ impl<P: Peer> Service for ShareResolver<P> {
     }
 }
 
+const TARGET_BROADCAST_CAPACITY: usize = 16;
+
 impl<P: Peer> ShareResolver<P> {
     /// Create a new share_resolver service.
     pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
-        Self { peer, ch }
+        Self {
+            peer,
+            ch,
+            target_tx: broadcast::channel(TARGET_BROADCAST_CAPACITY).0,
+        }
+    }
+
+    pub fn subscribe_target(&self) -> broadcast::Receiver<Target> {
+        self.target_tx.subscribe()
     }
 }
 
