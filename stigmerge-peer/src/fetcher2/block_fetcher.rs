@@ -214,7 +214,7 @@ mod tests {
         // Set up BlockFetcher
         let mut peer = StubPeer::new();
         // Mock the block data that StubPeer will return
-        peer.request_block_result = Arc::new(Mutex::new(|| Ok(vec![BLOCK_DATA; BLOCK_SIZE_BYTES])));
+        peer.request_block_result = Arc::new(Mutex::new(move |_, _, _| Ok(vec![BLOCK_DATA; BLOCK_SIZE_BYTES])));
 
         let (mut client_ch, server_ch) = pipe(16);
         let (target_tx, target_rx) = broadcast::channel(16);
@@ -293,7 +293,7 @@ mod tests {
         // Set up BlockFetcher with error-returning stub
         let mut peer = StubPeer::new();
         // Mock the block request to return an error
-        peer.request_block_result = Arc::new(Mutex::new(|| -> Result<Vec<u8>> {
+        peer.request_block_result = Arc::new(Mutex::new(move |_, _, _| -> Result<Vec<u8>> {
             Err(Error::msg("mock block fetch error"))
         }));
 

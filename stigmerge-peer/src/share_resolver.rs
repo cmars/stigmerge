@@ -182,7 +182,10 @@ impl<P: Peer> Service for ShareResolver<P> {
                 let mut peer_index_digest = Sha256::new();
                 peer_index_digest.update(index.encode().map_err(Error::other)?);
                 if peer_index_digest.finalize().as_slice() == want_index_digest {
-                self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {warn!("no target subscribers: {}", e); 0});
+                    self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
+                        warn!("no target subscribers: {}", e);
+                        0
+                    });
                     Response::Index {
                         key: key.clone(),
                         header,
@@ -198,7 +201,10 @@ impl<P: Peer> Service for ShareResolver<P> {
                 prior_target,
             } => {
                 let (target, header) = self.peer.reresolve_route(key, *prior_target).await?;
-                self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {warn!("no target subscribers: {}", e); 0});
+                self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
+                    warn!("no target subscribers: {}", e);
+                    0
+                });
                 Response::Header {
                     key: key.clone(),
                     header,
@@ -233,6 +239,7 @@ impl<P: Peer> ShareResolver<P> {
 #[cfg(test)]
 mod tests {
     use std::{
+        path::Path,
         str::FromStr,
         sync::{Arc, Mutex},
     };
@@ -241,7 +248,7 @@ mod tests {
     use stigmerge_fileindex::Indexer;
     use tokio::spawn;
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{CryptoKey, Target, TypedKey};
+    use veilid_core::{CryptoKey, Target, TimestampDuration, TypedKey, ValueSubkeyRangeSet};
 
     use crate::chan_rpc::pipe;
     use crate::{
@@ -264,7 +271,7 @@ mod tests {
 
         let mut peer = StubPeer::new();
         let mock_index = index.clone();
-        peer.resolve_result = Arc::new(Mutex::new(move || {
+        peer.resolve_result = Arc::new(Mutex::new(move |_key: &TypedKey, _root: &Path| {
             let index_internal = mock_index.clone();
             let index_bytes = index_internal.encode().expect("encode index");
             Ok((
@@ -277,8 +284,10 @@ mod tests {
                 index_internal,
             ))
         }));
-        peer.watch_result = Arc::new(Mutex::new(move || Ok(())));
-        peer.cancel_watch_result = Arc::new(Mutex::new(move || {}));
+        peer.watch_result = Arc::new(Mutex::new(
+            move |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| Ok(()),
+        ));
+        peer.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedKey| {}));
 
         let (mut share_client, share_server) = pipe(32);
         let svc = ShareResolver::new(peer, share_server);
@@ -354,19 +363,23 @@ mod tests {
         let mock_index = index.clone();
         let mock_peer_map_key = fake_peer_map_key.clone();
         let mock_have_map_key = fake_have_map_key.clone();
-        peer.reresolve_route_result = Arc::new(Mutex::new(move || {
-            let index_internal = mock_index.clone();
-            let index_bytes = index_internal.encode().expect("encode index");
-            let header = Header::from_index(
-                &index_internal,
-                index_bytes.as_slice(),
-                &[0xde, 0xad, 0xbe, 0xef],
-            )
-            .with_peer_map(PeerMapRef::new(mock_peer_map_key, 1u16))
-            .with_have_map(HaveMapRef::new(mock_have_map_key, 1u16));
-            Ok((Target::PrivateRoute(CryptoKey::new([0u8; 32])), header))
-        }));
-        peer.watch_result = Arc::new(Mutex::new(move || Ok(())));
+        peer.reresolve_route_result = Arc::new(Mutex::new(
+            move |_key: &TypedKey, _prior_route: Option<Target>| {
+                let index_internal = mock_index.clone();
+                let index_bytes = index_internal.encode().expect("encode index");
+                let header = Header::from_index(
+                    &index_internal,
+                    index_bytes.as_slice(),
+                    &[0xde, 0xad, 0xbe, 0xef],
+                )
+                .with_peer_map(PeerMapRef::new(mock_peer_map_key, 1u16))
+                .with_have_map(HaveMapRef::new(mock_have_map_key, 1u16));
+                Ok((Target::PrivateRoute(CryptoKey::new([0u8; 32])), header))
+            },
+        ));
+        peer.watch_result = Arc::new(Mutex::new(
+            move |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| Ok(()),
+        ));
 
         let (mut share_client, share_server) = pipe(32);
         let svc = ShareResolver::new(peer, share_server);
