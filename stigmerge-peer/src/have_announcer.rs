@@ -30,6 +30,7 @@ pub(super) struct HaveAnnouncer<P: Peer> {
     key: TypedKey,
     ch: ChanServer<Request, Response>,
     pieces_map: Arc<RwLock<PieceMap>>,
+    announce_interval: Duration,
 }
 
 impl<P: Peer> Service for HaveAnnouncer<P> {
@@ -38,7 +39,7 @@ impl<P: Peer> Service for HaveAnnouncer<P> {
 
     async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let mut changed = false;
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(self.announce_interval);
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -80,7 +81,7 @@ impl<P: Peer> Service for HaveAnnouncer<P> {
                 Ok(())
             }
         })
-}
+    }
 }
 
 impl<P: Peer> HaveAnnouncer<P> {
@@ -91,6 +92,7 @@ impl<P: Peer> HaveAnnouncer<P> {
             key,
             ch,
             pieces_map: Arc::new(RwLock::new(PieceMap::new())),
+            announce_interval: Duration::from_secs(15),
         }
     }
 }
