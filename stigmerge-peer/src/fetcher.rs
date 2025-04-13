@@ -561,7 +561,7 @@ impl PieceState {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{path::Path, sync::{Arc, Mutex}};
 
     use stigmerge_fileindex::Indexer;
     use veilid_core::{TimestampDuration, VeilidStateAttachment, VeilidUpdate};
@@ -585,7 +585,7 @@ mod tests {
         let mut stub_peer = StubPeer::new();
         let update_tx = stub_peer.update_tx.clone();
         stub_peer.reset_result = Arc::new(Mutex::new(move || Ok(())));
-        stub_peer.resolve_result = Arc::new(Mutex::new(move || {
+        stub_peer.resolve_result = Arc::new(Mutex::new(move |_key: &TypedKey, _path: &Path| {
             let index_internal = index.clone();
             let route_key =
                 TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").unwrap();
@@ -600,7 +600,7 @@ mod tests {
                 index_internal,
             ))
         }));
-        stub_peer.request_block_result = Arc::new(Mutex::new(|| Ok(vec![0xa5u8; 32768])));
+        stub_peer.request_block_result = Arc::new(Mutex::new(move |_, _, _| Ok(vec![0xa5u8; 32768])));
         let rp = Observable::new(stub_peer);
 
         // Simulate getting connected to network, normally track_node_state
