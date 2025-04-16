@@ -13,7 +13,7 @@ use super::types::PieceState;
 use crate::Result;
 use crate::{
     chan_rpc::{ChanServer, Service},
-    Error, Peer,
+    Error,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,10 +38,6 @@ impl Request {
 
     fn piece_index(&self) -> usize {
         self.piece_state().piece_index
-    }
-
-    fn is_complete(&self) -> bool {
-        self.piece_state().is_complete()
     }
 }
 
@@ -71,15 +67,14 @@ impl Response {
     }
 }
 
-pub(super) struct PieceVerifier<'a, P: Peer> {
-    peer: P,
+pub struct PieceVerifier<'a> {
     index: &'a Index,
     ch: ChanServer<Request, Response>,
     piece_states: HashMap<(usize, usize), PieceState>,
     verified_pieces: usize,
 }
 
-impl<'a, P: Peer> Service for PieceVerifier<'a, P> {
+impl<'a> Service for PieceVerifier<'a> {
     type Request = Request;
     type Response = Response;
 
@@ -145,10 +140,9 @@ impl<'a, P: Peer> Service for PieceVerifier<'a, P> {
     }
 }
 
-impl<'a, P: Peer> PieceVerifier<'a, P> {
-    pub fn new(peer: P, index: &'a Index, ch: ChanServer<Request, Response>) -> PieceVerifier<'a, P> {
+impl<'a> PieceVerifier<'a> {
+    pub fn new(index: &'a Index, ch: ChanServer<Request, Response>) -> PieceVerifier<'a> {
         PieceVerifier {
-            peer,
             index,
             ch,
             piece_states: HashMap::new(),
@@ -184,10 +178,7 @@ mod tests {
     use stigmerge_fileindex::Indexer;
     use tokio_util::sync::CancellationToken;
 
-    use crate::{
-        chan_rpc::pipe,
-        tests::{temp_file, StubPeer},
-    };
+    use crate::{chan_rpc::pipe, tests::temp_file};
 
     use super::*;
 
@@ -204,13 +195,12 @@ mod tests {
             .expect("indexer");
 
         // Set up verifier
-        let peer = StubPeer::new();
         let (mut client_ch, server_ch) = pipe(16);
         let cancel = CancellationToken::new();
         let verifier_cancel = cancel.clone();
         let verifier_task = tokio::spawn(async move {
             let index = indexer.index().await.expect("index");
-            let verifier = PieceVerifier::new(peer, &index, server_ch);
+            let verifier = PieceVerifier::new(&index, server_ch);
             verifier.run(verifier_cancel).await
         });
 
@@ -268,13 +258,12 @@ mod tests {
             .expect("indexer");
 
         // Set up verifier
-        let peer = StubPeer::new();
         let (mut client_ch, server_ch) = pipe(16);
         let cancel = CancellationToken::new();
         let verifier_cancel = cancel.clone();
         let verifier_task = tokio::spawn(async move {
             let index = indexer.index().await.expect("index");
-            let verifier = PieceVerifier::new(peer, &index, server_ch);
+            let verifier = PieceVerifier::new(&index, server_ch);
             verifier.run(verifier_cancel).await
         });
 
@@ -381,20 +370,20 @@ mod tests {
             .expect("indexer");
 
         // Set up verifier
-        let peer = StubPeer::new();
         let (mut client_ch, server_ch) = pipe(16);
         let cancel = CancellationToken::new();
         let verifier_cancel = cancel.clone();
         let verifier_task = tokio::spawn(async move {
             let index = indexer.index().await.expect("index");
-            let verifier = PieceVerifier::new(peer, &index, server_ch);
+            let verifier = PieceVerifier::new(&index, server_ch);
             verifier.run(verifier_cancel).await
         });
 
         for piece_index in 0..NUM_PIECES {
             // Building up to piece validation
             for block_index in 0..PIECE_SIZE_BLOCKS - 1 {
-                let piece_state = PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
+                let piece_state =
+                    PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
                 let req = Request::Piece(piece_state);
                 client_ch.tx.send(req).await.expect("send request");
                 let resp = client_ch.rx.recv().await.expect("receive response");
@@ -408,18 +397,19 @@ mod tests {
             }
 
             // Verify first complete piece
-            let piece_state = PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
+            let piece_state =
+                PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
             let req = Request::Piece(piece_state);
             client_ch.tx.send(req).await.expect("send request");
             let resp = client_ch.rx.recv().await.expect("receive response");
             assert_eq!(
                 resp,
-            Response::ValidPiece {
-                file_index: 0,
-                piece_index,
-                index_complete: piece_index == NUM_PIECES - 1
-            }
-        );
+                Response::ValidPiece {
+                    file_index: 0,
+                    piece_index,
+                    index_complete: piece_index == NUM_PIECES - 1
+                }
+            );
         }
 
         // shut down verifier

@@ -32,14 +32,20 @@ impl Request {
 
 #[derive(Debug)]
 pub enum Response {
-    Fetched { block: FileBlockFetch },
-    FetchFailed { block: FileBlockFetch, error: Error },
+    Fetched {
+        block: FileBlockFetch,
+        length: usize,
+    },
+    FetchFailed {
+        block: FileBlockFetch,
+        error: Error,
+    },
 }
 
 impl Response {
     fn block(&self) -> FileBlockFetch {
         match self {
-            Response::Fetched { block } => block.to_owned(),
+            Response::Fetched { block, .. } => block.to_owned(),
             Response::FetchFailed { block, .. } => block.to_owned(),
         }
     }
@@ -104,6 +110,7 @@ impl<'a, P: Peer + Send> Service for BlockFetcher<'a, P> {
                     match res {
                         None => return Ok(()),
                         Some(req) => {
+                            // TODO: perform this in a background task
                             let resp = self.handle(&req).await?;
                             self.ch.tx.send(resp).await.map_err(Error::other)?;
                         }
@@ -129,8 +136,9 @@ impl<'a, P: Peer + Send> Service for BlockFetcher<'a, P> {
 
                 // Attempt to fetch the block
                 match self.fetch_block(block, *flush).await {
-                    Ok(_) => Ok(Response::Fetched {
+                    Ok(length) => Ok(Response::Fetched {
                         block: block.clone(),
+                        length,
                     }),
                     Err(e) => {
                         warn!("Failed to fetch block: {}", e);
@@ -146,7 +154,7 @@ impl<'a, P: Peer + Send> Service for BlockFetcher<'a, P> {
 }
 
 impl<'a, P: Peer> BlockFetcher<'a, P> {
-    async fn fetch_block(&mut self, block: &FileBlockFetch, flush: bool) -> Result<()> {
+    async fn fetch_block(&mut self, block: &FileBlockFetch, flush: bool) -> Result<usize> {
         // Request block from peer with retry logic
         let result = self
             .peer
@@ -176,7 +184,7 @@ impl<'a, P: Peer> BlockFetcher<'a, P> {
         if flush {
             fh.flush().await?;
         }
-        Ok(())
+        Ok(block_end)
     }
 }
 
@@ -214,7 +222,9 @@ mod tests {
         // Set up BlockFetcher
         let mut peer = StubPeer::new();
         // Mock the block data that StubPeer will return
-        peer.request_block_result = Arc::new(Mutex::new(move |_, _, _| Ok(vec![BLOCK_DATA; BLOCK_SIZE_BYTES])));
+        peer.request_block_result = Arc::new(Mutex::new(move |_, _, _| {
+            Ok(vec![BLOCK_DATA; BLOCK_SIZE_BYTES])
+        }));
 
         let (mut client_ch, server_ch) = pipe(16);
         let (target_tx, target_rx) = broadcast::channel(16);
@@ -252,11 +262,22 @@ mod tests {
         // Verify response
         let resp = client_ch.rx.recv().await.expect("receive response");
         assert!(
-            matches!(resp, Response::Fetched { block: _ }),
+            matches!(
+                resp,
+                Response::Fetched {
+                    block: _,
+                    length: _
+                }
+            ),
             "expected fetched response, got {:?}",
             resp
         );
         assert_eq!(resp.block(), block);
+        if let Response::Fetched { length, .. } = resp {
+            assert_eq!(length, BLOCK_SIZE_BYTES);
+        } else {
+            assert!(false, "expected fetched response, got {:?}", resp);
+        }
 
         // Verify the file was recreated with correct content
         let mut recreated_file = File::open(tf_path).await.expect("open recreated file");
@@ -307,7 +328,8 @@ mod tests {
 
         // Start BlockFetcher
         let fetcher_task = tokio::spawn(async move {
-            let fetcher = BlockFetcher::new(peer, server_ch, &fetcher_index, fetcher_root, target_rx);
+            let fetcher =
+                BlockFetcher::new(peer, server_ch, &fetcher_index, fetcher_root, target_rx);
             fetcher.run(fetcher_cancel).await
         });
 
@@ -332,9 +354,15 @@ mod tests {
         // Verify we get a FetchFailed response with our error
         let resp = client_ch.rx.recv().await.expect("receive response");
         match resp {
-            Response::FetchFailed { block: failed_block, error } => {
+            Response::FetchFailed {
+                block: failed_block,
+                error,
+            } => {
                 assert_eq!(failed_block, block);
-                assert_eq!(error.to_string(), "unexpected fault: mock block fetch error");
+                assert_eq!(
+                    error.to_string(),
+                    "unexpected fault: mock block fetch error"
+                );
             }
             _ => panic!("expected FetchFailed response, got {:?}", resp),
         }
