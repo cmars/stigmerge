@@ -11,7 +11,7 @@ use crate::{
     Error, Peer, Result,
 };
 
-pub(super) enum Request {
+pub enum Request {
     /// Resolve the peer information stored at the given peer map key. This will
     /// result in a response containing the peer info, or a not available
     /// indicator.
@@ -37,7 +37,7 @@ impl Request {
     }
 }
 
-pub(super) enum Response {
+pub enum Response {
     NotAvailable {
         key: TypedKey,
         err: Error,
@@ -56,7 +56,7 @@ pub(super) enum Response {
 
 /// The peer_resolver service handles requests for remote peer maps, which
 /// indicate which other peers a remote peer knows about.
-pub(super) struct PeerResolver<P: Peer> {
+pub struct PeerResolver<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
     peer_maps: HashMap<TypedKey, Arc<RwLock<HashMap<TypedKey, PeerInfo>>>>,
@@ -153,12 +153,11 @@ where
     P: Peer,
 {
     /// Create a new peer_resolver service.
-    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+    pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
         Self {
             peer,
             ch,
             peer_maps: HashMap::new(),
         }
     }
-
 }

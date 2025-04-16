@@ -195,7 +195,8 @@ mod tests {
 
     use tokio::time::sleep;
     use veilid_core::{
-        OperationId, TimestampDuration, TypedKey, VeilidAppCall, VeilidRouteChange, VeilidStateAttachment, VeilidUpdate
+        OperationId, TimestampDuration, TypedKey, VeilidAppCall, VeilidRouteChange,
+        VeilidStateAttachment, VeilidUpdate,
     };
 
     use crate::{
@@ -238,18 +239,21 @@ mod tests {
                 Header::from_index(&announce_index, &index_bytes, &[0xde, 0xad, 0xbe, 0xef]),
             ))
         }));
-        stub_peer.reannounce_route_result = Arc::new(Mutex::new(move |_key: &TypedKey, _target: Option<Target>, _index: &Index, _header: &Header| {
-            let index_bytes = reannounce_index.encode().expect("encode index");
-            (*(reannounce_calls_internal.lock().unwrap())) += 1;
-            Ok((
-                Target::PrivateRoute(key_internal.value.clone()),
-                Header::from_index(&reannounce_index, &index_bytes, &[0xde, 0xad, 0xbe, 0xef]),
-            ))
-        }));
-        stub_peer.reply_block_contents_result = Arc::new(Mutex::new(move |_id: OperationId, _contents: &[u8]| {
-            (*(reply_calls_internal.lock().unwrap())) += 1;
-            Ok(())
-        }));
+        stub_peer.reannounce_route_result = Arc::new(Mutex::new(
+            move |_key: &TypedKey, _target: Option<Target>, _index: &Index, _header: &Header| {
+                let index_bytes = reannounce_index.encode().expect("encode index");
+                (*(reannounce_calls_internal.lock().unwrap())) += 1;
+                Ok((
+                    Target::PrivateRoute(key_internal.value.clone()),
+                    Header::from_index(&reannounce_index, &index_bytes, &[0xde, 0xad, 0xbe, 0xef]),
+                ))
+            },
+        ));
+        stub_peer.reply_block_contents_result =
+            Arc::new(Mutex::new(move |_id: OperationId, _contents: &[u8]| {
+                (*(reply_calls_internal.lock().unwrap())) += 1;
+                Ok(())
+            }));
         let rp = Observable::new(stub_peer);
 
         // Simulate getting connected to network, normally track_node_state

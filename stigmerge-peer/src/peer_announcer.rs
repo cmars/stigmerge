@@ -3,7 +3,11 @@ use std::collections::HashMap;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 
-use crate::{chan_rpc::{ChanServer, Service}, peer::TypedKey, Error, Peer, Result};
+use crate::{
+    chan_rpc::{ChanServer, Service},
+    peer::TypedKey,
+    Error, Peer, Result,
+};
 
 /// Peer-map announcer request messages.
 pub(super) enum Request {

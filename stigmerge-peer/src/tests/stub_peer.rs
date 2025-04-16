@@ -17,11 +17,21 @@ pub struct StubPeer {
     pub shutdown_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub announce_result:
         Arc<Mutex<dyn Fn(&Index) -> Result<(TypedKey, Target, Header)> + Send + 'static>>,
-    pub reannounce_route_result: Arc<Mutex<dyn Fn(&TypedKey, Option<Target>, &Index, &Header) -> Result<(Target, Header)> + Send + 'static>>,
-    pub resolve_result: Arc<Mutex<dyn Fn(&TypedKey, &Path) -> Result<(Target, Header, Index)> + Send + 'static>>,
-    pub reresolve_route_result: Arc<Mutex<dyn Fn(&TypedKey, Option<Target>) -> Result<(Target, Header)> + Send + 'static>>,
-    pub request_block_result: Arc<Mutex<dyn Fn(Target, usize, usize) -> Result<Vec<u8>> + Send + 'static>>,
-    pub reply_block_contents_result: Arc<Mutex<dyn Fn(OperationId, &[u8]) -> Result<()> + Send + 'static>>,
+    pub reannounce_route_result: Arc<
+        Mutex<
+            dyn Fn(&TypedKey, Option<Target>, &Index, &Header) -> Result<(Target, Header)>
+                + Send
+                + 'static,
+        >,
+    >,
+    pub resolve_result:
+        Arc<Mutex<dyn Fn(&TypedKey, &Path) -> Result<(Target, Header, Index)> + Send + 'static>>,
+    pub reresolve_route_result:
+        Arc<Mutex<dyn Fn(&TypedKey, Option<Target>) -> Result<(Target, Header)> + Send + 'static>>,
+    pub request_block_result:
+        Arc<Mutex<dyn Fn(Target, usize, usize) -> Result<Vec<u8>> + Send + 'static>>,
+    pub reply_block_contents_result:
+        Arc<Mutex<dyn Fn(OperationId, &[u8]) -> Result<()> + Send + 'static>>,
     pub watch_result: Arc<
         Mutex<
             dyn Fn(TypedKey, ValueSubkeyRangeSet, TimestampDuration) -> Result<()> + Send + 'static,
@@ -50,19 +60,32 @@ impl StubPeer {
             announce_result: Arc::new(Mutex::new(|_index: &Index| {
                 panic!("unexpected call to announce")
             })),
-            reannounce_route_result: Arc::new(Mutex::new(|_key: &TypedKey, _prior_route: Option<Target>, _index: &Index, _header: &Header| {
-                panic!("unexpected call to reannounce_route")
+            reannounce_route_result: Arc::new(Mutex::new(
+                |_key: &TypedKey,
+                 _prior_route: Option<Target>,
+                 _index: &Index,
+                 _header: &Header| {
+                    panic!("unexpected call to reannounce_route")
+                },
+            )),
+            resolve_result: Arc::new(Mutex::new(|_key: &TypedKey, _root: &Path| {
+                panic!("unexpected call to resolve")
             })),
-            resolve_result: Arc::new(Mutex::new(|_key: &TypedKey, _root: &Path| panic!("unexpected call to resolve"))),
-            reresolve_route_result: Arc::new(Mutex::new(|_key: &TypedKey, _prior_route: Option<Target>| {
-                panic!("unexpected call to reresolve_route")
-            })),
-            request_block_result: Arc::new(Mutex::new(|_target: Target, _piece: usize, _block: usize| {
-                panic!("unexpected call to request_block")
-            })),
-            reply_block_contents_result: Arc::new(Mutex::new(|_call_id: OperationId, _contents: &[u8]| {
-                panic!("unexpected call to reply_block_contents")
-            })),
+            reresolve_route_result: Arc::new(Mutex::new(
+                |_key: &TypedKey, _prior_route: Option<Target>| {
+                    panic!("unexpected call to reresolve_route")
+                },
+            )),
+            request_block_result: Arc::new(Mutex::new(
+                |_target: Target, _piece: usize, _block: usize| {
+                    panic!("unexpected call to request_block")
+                },
+            )),
+            reply_block_contents_result: Arc::new(Mutex::new(
+                |_call_id: OperationId, _contents: &[u8]| {
+                    panic!("unexpected call to reply_block_contents")
+                },
+            )),
             watch_result: Arc::new(Mutex::new(
                 |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| {
                     panic!("unexpected call to watch")
@@ -146,11 +169,7 @@ impl Peer for StubPeer {
         (*(self.request_block_result.lock().unwrap()))(target, piece, block)
     }
 
-    async fn reply_block_contents(
-        &mut self,
-        call_id: OperationId,
-        contents: &[u8],
-    ) -> Result<()> {
+    async fn reply_block_contents(&mut self, call_id: OperationId, contents: &[u8]) -> Result<()> {
         (*(self.reply_block_contents_result.lock().unwrap()))(call_id, contents)
     }
 

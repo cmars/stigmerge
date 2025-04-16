@@ -4,7 +4,12 @@ use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
-use crate::{chan_rpc::{ChanServer, Service}, peer::TypedKey, piece_map::PieceMap, Error, Peer, Result};
+use crate::{
+    chan_rpc::{ChanServer, Service},
+    peer::TypedKey,
+    piece_map::PieceMap,
+    Error, Peer, Result,
+};
 
 /// Have-map resolver request messages.
 pub(super) enum Request {
