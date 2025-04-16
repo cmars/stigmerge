@@ -11,7 +11,7 @@ use crate::{
 };
 
 /// Have-map announcer request messages.
-pub(super) enum Request {
+pub enum Request {
     /// Announce that this peer has a given piece.
     Set { piece_index: u32 },
 
@@ -30,7 +30,7 @@ pub type Response = Result<()>;
 /// reference key, as an uncompressed bitmap of contiguous bits, indexed by
 /// piece index: a set bit (1) indicating the peer has the piece, a clear bit
 /// (0) indicating the peer does not have the piece.
-pub(super) struct HaveAnnouncer<P: Peer> {
+pub struct HaveAnnouncer<P: Peer> {
     peer: P,
     key: TypedKey,
     ch: ChanServer<Request, Response>,
@@ -91,7 +91,7 @@ impl<P: Peer> Service for HaveAnnouncer<P> {
 
 impl<P: Peer> HaveAnnouncer<P> {
     /// Create a new have_announcer service.
-    pub(super) fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
+    pub fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
         Self {
             peer,
             key,
