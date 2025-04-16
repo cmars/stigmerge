@@ -96,12 +96,20 @@ impl Fetcher {
                     res = index_progress.changed() => {
                         res.map_err(Error::other)?;
                         let progress = index_progress.borrow_and_update();
-                        status_tx.send(Status::IndexProgress{position: progress.position, length: progress.length}).unwrap_or_else(|_|{ warn!("no status subscribers"); 0});
+                        status_tx.send(
+                            Status::IndexProgress{
+                                position: progress.position,
+                                length: progress.length,
+                            }).unwrap_or_else(|_|{ warn!("no status subscribers"); 0});
                     }
                     res = digest_progress.changed() => {
                         res.map_err(Error::other)?;
                         let progress = digest_progress.borrow_and_update();
-                        status_tx.send(Status::DigestProgress{position: progress.position, length: progress.length}).unwrap_or_else(|_|{ warn!("no status subscribers"); 0});
+                        status_tx.send(
+                            Status::DigestProgress{
+                                position: progress.position,
+                                length: progress.length,
+                            }).unwrap_or_else(|_|{ warn!("no status subscribers"); 0});
                     }
                 }
             }
