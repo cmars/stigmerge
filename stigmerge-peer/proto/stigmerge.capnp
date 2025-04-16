@@ -124,10 +124,22 @@ struct BlockRequest @0x9523dee608a48b54 {
   #
   # The block number uses optional extended fields, which provides for:
   # - Smaller message size for typical smaller payloads that use default piece size.
-  # - Backwards compatibility with distrans that had a fixed piece size of 1MiB.
+  # - Backwards compatibility with earlier versions that had a fixed piece size of 1MiB.
 
   piece @0 :UInt32;
   block @1 :UInt8;
   blockExt1 @2 :UInt8 = 0;   # Overflow of block number, if it doesn't fit in UInt8.
   blockExt2 @3 :UInt16 = 0;  # Overflow of block number, if it doesn't fit in UInt16.
+}
+
+struct AnnouncePeer @0x9fc1f4852147f84a {
+  # Announce a peer
+  #
+  # The key is the main share DHT key hosted by the calling peer.
+  # The receiving peer will add the caller's key to its peer map,
+  # if the caller's index looks valid.
+  #
+  # This makes each peer a potential rendezvous point for other peers.
+
+  key @0 :TypedKey;     # Peer's main DHT key for this share.
 }
