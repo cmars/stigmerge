@@ -1,6 +1,6 @@
+use crate::Result;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use crate::Result;
 
 /// Common interface for RPC services that handle requests and responses over channels.
 pub trait Service {
@@ -15,7 +15,6 @@ pub trait Service {
     /// Handle a request message and produce a response.
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response>;
 }
-
 
 pub struct ChanClient<Request, Response> {
     pub tx: mpsc::Sender<Request>,

@@ -78,7 +78,10 @@ impl Decoder for PeerInfo {
 mod tests {
     use veilid_core::CRYPTO_KIND_VLD0;
 
-    use crate::{peer::TypedKey, proto::{Decoder, Encoder, PeerInfo}};
+    use crate::{
+        peer::TypedKey,
+        proto::{Decoder, Encoder, PeerInfo},
+    };
 
     #[test]
     fn test_encode_decode() {
