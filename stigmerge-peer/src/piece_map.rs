@@ -1,7 +1,5 @@
 use std::iter::repeat;
 
-use stigmerge_fileindex::{Index, PIECE_SIZE_BYTES};
-
 #[derive(Clone, Debug)]
 pub struct PieceMap(Vec<u8>);
 
@@ -18,6 +16,10 @@ impl PieceMap {
         } else {
             self.0[byte_index] & 1 << bit_offset_in_byte != 0
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().any(|b| *b != 0u8)
     }
 
     pub fn set(&mut self, bit_index: u32) {
