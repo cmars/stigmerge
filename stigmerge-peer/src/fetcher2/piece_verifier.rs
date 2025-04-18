@@ -6,8 +6,10 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
+    sync::broadcast,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use super::types::PieceState;
 use crate::Result;
@@ -72,6 +74,7 @@ pub struct PieceVerifier<'a> {
     ch: ChanServer<Request, Response>,
     piece_states: HashMap<(usize, usize), PieceState>,
     verified_pieces: usize,
+    verified_tx: broadcast::Sender<PieceState>,
 }
 
 impl<'a> Service for PieceVerifier<'a> {
@@ -119,6 +122,10 @@ impl<'a> Service for PieceVerifier<'a> {
                 .await?
             {
                 self.verified_pieces += 1;
+                self.verified_tx.send(req.piece_state()).unwrap_or_else(|e| {
+                    warn!("no target subscribers: {}", e);
+                    0
+                });
                 Ok(Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
@@ -140,14 +147,22 @@ impl<'a> Service for PieceVerifier<'a> {
     }
 }
 
+const VERIFIED_BROADCAST_CAPACITY: usize = 16;
+
 impl<'a> PieceVerifier<'a> {
     pub fn new(index: &'a Index, ch: ChanServer<Request, Response>) -> PieceVerifier<'a> {
+        let (verified_tx, _) = broadcast::channel(VERIFIED_BROADCAST_CAPACITY);
         PieceVerifier {
             index,
             ch,
             piece_states: HashMap::new(),
             verified_pieces: 0,
+            verified_tx,
         }
+    }
+
+    pub fn subscribe_verified(&self) -> broadcast::Receiver<PieceState> {
+        self.verified_tx.subscribe()
     }
 
     async fn verify_piece(&self, file_index: usize, piece_index: usize) -> Result<bool> {
@@ -155,6 +170,8 @@ impl<'a> PieceVerifier<'a> {
         let mut fh = File::open(self.index.root().join(file_spec.path())).await?;
         let piece_spec = &self.index.payload().pieces()[piece_index];
 
+        // FIXME: this is wrong for multi-file!
+        // We'd need to seek relative to the file's payload slice
         fh.seek(SeekFrom::Start((piece_index * PIECE_SIZE_BYTES) as u64))
             .await?;
         let mut buf = [0u8; BLOCK_SIZE_BYTES];

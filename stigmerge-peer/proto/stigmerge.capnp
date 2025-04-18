@@ -13,6 +13,7 @@ struct Key256 @0xc47d373523c82dc3 {
 
 using Sha256 = Key256;
 using PublicKey = Key256;
+using Token = Key256;
 using CryptoKind = UInt32;
 
 struct TypedKey @0xbc2b1857f1395815 {
@@ -119,6 +120,15 @@ struct PeerInfo @0xe0ab528e3440a34a {
 # app_call protocol structures
 ###################################################################
 
+struct Request @0xc449e193a68b1a0b {
+  # App call request types
+
+  union {
+    blockRequest @0 :BlockRequest;
+    announcePeer @1 :AnnouncePeerRequest;
+  }
+}
+
 struct BlockRequest @0x9523dee608a48b54 {
   # Request a block
   #
@@ -132,7 +142,7 @@ struct BlockRequest @0x9523dee608a48b54 {
   blockExt2 @3 :UInt16 = 0;  # Overflow of block number, if it doesn't fit in UInt16.
 }
 
-struct AnnouncePeer @0x9fc1f4852147f84a {
+struct AnnouncePeerRequest @0x9fc1f4852147f84a {
   # Announce a peer
   #
   # The key is the main share DHT key hosted by the calling peer.

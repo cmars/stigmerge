@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Share resolver request messages.
-pub(super) enum Request {
+pub enum Request {
     /// Resolve the Index located at a remote share key, with a known index
     /// digest, for merging into a local file share.
     ///
@@ -60,7 +60,7 @@ impl Request {
 }
 
 /// Share resolver response messages.
-pub(super) enum Response {
+pub enum Response {
     /// Remote share is not available at the given key, with error cause.
     NotAvailable { key: TypedKey, err: Error },
 
@@ -113,7 +113,7 @@ impl Response {
 /// The share_resolver service maintains private routes to the route posted at remote
 /// peers' share keys. It also validates that the remote peer is sharing
 /// the expected index by verifying its content digest.
-pub(super) struct ShareResolver<P: Peer> {
+pub struct ShareResolver<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
     target_tx: broadcast::Sender<Target>,
@@ -223,7 +223,7 @@ const TARGET_BROADCAST_CAPACITY: usize = 16;
 
 impl<P: Peer> ShareResolver<P> {
     /// Create a new share_resolver service.
-    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+    pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
         Self {
             peer,
             ch,

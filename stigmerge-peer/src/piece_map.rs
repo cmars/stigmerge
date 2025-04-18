@@ -1,5 +1,7 @@
 use std::iter::repeat;
 
+use stigmerge_fileindex::{Index, PIECE_SIZE_BYTES};
+
 #[derive(Clone, Debug)]
 pub struct PieceMap(Vec<u8>);
 

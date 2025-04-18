@@ -11,6 +11,7 @@ use crate::fetcher2::types::{FileBlockFetch, PieceState};
 use crate::{chan_rpc::ChanClient, have_announcer, proto::Header};
 use crate::{Error, Result};
 
+use super::types::ShareInfo;
 use super::{block_fetcher, piece_verifier};
 
 pub struct Fetcher {
@@ -23,12 +24,6 @@ pub struct Fetcher {
 
     state: State,
     status_tx: broadcast::Sender<Status>,
-}
-
-pub struct ShareInfo {
-    pub header: Header,
-    pub want_index: Index,
-    pub root: PathBuf,
 }
 
 pub struct Clients {
