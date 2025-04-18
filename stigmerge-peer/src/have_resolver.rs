@@ -12,7 +12,8 @@ use crate::{
 };
 
 /// Have-map resolver request messages.
-pub(super) enum Request {
+#[derive(Debug)]
+pub enum Request {
     /// Resolve the have-map key to get a map of which pieces the remote peer has.
     Resolve { key: TypedKey, subkeys: u16 },
 
@@ -35,7 +36,8 @@ impl Request {
 }
 
 /// Have-map resolver response messages.
-pub(super) enum Response {
+#[derive(Debug)]
+pub enum Response {
     /// Have-map is not available at the given key, with error cause.
     NotAvailable { key: TypedKey, err: Error },
 
@@ -58,7 +60,7 @@ pub(super) enum Response {
 ///
 /// This service operates on the have-map reference keys indicated in the main
 /// share DHT header (subkey 0) as haveMapRef.
-pub(super) struct HaveResolver<P: Peer> {
+pub struct HaveResolver<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
     pieces_maps: HashMap<TypedKey, Arc<RwLock<PieceMap>>>,
@@ -175,5 +177,314 @@ where
         let value = Arc::new(RwLock::new(PieceMap::new()));
         self.pieces_maps.insert(key.to_owned(), value.to_owned());
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        str::FromStr,
+        sync::{Arc, Mutex, RwLock},
+    };
+
+    use tokio_util::sync::CancellationToken;
+    use veilid_core::{
+        CryptoKey, TimestampDuration, ValueData, ValueSubkeyRangeSet, VeilidUpdate,
+        VeilidValueChange, CRYPTO_KEY_LENGTH,
+    };
+
+    use crate::{
+        chan_rpc::{pipe, Service},
+        error::Result,
+        have_resolver::{HaveResolver, Request, Response},
+        peer::TypedKey,
+        piece_map::PieceMap,
+        tests::StubPeer,
+    };
+
+    #[tokio::test]
+    async fn test_have_resolver_resolves_have_map() -> Result<()> {
+        // Create a stub peer with a recording merge_have_map_result
+        let mut stub_peer = StubPeer::new();
+        let recorded_key = Arc::new(RwLock::new(None));
+        let recorded_subkeys = Arc::new(RwLock::new(None));
+
+        let recorded_key_clone = recorded_key.clone();
+        let recorded_subkeys_clone = recorded_subkeys.clone();
+
+        stub_peer.merge_have_map_result = Arc::new(Mutex::new(
+            move |key: TypedKey, subkeys: ValueSubkeyRangeSet, _have_map: &mut PieceMap| {
+                *recorded_key_clone.write().unwrap() = Some(key);
+                *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
+                Ok(())
+            },
+        ));
+
+        // Create a test key and channel
+        let test_key =
+            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let (mut client_ch, server_ch) = pipe(16);
+
+        // Create have resolver
+        let have_resolver = HaveResolver::new(stub_peer.clone(), server_ch);
+
+        // Create cancellation token
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+
+        // Spawn the have resolver service
+        let handle = tokio::spawn(async move {
+            have_resolver.run(cancel_task).await
+        });
+
+        // Send a Resolve request
+        let req = Request::Resolve {
+            key: test_key.clone(),
+            subkeys: 100,
+        };
+        client_ch.tx.send(req).await.unwrap();
+
+        // Verify the response
+        match client_ch.rx.recv().await.expect("recv") {
+            Response::Resolve { key, pieces } => {
+                assert_eq!(key, test_key);
+                let _pieces = pieces.read().await; // Just verify we can access it
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+
+        // Verify the merge was called correctly
+        let recorded_key = recorded_key.read().unwrap();
+        let recorded_subkeys = recorded_subkeys.read().unwrap();
+
+        assert!(recorded_key.is_some(), "Key was not recorded");
+        assert!(recorded_subkeys.is_some(), "Subkeys were not recorded");
+        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
+        assert_eq!(
+            recorded_subkeys.as_ref().unwrap(),
+            &ValueSubkeyRangeSet::single_range(0, 99)
+        );
+
+        // Clean up
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_have_resolver_watches_have_map() -> Result<()> {
+        // Create a stub peer with a recording watch_result
+        let mut stub_peer = StubPeer::new();
+        let recorded_key = Arc::new(RwLock::new(None));
+        let recorded_subkeys = Arc::new(RwLock::new(None));
+        let recorded_duration = Arc::new(RwLock::new(None));
+
+        let recorded_key_clone = recorded_key.clone();
+        let recorded_subkeys_clone = recorded_subkeys.clone();
+        let recorded_duration_clone = recorded_duration.clone();
+
+        stub_peer.watch_result = Arc::new(Mutex::new(
+            move |key: TypedKey, subkeys: ValueSubkeyRangeSet, duration: TimestampDuration| {
+                *recorded_key_clone.write().unwrap() = Some(key);
+                *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
+                *recorded_duration_clone.write().unwrap() = Some(duration);
+                Ok(())
+            },
+        ));
+
+        // Create a test key and channel
+        let test_key =
+            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let (mut client_ch, server_ch) = pipe(16);
+
+        // Create have resolver
+        let have_resolver = HaveResolver::new(stub_peer.clone(), server_ch);
+
+        // Create cancellation token
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+
+        // Spawn the have resolver service
+        let handle = tokio::spawn(async move {
+            have_resolver.run(cancel_task).await
+        });
+
+        // Send a Watch request
+        let req = Request::Watch {
+            key: test_key.clone(),
+        };
+        client_ch.tx.send(req).await.unwrap();
+
+        // Verify the response
+        match client_ch.rx.recv().await.expect("recv") {
+            Response::Watching { key } => {
+                assert_eq!(key, test_key);
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+
+        // Verify the watch was called correctly
+        let recorded_key = recorded_key.read().unwrap();
+        let recorded_subkeys = recorded_subkeys.read().unwrap();
+        let recorded_duration = recorded_duration.read().unwrap();
+
+        assert!(recorded_key.is_some(), "Key was not recorded");
+        assert!(recorded_subkeys.is_some(), "Subkeys were not recorded");
+        assert!(recorded_duration.is_some(), "Duration was not recorded");
+        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
+        assert_eq!(
+            recorded_subkeys.as_ref().unwrap(),
+            &ValueSubkeyRangeSet::full()
+        );
+        assert_eq!(
+            recorded_duration.as_ref().unwrap(),
+            &TimestampDuration::new_secs(60)
+        );
+
+        // Clean up
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_have_resolver_cancels_watch() -> Result<()> {
+        // Create a stub peer with a recording cancel_watch_result
+        let mut stub_peer = StubPeer::new();
+        let recorded_key = Arc::new(RwLock::new(None));
+
+        let recorded_key_clone = recorded_key.clone();
+        stub_peer.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+            *recorded_key_clone.write().unwrap() = Some(key.clone());
+        }));
+
+        // Create a test key and channel
+        let test_key =
+            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let (mut client_ch, server_ch) = pipe(16);
+
+        // Create have resolver
+        let have_resolver = HaveResolver::new(stub_peer.clone(), server_ch);
+
+        // Create cancellation token
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+
+        // Spawn the have resolver service
+        let handle = tokio::spawn(async move {
+            have_resolver.run(cancel_task).await
+        });
+
+        // Send a CancelWatch request
+        let req = Request::CancelWatch {
+            key: test_key.clone(),
+        };
+        client_ch.tx.send(req).await.unwrap();
+
+        // Verify the response
+        match client_ch.rx.recv().await.expect("recv") {
+            Response::WatchCancelled { key } => {
+                assert_eq!(key, test_key);
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+
+        // Verify the cancel was called correctly
+        let recorded_key = recorded_key.read().unwrap();
+        assert!(recorded_key.is_some(), "Key was not recorded");
+        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
+
+        // Clean up
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_have_resolver_handles_value_changes() -> Result<()> {
+        // Create a stub peer with a recording merge_have_map_result
+        let mut stub_peer = StubPeer::new();
+        let recorded_key = Arc::new(RwLock::new(None));
+        let recorded_subkeys = Arc::new(RwLock::new(None));
+
+        let recorded_key_clone = recorded_key.clone();
+        let recorded_subkeys_clone = recorded_subkeys.clone();
+
+        stub_peer.merge_have_map_result = Arc::new(Mutex::new(
+            move |key: TypedKey, subkeys: ValueSubkeyRangeSet, _have_map: &mut PieceMap| {
+                *recorded_key_clone.write().unwrap() = Some(key);
+                *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
+                Ok(())
+            },
+        ));
+
+        // Create a test key and channel
+        let test_key =
+            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let (mut client_ch, server_ch) = pipe(16);
+
+        // Create have resolver
+        let update_tx = stub_peer.update_tx.clone();
+        let have_resolver = HaveResolver::new(stub_peer, server_ch);
+
+        // Create cancellation token
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+
+        // Spawn the have resolver service
+        let handle = tokio::spawn(async move { have_resolver.run(cancel_task).await });
+
+        // Send a request and receive a response, to make sure the task is
+        // running. That's important: if we're not in the run loop, the update
+        // send may fail to broadcast.
+        client_ch.tx.send(Request::Resolve {
+            key: test_key.clone(),
+            subkeys: 100,
+        }).await.unwrap();
+        assert!(matches!(client_ch.rx.recv().await, Some(_)));
+
+        // Simulate a value change notification
+        let change = VeilidValueChange {
+            key: test_key.clone(),
+            subkeys: ValueSubkeyRangeSet::single_range(0, 99),
+            value: Some(
+                ValueData::new(b"foo".to_vec(), CryptoKey::new([0xbe; CRYPTO_KEY_LENGTH]))
+                    .expect("new value data"),
+            ),
+            count: 1,
+        };
+        update_tx
+            .send(veilid_core::VeilidUpdate::ValueChange(Box::new(change)))
+            .expect("send value change");
+
+        // Verify the response
+        match client_ch.rx.recv().await.expect("recv") {
+            Response::Resolve { key, pieces } => {
+                assert_eq!(key, test_key);
+                let _pieces = pieces.read().await; // Just verify we can access it
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
+
+        // Verify the merge was called correctly
+        let recorded_key = recorded_key.read().unwrap();
+        let recorded_subkeys = recorded_subkeys.read().unwrap();
+
+        assert!(recorded_key.is_some(), "Key was not recorded");
+        assert!(recorded_subkeys.is_some(), "Subkeys were not recorded");
+        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
+        assert_eq!(
+            recorded_subkeys.as_ref().unwrap(),
+            &ValueSubkeyRangeSet::single_range(0, 99)
+        );
+
+        // Clean up
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+
+        Ok(())
     }
 }
