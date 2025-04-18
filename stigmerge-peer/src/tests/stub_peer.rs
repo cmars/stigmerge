@@ -13,6 +13,7 @@ use crate::{proto::Header, Peer};
 #[derive(Clone)]
 pub struct StubPeer {
     pub update_tx: Sender<VeilidUpdate>,
+    
     pub reset_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub shutdown_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub announce_result:
