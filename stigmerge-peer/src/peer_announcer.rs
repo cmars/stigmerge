@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Peer-map announcer request messages.
-pub(super) enum Request {
+pub enum Request {
     /// Announce a known remote peer in good standing.
     Announce { key: TypedKey },
 
@@ -30,12 +30,13 @@ pub type Response = Result<()>;
 ///
 /// Each remote peer is encoded to a separate subkey. Redacted peers are
 /// marked with empty contents.
-pub(super) struct PeerAnnouncer<P: Peer> {
+pub struct PeerAnnouncer<P: Peer> {
     peer: P,
     key: TypedKey,
     ch: ChanServer<Request, Response>,
     peer_indexes: HashMap<TypedKey, usize>,
     peers: Vec<Option<TypedKey>>,
+    max_peers: u16,
 }
 
 impl<P: Peer> Service for PeerAnnouncer<P> {
@@ -43,6 +44,7 @@ impl<P: Peer> Service for PeerAnnouncer<P> {
     type Response = Response;
 
     async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+        self.peer.reset_peers(self.key.to_owned(), self.max_peers).await?;
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -83,9 +85,8 @@ impl<P: Peer> Service for PeerAnnouncer<P> {
                 Ok(())
             }
             Request::Reset => {
-                let max_subkey: u16 = (self.peers.len() - 1).try_into().unwrap();
                 self.peer
-                    .reset_peers(self.key.to_owned(), max_subkey)
+                    .reset_peers(self.key.to_owned(), self.max_peers)
                     .await?;
                 self.peers.clear();
                 self.peer_indexes.clear();
@@ -94,6 +95,8 @@ impl<P: Peer> Service for PeerAnnouncer<P> {
         })
     }
 }
+
+const DEFAULT_MAX_PEERS: u16 = 32;
 
 impl<P: Peer> PeerAnnouncer<P> {
     /// Create a new peer_announcer service.
@@ -104,6 +107,7 @@ impl<P: Peer> PeerAnnouncer<P> {
             ch,
             peer_indexes: HashMap::new(),
             peers: vec![],
+            max_peers: DEFAULT_MAX_PEERS,
         }
     }
 
