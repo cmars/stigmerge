@@ -199,8 +199,8 @@ mod tests {
     use veilid_core::CryptoKey;
 
     use crate::chan_rpc::pipe;
-    use crate::fetcher2::types::FileBlockFetch;
     use crate::tests::{temp_file, StubPeer};
+    use crate::types::FileBlockFetch;
 
     use super::*;
 

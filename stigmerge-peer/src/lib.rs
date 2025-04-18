@@ -1,19 +1,22 @@
 #![recursion_limit = "256"]
 
+mod block_fetcher;
 mod chan_rpc;
 mod error;
-mod fetcher;
-mod fetcher2;
 mod have_announcer;
 mod have_resolver;
 mod peer;
 mod peer_announcer;
 mod peer_resolver;
 mod piece_map;
+mod piece_verifier;
 mod proto;
-mod seeder;
 mod share_resolver;
-mod tracker;
+mod types;
+
+pub mod fetcher;
+pub mod seeder;
+
 pub mod veilid_config;
 
 use std::sync::Arc;
@@ -22,10 +25,7 @@ use tokio::sync::broadcast::{self, Receiver, Sender};
 use veilid_core::{RoutingContext, VeilidUpdate};
 
 pub use error::{Error, NodeState, Result, Unexpected};
-pub use fetcher::Fetcher;
-pub(crate) use peer::{reset_backoff, retry_backoff};
 pub use peer::{reset_with_backoff, Observable, Peer, PeerState, Veilid};
-pub use seeder::Seeder;
 
 #[cfg(test)]
 pub mod tests;
