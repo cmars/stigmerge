@@ -1,4 +1,15 @@
-use stigmerge_fileindex::{BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS, PIECE_SIZE_BYTES};
+use std::path::PathBuf;
+
+use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS, PIECE_SIZE_BYTES};
+
+use crate::proto::Header;
+
+#[derive(Debug)]
+pub struct ShareInfo {
+    pub header: Header,
+    pub want_index: Index,
+    pub root: PathBuf,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileBlockFetch {

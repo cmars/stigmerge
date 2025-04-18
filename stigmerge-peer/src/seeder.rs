@@ -15,7 +15,7 @@ use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
 
 use crate::{
     peer::with_backoff_reset,
-    proto::{BlockRequest, Decoder, Header},
+    proto::{BlockRequest, Decoder, Header, Request},
     reset_with_backoff,
 };
 use crate::{
@@ -130,7 +130,10 @@ impl<P: Peer> Seeder<P> {
         match update {
             &VeilidUpdate::AppCall(ref app_call) => {
                 let block_request =
-                    BlockRequest::decode(app_call.message()).map_err(Error::remote_protocol)?;
+                    match Request::decode(app_call.message()).map_err(Error::remote_protocol)? {
+                        Request::BlockRequest(req) => req,
+                        _ => return Ok(()),
+                    };
                 // TODO: mmap would enable more concurrency here, but might not be as cross-platform?
                 fh.seek(std::io::SeekFrom::Start(
                     // TODO: wire this through Index to support multifile
@@ -200,7 +203,7 @@ mod tests {
     };
 
     use crate::{
-        proto::{BlockRequest, Encoder},
+        proto::{BlockRequest, Encoder, Request},
         tests::{temp_file, StubPeer},
         Observable,
     };
@@ -275,7 +278,7 @@ mod tests {
         let update_tx_internal = update_tx.clone();
         tokio::spawn(async move {
             // Simulate a request for a block
-            let request_bytes = BlockRequest { piece: 0, block: 0 }
+            let request_bytes = Request::BlockRequest(BlockRequest { piece: 0, block: 0 })
                 .encode()
                 .expect("encode block request");
             sleep(Duration::from_millis(50)).await;

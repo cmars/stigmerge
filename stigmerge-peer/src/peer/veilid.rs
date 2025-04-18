@@ -17,7 +17,7 @@ use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
 
 use crate::{
     piece_map::PieceMap,
-    proto::{BlockRequest, Decoder, Encoder, Header, PeerInfo},
+    proto::{BlockRequest, Decoder, Encoder, Header, PeerInfo, Request},
     Error, Result,
 };
 
@@ -273,10 +273,10 @@ impl Peer for Veilid {
         block: usize,
     ) -> Result<Vec<u8>> {
         let rc = self.routing_context.read().await;
-        let block_req = BlockRequest {
+        let block_req = Request::BlockRequest(BlockRequest {
             piece: piece as u32,
             block: block as u8,
-        };
+        });
         let block_req_bytes = block_req.encode().map_err(Error::internal_protocol)?;
         let resp_bytes = rc.app_call(target, block_req_bytes).await?;
         Ok(resp_bytes)
