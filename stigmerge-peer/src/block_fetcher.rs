@@ -17,6 +17,69 @@ use crate::chan_rpc::{ChanServer, Service};
 use crate::peer::Peer;
 use crate::{Error, Result};
 
+pub struct BlockFetcher<'a, P: Peer> {
+    peer: P,
+    ch: ChanServer<Request, Response>,
+    want_index: &'a Index,
+    root: PathBuf,
+    target_update_rx: broadcast::Receiver<Target>,
+    target: Option<Target>,
+    files: HashMap<usize, File>,
+}
+
+impl<'a, P: Peer> BlockFetcher<'a, P> {
+    pub fn new(
+        peer: P,
+        ch: ChanServer<Request, Response>,
+        want_index: &'a Index,
+        root: PathBuf,
+        target_update_rx: broadcast::Receiver<Target>,
+    ) -> Self {
+        Self {
+            peer,
+            ch,
+            want_index,
+            root,
+            target_update_rx,
+            target: None,
+            files: HashMap::new(),
+        }
+    }
+
+    async fn fetch_block(&mut self, block: &FileBlockFetch, flush: bool) -> Result<usize> {
+        // Request block from peer with retry logic
+        let result = self
+            .peer
+            .request_block(self.target.unwrap(), block.piece_index, block.block_index)
+            .await?;
+        // Write the block to the file
+        let fh = match self.files.get_mut(&block.file_index) {
+            Some(fh) => fh,
+            None => {
+                let path = self
+                    .root
+                    .join(self.want_index.files()[block.file_index].path());
+                let fh = File::options()
+                    .write(true)
+                    .truncate(false)
+                    .create(true)
+                    .open(path)
+                    .await?;
+                self.files.insert(block.file_index, fh);
+                self.files.get_mut(&block.file_index).unwrap()
+            }
+        };
+        fh.seek(SeekFrom::Start(block.block_offset() as u64))
+            .await?;
+        let block_end = min(result.len(), BLOCK_SIZE_BYTES);
+        fh.write_all(&result[0..block_end]).await?;
+        if flush {
+            fh.flush().await?;
+        }
+        Ok(block_end)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
     Fetch { block: FileBlockFetch, flush: bool },
@@ -47,36 +110,6 @@ impl Response {
         match self {
             Response::Fetched { block, .. } => block.to_owned(),
             Response::FetchFailed { block, .. } => block.to_owned(),
-        }
-    }
-}
-
-pub struct BlockFetcher<'a, P: Peer> {
-    peer: P,
-    ch: ChanServer<Request, Response>,
-    want_index: &'a Index,
-    root: PathBuf,
-    target_update_rx: broadcast::Receiver<Target>,
-    target: Option<Target>,
-    files: HashMap<usize, File>,
-}
-
-impl<'a, P: Peer> BlockFetcher<'a, P> {
-    pub fn new(
-        peer: P,
-        ch: ChanServer<Request, Response>,
-        want_index: &'a Index,
-        root: PathBuf,
-        target_update_rx: broadcast::Receiver<Target>,
-    ) -> Self {
-        Self {
-            peer,
-            ch,
-            want_index,
-            root,
-            target_update_rx,
-            target: None,
-            files: HashMap::new(),
         }
     }
 }
@@ -150,41 +183,6 @@ impl<'a, P: Peer + Send> Service for BlockFetcher<'a, P> {
                 }
             }
         }
-    }
-}
-
-impl<'a, P: Peer> BlockFetcher<'a, P> {
-    async fn fetch_block(&mut self, block: &FileBlockFetch, flush: bool) -> Result<usize> {
-        // Request block from peer with retry logic
-        let result = self
-            .peer
-            .request_block(self.target.unwrap(), block.piece_index, block.block_index)
-            .await?;
-        // Write the block to the file
-        let fh = match self.files.get_mut(&block.file_index) {
-            Some(fh) => fh,
-            None => {
-                let path = self
-                    .root
-                    .join(self.want_index.files()[block.file_index].path());
-                let fh = File::options()
-                    .write(true)
-                    .truncate(false)
-                    .create(true)
-                    .open(path)
-                    .await?;
-                self.files.insert(block.file_index, fh);
-                self.files.get_mut(&block.file_index).unwrap()
-            }
-        };
-        fh.seek(SeekFrom::Start(block.block_offset() as u64))
-            .await?;
-        let block_end = min(result.len(), BLOCK_SIZE_BYTES);
-        fh.write_all(&result[0..block_end]).await?;
-        if flush {
-            fh.flush().await?;
-        }
-        Ok(block_end)
     }
 }
 

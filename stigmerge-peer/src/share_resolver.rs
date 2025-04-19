@@ -14,6 +14,16 @@ use crate::{
     Error, Peer, Result,
 };
 
+/// The share_resolver service maintains private routes to the route posted at remote
+/// peers' share keys. It also validates that the remote peer is sharing
+/// the expected index by verifying its content digest.
+pub struct ShareResolver<P: Peer> {
+    peer: P,
+    ch: ChanServer<Request, Response>,
+    target_tx: broadcast::Sender<Target>,
+    updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
+}
+
 /// Share resolver request messages.
 pub enum Request {
     /// Resolve the Index located at a remote share key, with a known index
@@ -108,16 +118,6 @@ impl Response {
             Response::Remove { key: _ } => None,
         }
     }
-}
-
-/// The share_resolver service maintains private routes to the route posted at remote
-/// peers' share keys. It also validates that the remote peer is sharing
-/// the expected index by verifying its content digest.
-pub struct ShareResolver<P: Peer> {
-    peer: P,
-    ch: ChanServer<Request, Response>,
-    target_tx: broadcast::Sender<Target>,
-    updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
 }
 
 impl<P: Peer> Service for ShareResolver<P> {

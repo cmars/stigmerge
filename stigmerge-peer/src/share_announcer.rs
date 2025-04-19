@@ -10,19 +10,6 @@ use crate::{
     Error, Peer, Result,
 };
 
-pub enum Request {
-    Announce,
-}
-
-pub enum Response {
-    NotAvailable,
-    Announce {
-        key: TypedKey,
-        target: Target,
-        header: Header,
-    },
-}
-
 pub struct ShareAnnouncer<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
@@ -35,6 +22,49 @@ struct ShareAnnounce {
     key: TypedKey,
     target: Target,
     header: Header,
+}
+
+impl<P: Peer> ShareAnnouncer<P> {
+    pub fn new(peer: P, ch: ChanServer<Request, Response>, index: Index) -> ShareAnnouncer<P> {
+        ShareAnnouncer {
+            peer,
+            ch,
+            index,
+            share: None,
+        }
+    }
+
+    async fn announce(&mut self) -> Result<()> {
+        let (key, target, header) = self.peer.announce_index(&self.index).await?;
+        self.share = Some(ShareAnnounce {
+            key: key.clone(),
+            target: target.clone(),
+            header: header.clone(),
+        });
+        self.ch
+            .tx
+            .send(Response::Announce {
+                key,
+                target,
+                header,
+            })
+            .await
+            .map_err(Error::other)?;
+        Ok(())
+    }
+}
+
+pub enum Request {
+    Announce,
+}
+
+pub enum Response {
+    NotAvailable,
+    Announce {
+        key: TypedKey,
+        target: Target,
+        header: Header,
+    },
 }
 
 impl<P: Peer> Service for ShareAnnouncer<P> {
@@ -89,36 +119,6 @@ impl<P: Peer> Service for ShareAnnouncer<P> {
             }
         }
         Ok(Response::NotAvailable)
-    }
-}
-
-impl<P: Peer> ShareAnnouncer<P> {
-    pub fn new(peer: P, ch: ChanServer<Request, Response>, index: Index) -> ShareAnnouncer<P> {
-        ShareAnnouncer {
-            peer,
-            ch,
-            index,
-            share: None,
-        }
-    }
-
-    async fn announce(&mut self) -> Result<()> {
-        let (key, target, header) = self.peer.announce_index(&self.index).await?;
-        self.share = Some(ShareAnnounce {
-            key: key.clone(),
-            target: target.clone(),
-            header: header.clone(),
-        });
-        self.ch
-            .tx
-            .send(Response::Announce {
-                key,
-                target,
-                header,
-            })
-            .await
-            .map_err(Error::other)?;
-        Ok(())
     }
 }
 

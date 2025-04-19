@@ -11,6 +11,25 @@ use crate::{
     Error, Peer, Result,
 };
 
+/// The peer_resolver service handles requests for remote peer maps, which
+/// indicate which other peers a remote peer knows about.
+pub struct PeerResolver<P: Peer> {
+    peer: P,
+    ch: ChanServer<Request, Response>,
+    updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
+}
+
+impl<P> PeerResolver<P>
+where
+    P: Peer,
+{
+    /// Create a new peer_resolver service.
+    pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+        let updates = peer.subscribe_veilid_update();
+        Self { peer, ch, updates }
+    }
+}
+
 #[derive(Debug)]
 pub enum Request {
     /// Resolve the peer information stored at the given peer map key. This will
@@ -54,14 +73,6 @@ pub enum Response {
     WatchCancelled {
         key: TypedKey,
     },
-}
-
-/// The peer_resolver service handles requests for remote peer maps, which
-/// indicate which other peers a remote peer knows about.
-pub struct PeerResolver<P: Peer> {
-    peer: P,
-    ch: ChanServer<Request, Response>,
-    updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
 }
 
 impl<P: Peer> Service for PeerResolver<P> {
@@ -145,17 +156,6 @@ impl<P: Peer> Service for PeerResolver<P> {
                 }
             }
         })
-    }
-}
-
-impl<P> PeerResolver<P>
-where
-    P: Peer,
-{
-    /// Create a new peer_resolver service.
-    pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
-        let updates = peer.subscribe_veilid_update();
-        Self { peer, ch, updates }
     }
 }
 

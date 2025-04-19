@@ -10,6 +10,32 @@ use crate::{
     Error, Peer, Result,
 };
 
+/// The have-announcer service handles requests for announcing the share pieces
+/// verified by this peer. The have map is written to the DHT at a have-map
+/// reference key, as an uncompressed bitmap of contiguous bits, indexed by
+/// piece index: a set bit (1) indicating the peer has the piece, a clear bit
+/// (0) indicating the peer does not have the piece.
+pub struct HaveAnnouncer<P: Peer> {
+    peer: P,
+    key: TypedKey,
+    ch: ChanServer<Request, Response>,
+    pieces_map: Arc<RwLock<PieceMap>>,
+    announce_interval: Duration,
+}
+
+impl<P: Peer> HaveAnnouncer<P> {
+    /// Create a new have_announcer service.
+    pub fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
+        Self {
+            peer,
+            key,
+            ch,
+            pieces_map: Arc::new(RwLock::new(PieceMap::new())),
+            announce_interval: Duration::from_secs(15),
+        }
+    }
+}
+
 /// Have-map announcer request messages.
 pub enum Request {
     /// Announce that this peer has a given piece.
@@ -24,19 +50,6 @@ pub enum Request {
 
 /// Have-map announcer response message, just an acknowledgement or error.
 pub type Response = Result<()>;
-
-/// The have-announcer service handles requests for announcing the share pieces
-/// verified by this peer. The have map is written to the DHT at a have-map
-/// reference key, as an uncompressed bitmap of contiguous bits, indexed by
-/// piece index: a set bit (1) indicating the peer has the piece, a clear bit
-/// (0) indicating the peer does not have the piece.
-pub struct HaveAnnouncer<P: Peer> {
-    peer: P,
-    key: TypedKey,
-    ch: ChanServer<Request, Response>,
-    pieces_map: Arc<RwLock<PieceMap>>,
-    announce_interval: Duration,
-}
 
 impl<P: Peer> Service for HaveAnnouncer<P> {
     type Request = Request;
@@ -86,19 +99,6 @@ impl<P: Peer> Service for HaveAnnouncer<P> {
                 Ok(())
             }
         })
-    }
-}
-
-impl<P: Peer> HaveAnnouncer<P> {
-    /// Create a new have_announcer service.
-    pub fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
-        Self {
-            peer,
-            key,
-            ch,
-            pieces_map: Arc::new(RwLock::new(PieceMap::new())),
-            announce_interval: Duration::from_secs(15),
-        }
     }
 }
 

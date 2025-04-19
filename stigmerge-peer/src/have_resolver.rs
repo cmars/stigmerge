@@ -14,6 +14,47 @@ use crate::{
     Error, Peer, Result,
 };
 
+/// The have_resolver service handles requests for remote peer have-maps, which
+/// indicate what pieces of a share the peer might have.
+///
+/// This service operates on the have-map reference keys indicated in the main
+/// share DHT header (subkey 0) as haveMapRef.
+pub struct HaveResolver<P: Peer> {
+    peer: P,
+    ch: ChanServer<Request, Response>,
+    pieces_maps: HashMap<TypedKey, Arc<RwLock<PieceMap>>>,
+    updates: broadcast::Receiver<VeilidUpdate>,
+}
+
+impl<P> HaveResolver<P>
+where
+    P: Peer,
+{
+    /// Create a new have_resolver service with the given peer.
+    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+        let updates = peer.subscribe_veilid_update();
+        Self {
+            peer,
+            ch,
+            pieces_maps: HashMap::new(),
+            updates,
+        }
+    }
+
+    /// Get or create a local have-map tracking what the remote peer has.
+    ///
+    /// Updates are merged with this local copy as it's initially fetched and
+    /// then watched for updates.
+    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<PieceMap>> {
+        if let Some(value) = self.pieces_maps.get(key) {
+            return value.to_owned();
+        }
+        let value = Arc::new(RwLock::new(PieceMap::new()));
+        self.pieces_maps.insert(key.to_owned(), value.to_owned());
+        value
+    }
+}
+
 /// Have-map resolver request messages.
 #[derive(Debug)]
 pub enum Request {
@@ -56,18 +97,6 @@ pub enum Response {
 
     /// Acknowledge that the watch on the have-map at remote peer key has been cancelled.
     WatchCancelled { key: TypedKey },
-}
-
-/// The have_resolver service handles requests for remote peer have-maps, which
-/// indicate what pieces of a share the peer might have.
-///
-/// This service operates on the have-map reference keys indicated in the main
-/// share DHT header (subkey 0) as haveMapRef.
-pub struct HaveResolver<P: Peer> {
-    peer: P,
-    ch: ChanServer<Request, Response>,
-    pieces_maps: HashMap<TypedKey, Arc<RwLock<PieceMap>>>,
-    updates: broadcast::Receiver<VeilidUpdate>,
 }
 
 impl<P: Peer> Service for HaveResolver<P> {
@@ -153,35 +182,6 @@ impl<P: Peer> Service for HaveResolver<P> {
                 }
             }
         })
-    }
-}
-
-impl<P> HaveResolver<P>
-where
-    P: Peer,
-{
-    /// Create a new have_resolver service with the given peer.
-    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
-        let updates = peer.subscribe_veilid_update();
-        Self {
-            peer,
-            ch,
-            pieces_maps: HashMap::new(),
-            updates,
-        }
-    }
-
-    /// Get or create a local have-map tracking what the remote peer has.
-    ///
-    /// Updates are merged with this local copy as it's initially fetched and
-    /// then watched for updates.
-    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<PieceMap>> {
-        if let Some(value) = self.pieces_maps.get(key) {
-            return value.to_owned();
-        }
-        let value = Arc::new(RwLock::new(PieceMap::new()));
-        self.pieces_maps.insert(key.to_owned(), value.to_owned());
-        value
     }
 }
 

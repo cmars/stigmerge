@@ -18,6 +18,56 @@ use crate::{
     Error,
 };
 
+pub struct PieceVerifier<'a> {
+    index: &'a Index,
+    ch: ChanServer<Request, Response>,
+    piece_states: HashMap<(usize, usize), PieceState>,
+    verified_pieces: usize,
+    verified_tx: broadcast::Sender<PieceState>,
+}
+
+const VERIFIED_BROADCAST_CAPACITY: usize = 16;
+
+impl<'a> PieceVerifier<'a> {
+    pub fn new(index: &'a Index, ch: ChanServer<Request, Response>) -> PieceVerifier<'a> {
+        let (verified_tx, _) = broadcast::channel(VERIFIED_BROADCAST_CAPACITY);
+        PieceVerifier {
+            index,
+            ch,
+            piece_states: HashMap::new(),
+            verified_pieces: 0,
+            verified_tx,
+        }
+    }
+
+    pub fn subscribe_verified(&self) -> broadcast::Receiver<PieceState> {
+        self.verified_tx.subscribe()
+    }
+
+    async fn verify_piece(&self, file_index: usize, piece_index: usize) -> Result<bool> {
+        let file_spec = &self.index.files()[file_index];
+        let mut fh = File::open(self.index.root().join(file_spec.path())).await?;
+        let piece_spec = &self.index.payload().pieces()[piece_index];
+
+        // FIXME: this is wrong for multi-file!
+        // We'd need to seek relative to the file's payload slice
+        fh.seek(SeekFrom::Start((piece_index * PIECE_SIZE_BYTES) as u64))
+            .await?;
+        let mut buf = [0u8; BLOCK_SIZE_BYTES];
+        let mut digest = Sha256::new();
+        for _ in 0..PIECE_SIZE_BLOCKS {
+            let rd = fh.read(&mut buf[..]).await?;
+            if rd == 0 {
+                break;
+            }
+            digest.update(&buf[..rd]);
+        }
+        let expected_digest = piece_spec.digest();
+        let actual_digest: [u8; 32] = digest.finalize().into();
+        Ok(expected_digest.cmp(&actual_digest[..]) == Ordering::Equal)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
     Piece(PieceState),
@@ -67,14 +117,6 @@ impl Response {
             _ => false,
         }
     }
-}
-
-pub struct PieceVerifier<'a> {
-    index: &'a Index,
-    ch: ChanServer<Request, Response>,
-    piece_states: HashMap<(usize, usize), PieceState>,
-    verified_pieces: usize,
-    verified_tx: broadcast::Sender<PieceState>,
 }
 
 impl<'a> Service for PieceVerifier<'a> {
@@ -146,48 +188,6 @@ impl<'a> Service for PieceVerifier<'a> {
                 piece_index: req.piece_index(),
             })
         }
-    }
-}
-
-const VERIFIED_BROADCAST_CAPACITY: usize = 16;
-
-impl<'a> PieceVerifier<'a> {
-    pub fn new(index: &'a Index, ch: ChanServer<Request, Response>) -> PieceVerifier<'a> {
-        let (verified_tx, _) = broadcast::channel(VERIFIED_BROADCAST_CAPACITY);
-        PieceVerifier {
-            index,
-            ch,
-            piece_states: HashMap::new(),
-            verified_pieces: 0,
-            verified_tx,
-        }
-    }
-
-    pub fn subscribe_verified(&self) -> broadcast::Receiver<PieceState> {
-        self.verified_tx.subscribe()
-    }
-
-    async fn verify_piece(&self, file_index: usize, piece_index: usize) -> Result<bool> {
-        let file_spec = &self.index.files()[file_index];
-        let mut fh = File::open(self.index.root().join(file_spec.path())).await?;
-        let piece_spec = &self.index.payload().pieces()[piece_index];
-
-        // FIXME: this is wrong for multi-file!
-        // We'd need to seek relative to the file's payload slice
-        fh.seek(SeekFrom::Start((piece_index * PIECE_SIZE_BYTES) as u64))
-            .await?;
-        let mut buf = [0u8; BLOCK_SIZE_BYTES];
-        let mut digest = Sha256::new();
-        for _ in 0..PIECE_SIZE_BLOCKS {
-            let rd = fh.read(&mut buf[..]).await?;
-            if rd == 0 {
-                break;
-            }
-            digest.update(&buf[..rd]);
-        }
-        let expected_digest = piece_spec.digest();
-        let actual_digest: [u8; 32] = digest.finalize().into();
-        Ok(expected_digest.cmp(&actual_digest[..]) == Ordering::Equal)
     }
 }
 
