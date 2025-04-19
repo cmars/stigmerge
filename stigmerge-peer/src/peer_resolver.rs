@@ -155,11 +155,7 @@ where
     /// Create a new peer_resolver service.
     pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
         let updates = peer.subscribe_veilid_update();
-        Self {
-            peer,
-            ch,
-            updates,
-        }
+        Self { peer, ch, updates }
     }
 }
 

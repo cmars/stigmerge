@@ -1,6 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use tokio::{select, sync::{broadcast, RwLock}};
+use tokio::{
+    select,
+    sync::{broadcast, RwLock},
+};
 use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
