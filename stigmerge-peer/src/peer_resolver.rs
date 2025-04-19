@@ -1,6 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
-use tokio::{select, sync::RwLock};
+use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
@@ -61,7 +61,7 @@ pub enum Response {
 pub struct PeerResolver<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
-    peer_maps: HashMap<TypedKey, Arc<RwLock<HashMap<TypedKey, PeerInfo>>>>,
+    updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
 }
 
 impl<P: Peer> Service for PeerResolver<P> {
@@ -70,7 +70,6 @@ impl<P: Peer> Service for PeerResolver<P> {
 
     /// Run the service until cancelled.
     async fn run(mut self, cancel: CancellationToken) -> Result<()> {
-        let mut updates = self.peer.subscribe_veilid_update();
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -88,7 +87,7 @@ impl<P: Peer> Service for PeerResolver<P> {
                         Err(err) => self.ch.tx.send(Response::NotAvailable{key: req.key().clone(), err}).await.map_err(Error::other)?,
                     }
                 }
-                res = updates.recv() => {
+                res = self.updates.recv() => {
                     let update = res.map_err(Error::other)?;
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
@@ -155,10 +154,11 @@ where
 {
     /// Create a new peer_resolver service.
     pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+        let updates = peer.subscribe_veilid_update();
         Self {
             peer,
             ch,
-            peer_maps: HashMap::new(),
+            updates,
         }
     }
 }

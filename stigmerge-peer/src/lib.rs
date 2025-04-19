@@ -11,6 +11,7 @@ mod peer_resolver;
 mod piece_map;
 mod piece_verifier;
 mod proto;
+mod share_announcer;
 mod share_resolver;
 mod types;
 

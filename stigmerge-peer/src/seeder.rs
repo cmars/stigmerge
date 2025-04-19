@@ -58,7 +58,7 @@ impl<P: Peer> Seeder<P> {
         let mut piece_map = PieceMap::new();
         let mut buf = [0u8; BLOCK_SIZE_BYTES];
         loop {
-            select! {
+            select! { biased;
                 _ = cancel.cancelled() => {
                     return Ok(());
                 }
@@ -161,7 +161,7 @@ mod tests {
         let index = create_test_index(&tf_path).await;
 
         // Set up channels
-        let (verified_tx, verified_rx) = broadcast::channel(16);
+        let (verified_tx, _) = broadcast::channel(16);
 
         // Create a stub peer with mock reply_block_contents
         let mut peer = StubPeer::new();
@@ -195,7 +195,7 @@ mod tests {
 
         // Create clients
         let clients = Clients {
-            verified_rx,
+            verified_rx: verified_tx.subscribe(),
             update_rx: peer.update_tx.subscribe(),
         };
 
@@ -210,24 +210,16 @@ mod tests {
         });
 
         // First, send a verified piece notification with confirmation it's applied
-        // That's necessary because tokio::select! future selection is non-deterministic
-        let mut confirmed_verify = false;
-        for _ in 0..10 {
-            let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
-            verified_tx.send(piece_state).expect("send verified piece");
+        let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
+        verified_tx.send(piece_state).expect("send verified piece");
 
-            client_ch
-                .tx
-                .send(Request::HaveMap)
-                .await
-                .expect("requested havemap");
-            let Response::HaveMap(have_map) = client_ch.rx.recv().await.expect("havemap response");
-            if !have_map.is_empty() {
-                confirmed_verify = true;
-                break;
-            }
-        }
-        assert!(confirmed_verify, "confirm verified block");
+        client_ch
+            .tx
+            .send(Request::HaveMap)
+            .await
+            .expect("requested havemap");
+        let Response::HaveMap(have_map) = client_ch.rx.recv().await.expect("havemap response");
+        assert!(!have_map.is_empty(), "confirm verified block");
 
         // Send a block request for the verified piece
         let block_req = BlockRequest { piece: 0, block: 0 };
