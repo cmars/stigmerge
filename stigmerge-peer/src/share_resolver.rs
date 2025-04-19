@@ -117,6 +117,7 @@ pub struct ShareResolver<P: Peer> {
     peer: P,
     ch: ChanServer<Request, Response>,
     target_tx: broadcast::Sender<Target>,
+    updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
 }
 
 impl<P: Peer> Service for ShareResolver<P> {
@@ -124,7 +125,6 @@ impl<P: Peer> Service for ShareResolver<P> {
     type Response = Response;
 
     async fn run(mut self, cancel: CancellationToken) -> Result<()> {
-        let mut updates = self.peer.subscribe_veilid_update();
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -151,7 +151,7 @@ impl<P: Peer> Service for ShareResolver<P> {
                         }
                     }
                 }
-                res = updates.recv() => {
+                res = self.updates.recv() => {
                     let update = res.map_err(Error::other)?;
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
@@ -224,10 +224,12 @@ const TARGET_BROADCAST_CAPACITY: usize = 16;
 impl<P: Peer> ShareResolver<P> {
     /// Create a new share_resolver service.
     pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+        let updates = peer.subscribe_veilid_update();
         Self {
             peer,
             ch,
             target_tx: broadcast::channel(TARGET_BROADCAST_CAPACITY).0,
+            updates,
         }
     }
 
