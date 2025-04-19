@@ -16,8 +16,9 @@ use veilid_core::{
 use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
 
 use crate::{
+    peer_announcer::DEFAULT_MAX_PEERS,
     piece_map::PieceMap,
-    proto::{BlockRequest, Decoder, Encoder, Header, PeerInfo, Request},
+    proto::{BlockRequest, Decoder, Encoder, HaveMapRef, Header, PeerInfo, PeerMapRef, Request},
     Error, Result,
 };
 
@@ -52,7 +53,7 @@ impl Veilid {
     ) -> Result<DHTRecordDescriptor> {
         let api = rc.api();
         let ts = api.table_store()?;
-        let db = ts.open("stigmerge_payload_dht", 2).await?;
+        let db = ts.open("stigmerge_share_dht", 2).await?;
         let digest_key = header.payload_digest();
         let maybe_dht_key = db.load_json(0, digest_key.as_slice()).await?;
         let maybe_dht_owner_keypair = db.load_json(1, digest_key.as_slice()).await?;
@@ -75,6 +76,70 @@ impl Veilid {
             .await?;
         db.store_json(1, digest_key.as_slice(), &dht_owner).await?;
         Ok(dht_rec)
+    }
+
+    async fn open_or_create_have_map_record(
+        &self,
+        rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
+        header: &Header,
+        index: &Index,
+    ) -> Result<(DHTRecordDescriptor, u16)> {
+        let api = rc.api();
+        let ts = api.table_store()?;
+        let db = ts.open("stigmerge_have_map_dht", 2).await?;
+        let digest_key = header.payload_digest();
+        let o_cnt = PieceMap::subkeys(index.payload().pieces().len());
+        let maybe_dht_key = db.load_json(0, digest_key.as_slice()).await?;
+        let maybe_dht_owner_keypair = db.load_json(1, digest_key.as_slice()).await?;
+        if let (Some(dht_key), Some(dht_owner_keypair)) = (maybe_dht_key, maybe_dht_owner_keypair) {
+            return Ok((rc.open_dht_record(dht_key, dht_owner_keypair).await?, o_cnt));
+        }
+
+        let dht_rec = rc
+            .create_dht_record(DHTSchema::dflt(o_cnt)?, None, None)
+            .await?;
+        let dht_owner = KeyPair::new(
+            dht_rec.owner().to_owned(),
+            dht_rec
+                .owner_secret()
+                .ok_or(Error::msg("expected dht owner secret"))?
+                .to_owned(),
+        );
+        db.store_json(0, digest_key.as_slice(), dht_rec.key())
+            .await?;
+        db.store_json(1, digest_key.as_slice(), &dht_owner).await?;
+        Ok((dht_rec, o_cnt))
+    }
+
+    async fn open_or_create_peer_map_record(
+        &self,
+        rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
+        index: &Index,
+    ) -> Result<(DHTRecordDescriptor, u16)> {
+        let api = rc.api();
+        let ts = api.table_store()?;
+        let db = ts.open("stigmerge_peer_map_dht", 2).await?;
+        let digest_key = index.payload().digest();
+        let o_cnt = DEFAULT_MAX_PEERS;
+        let maybe_dht_key = db.load_json(0, digest_key).await?;
+        let maybe_dht_owner_keypair = db.load_json(1, digest_key).await?;
+        if let (Some(dht_key), Some(dht_owner_keypair)) = (maybe_dht_key, maybe_dht_owner_keypair) {
+            return Ok((rc.open_dht_record(dht_key, dht_owner_keypair).await?, o_cnt));
+        }
+
+        let dht_rec = rc
+            .create_dht_record(DHTSchema::dflt(o_cnt)?, None, None)
+            .await?;
+        let dht_owner = KeyPair::new(
+            dht_rec.owner().to_owned(),
+            dht_rec
+                .owner_secret()
+                .ok_or(Error::msg("expected dht owner secret"))?
+                .to_owned(),
+        );
+        db.store_json(0, digest_key, dht_rec.key()).await?;
+        db.store_json(1, digest_key, &dht_owner).await?;
+        Ok((dht_rec, o_cnt))
     }
 
     async fn write_header(
@@ -216,12 +281,29 @@ impl Peer for Veilid {
         // Serialize index to index_bytes
         let index_bytes = index.encode().map_err(Error::internal_protocol)?;
         let (announce_route, route_data) = rc.api().new_private_route().await?;
-        let header = Header::from_index(index, index_bytes.as_slice(), route_data.as_slice());
+        let mut header = Header::from_index(index, index_bytes.as_slice(), route_data.as_slice());
         trace!(header = format!("{:?}", header));
+
+        let (have_map_key, have_map_subkeys) = self
+            .open_or_create_have_map_record(&rc, &header, index)
+            .await?;
+        header = header.with_have_map(HaveMapRef::new(
+            have_map_key.key().to_owned(),
+            have_map_subkeys,
+        ));
+
+        let (peer_map_key, peer_map_subkeys) =
+            self.open_or_create_peer_map_record(&rc, index).await?;
+        header = header.with_peer_map(PeerMapRef::new(
+            peer_map_key.key().to_owned(),
+            peer_map_subkeys,
+        ));
+
         let dht_rec = self.open_or_create_dht_record(&rc, &header).await?;
         let dht_key = dht_rec.key().to_owned();
         self.write_index_bytes(&rc, &dht_key, index_bytes.as_slice())
             .await?;
+
         self.write_header(&rc, &dht_key, &header).await?;
         Ok((dht_key, Target::PrivateRoute(announce_route), header))
     }

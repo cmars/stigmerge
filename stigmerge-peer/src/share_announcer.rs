@@ -1,5 +1,6 @@
 use stigmerge_fileindex::Index;
 use tokio::select;
+use tokio_util::sync::CancellationToken;
 use veilid_core::Target;
 
 use crate::{
@@ -41,17 +42,13 @@ impl<P: Peer> Service for ShareAnnouncer<P> {
 
     type Response = Response;
 
-    async fn run(mut self, cancel: tokio_util::sync::CancellationToken) -> crate::Result<()> {
+    async fn run(mut self, cancel: CancellationToken) -> crate::Result<()> {
         loop {
             match self.share {
                 None => {
                     self.announce().await?;
                 }
-                Some(ShareAnnounce {
-                    key,
-                    target,
-                    ref header,
-                }) => {
+                Some(ShareAnnounce { .. }) => {
                     select! {
                         _ = cancel.cancelled() => {
                             return Ok(());

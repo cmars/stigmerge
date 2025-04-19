@@ -1,11 +1,27 @@
 use std::iter::repeat;
 
+use veilid_core::ValueData;
+
 #[derive(Clone, Debug)]
 pub struct PieceMap(Vec<u8>);
 
 impl PieceMap {
     pub fn new() -> PieceMap {
         Self(vec![])
+    }
+
+    pub fn subkeys(n_pieces: usize) -> u16 {
+        let cap = Self::capacity(n_pieces);
+        TryInto::<u16>::try_into(cap / ValueData::MAX_LEN).unwrap()
+            + if cap % ValueData::MAX_LEN != 0 {
+                1u16
+            } else {
+                0u16
+            }
+    }
+
+    pub fn capacity(n_pieces: usize) -> usize {
+        n_pieces / 8 + if n_pieces % 8 != 0 { 1 } else { 0 }
     }
 
     pub fn get(&self, bit_index: u32) -> bool {

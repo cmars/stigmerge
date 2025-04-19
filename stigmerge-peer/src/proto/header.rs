@@ -3,6 +3,7 @@ use capnp::{
     serialize,
 };
 use stigmerge_fileindex::Index;
+use veilid_core::ValueData;
 
 use crate::peer::TypedKey;
 
@@ -218,8 +219,8 @@ impl Header {
         Header::new(
             index.payload().digest().try_into().unwrap(),
             index.payload().length(),
-            ((index_bytes.len() / 32768)
-                + if (index_bytes.len() % 32768) > 0 {
+            ((index_bytes.len() / ValueData::MAX_LEN)
+                + if (index_bytes.len() % ValueData::MAX_LEN) > 0 {
                     1
                 } else {
                     0

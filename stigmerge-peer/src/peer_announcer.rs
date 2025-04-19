@@ -98,7 +98,7 @@ impl<P: Peer> Service for PeerAnnouncer<P> {
     }
 }
 
-const DEFAULT_MAX_PEERS: u16 = 32;
+pub const DEFAULT_MAX_PEERS: u16 = 32;
 
 impl<P: Peer> PeerAnnouncer<P> {
     /// Create a new peer_announcer service.
