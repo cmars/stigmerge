@@ -122,10 +122,12 @@ impl<'a> Service for PieceVerifier<'a> {
                 .await?
             {
                 self.verified_pieces += 1;
-                self.verified_tx.send(req.piece_state()).unwrap_or_else(|e| {
-                    warn!("no target subscribers: {}", e);
-                    0
-                });
+                self.verified_tx
+                    .send(req.piece_state())
+                    .unwrap_or_else(|e| {
+                        warn!("no target subscribers: {}", e);
+                        0
+                    });
                 Ok(Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),

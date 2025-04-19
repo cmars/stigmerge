@@ -4,6 +4,7 @@ mod peerinfo;
 mod request;
 
 #[allow(dead_code)]
+#[rustfmt::skip]
 mod stigmerge_capnp;
 
 use std::{array::TryFromSliceError, num::TryFromIntError, path::PathBuf, str::Utf8Error};

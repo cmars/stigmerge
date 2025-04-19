@@ -6,8 +6,8 @@ use tracing::warn;
 use veilid_core::Target;
 
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
-use crate::{chan_rpc::ChanClient, have_announcer};
 use crate::{block_fetcher, piece_verifier, Error, Result};
+use crate::{chan_rpc::ChanClient, have_announcer};
 
 pub struct Fetcher {
     clients: Clients,

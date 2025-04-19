@@ -233,9 +233,7 @@ mod tests {
         let cancel_task = cancel.clone();
 
         // Spawn the have resolver service
-        let handle = tokio::spawn(async move {
-            have_resolver.run(cancel_task).await
-        });
+        let handle = tokio::spawn(async move { have_resolver.run(cancel_task).await });
 
         // Send a Resolve request
         let req = Request::Resolve {
@@ -306,9 +304,7 @@ mod tests {
         let cancel_task = cancel.clone();
 
         // Spawn the have resolver service
-        let handle = tokio::spawn(async move {
-            have_resolver.run(cancel_task).await
-        });
+        let handle = tokio::spawn(async move { have_resolver.run(cancel_task).await });
 
         // Send a Watch request
         let req = Request::Watch {
@@ -373,9 +369,7 @@ mod tests {
         let cancel_task = cancel.clone();
 
         // Spawn the have resolver service
-        let handle = tokio::spawn(async move {
-            have_resolver.run(cancel_task).await
-        });
+        let handle = tokio::spawn(async move { have_resolver.run(cancel_task).await });
 
         // Send a CancelWatch request
         let req = Request::CancelWatch {
@@ -440,10 +434,14 @@ mod tests {
         // Send a request and receive a response, to make sure the task is
         // running. That's important: if we're not in the run loop, the update
         // send may fail to broadcast.
-        client_ch.tx.send(Request::Resolve {
-            key: test_key.clone(),
-            subkeys: 100,
-        }).await.unwrap();
+        client_ch
+            .tx
+            .send(Request::Resolve {
+                key: test_key.clone(),
+                subkeys: 100,
+            })
+            .await
+            .unwrap();
         assert!(matches!(client_ch.rx.recv().await, Some(_)));
 
         // Simulate a value change notification
