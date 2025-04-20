@@ -24,6 +24,26 @@ pub struct ShareResolver<P: Peer> {
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
 }
 
+const TARGET_BROADCAST_CAPACITY: usize = 16;
+
+impl<P: Peer> ShareResolver<P> {
+    /// Create a new share_resolver service.
+    pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+        let updates = peer.subscribe_veilid_update();
+        Self {
+            peer,
+            ch,
+            target_tx: broadcast::channel(TARGET_BROADCAST_CAPACITY).0,
+            updates,
+        }
+    }
+
+    pub fn subscribe_target(&self) -> broadcast::Receiver<Target> {
+        self.target_tx.subscribe()
+    }
+}
+
+
 /// Share resolver request messages.
 pub enum Request {
     /// Resolve the Index located at a remote share key, with a known index
@@ -216,25 +236,6 @@ impl<P: Peer> Service for ShareResolver<P> {
                 key: key.clone(),
             },
         })
-    }
-}
-
-const TARGET_BROADCAST_CAPACITY: usize = 16;
-
-impl<P: Peer> ShareResolver<P> {
-    /// Create a new share_resolver service.
-    pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
-        let updates = peer.subscribe_veilid_update();
-        Self {
-            peer,
-            ch,
-            target_tx: broadcast::channel(TARGET_BROADCAST_CAPACITY).0,
-            updates,
-        }
-    }
-
-    pub fn subscribe_target(&self) -> broadcast::Receiver<Target> {
-        self.target_tx.subscribe()
     }
 }
 
