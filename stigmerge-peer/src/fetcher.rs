@@ -6,11 +6,14 @@ use tracing::warn;
 use veilid_core::Target;
 
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
-use crate::{block_fetcher, piece_verifier, Error, Result};
-use crate::{chan_rpc::ChanClient, have_announcer};
+use crate::{
+    actor::{Error, Operator, Result},
+    have_announcer,
+};
+use crate::{block_fetcher, piece_verifier, Peer};
 
-pub struct Fetcher {
-    clients: Clients,
+pub struct Fetcher<P: Peer + 'static> {
+    clients: Clients<P>,
 
     want_index: Index,
     have_index: Index,
@@ -19,11 +22,17 @@ pub struct Fetcher {
     status_tx: broadcast::Sender<Status>,
 }
 
-pub struct Clients {
+pub struct Clients<P: Peer + 'static> {
     pub target_update_rx: broadcast::Receiver<Target>,
-    pub block_fetcher: ChanClient<block_fetcher::Request, block_fetcher::Response>,
-    pub piece_verifier: ChanClient<piece_verifier::Request, piece_verifier::Response>,
-    pub have_announcer: ChanClient<have_announcer::Request, have_announcer::Response>,
+    pub block_fetcher:
+        Operator<block_fetcher::BlockFetcher<P>, block_fetcher::Request, block_fetcher::Response>,
+    pub piece_verifier:
+        Operator<piece_verifier::PieceVerifier, piece_verifier::Request, piece_verifier::Response>,
+    pub have_announcer: Operator<
+        have_announcer::HaveAnnouncer<P>,
+        have_announcer::Request,
+        have_announcer::Response,
+    >,
 }
 
 pub enum State {
@@ -42,8 +51,8 @@ pub enum Status {
     Done,
 }
 
-impl Fetcher {
-    pub fn new(share: ShareInfo, clients: Clients) -> Fetcher {
+impl<P: Peer + 'static> Fetcher<P> {
+    pub fn new(share: ShareInfo, clients: Clients<P>) -> Fetcher<P> {
         Fetcher {
             clients,
             have_index: share.want_index.empty(),
@@ -80,7 +89,7 @@ impl Fetcher {
                         break;
                     }
                     res = index_progress.changed() => {
-                        res.map_err(Error::other)?;
+                        res?;
                         let progress = index_progress.borrow_and_update();
                         status_tx.send(
                             Status::IndexProgress{
@@ -89,7 +98,7 @@ impl Fetcher {
                             }).unwrap_or_else(|_|{ warn!("no status subscribers"); 0});
                     }
                     res = digest_progress.changed() => {
-                        res.map_err(Error::other)?;
+                        res?;
                         let progress = digest_progress.borrow_and_update();
                         status_tx.send(
                             Status::DigestProgress{
@@ -107,7 +116,7 @@ impl Fetcher {
 
         // Stop status updates
         status_task_cancel.cancel();
-        status_task.await.map_err(Error::other)??;
+        status_task.await??;
 
         // Ready for planning
         Ok(State::Planning)
@@ -120,9 +129,9 @@ impl Fetcher {
         for want_block in diff.want {
             select! {
                 _ = cancel.cancelled() => {
-                    return Err(Error::cancelled("plan cancelled"))
+                    return Err(Error::msg("plan cancelled"))
                 }
-                res = self.clients.block_fetcher.tx.send(block_fetcher::Request::Fetch {
+                res = self.clients.block_fetcher.send(block_fetcher::Request::Fetch {
                     block: FileBlockFetch {
                         file_index: want_block.file_index,
                         piece_index: want_block.piece_index,
@@ -131,7 +140,7 @@ impl Fetcher {
                     },
                     flush: false,
                 }) => {
-                    res.map_err(Error::other)?;
+                    res?;
                     want_length += want_block.block_length;
                 }
             }
@@ -140,16 +149,16 @@ impl Fetcher {
         for have_block in diff.have {
             select! {
                 _ = cancel.cancelled() => {
-                    return Err(Error::cancelled("plan cancelled"))
+                    return Err(Error::msg("plan cancelled"))
                 }
-                res = self.clients.piece_verifier.tx.send(piece_verifier::Request::Piece(PieceState::new(
+                res = self.clients.piece_verifier.send(piece_verifier::Request::Piece(PieceState::new(
                     have_block.file_index,
                     have_block.piece_index,
                     have_block.piece_offset,
                     self.want_index.payload().pieces()[have_block.piece_index].block_count(),
                     have_block.block_index,
                 ))) => {
-                    res.map_err(Error::other)?;
+                    res?;
                     have_length += have_block.block_length;
                 }
             }
@@ -177,9 +186,9 @@ impl Fetcher {
         loop {
             select! {
                 _ = cancel.cancelled() => {
-                    return Err(Error::cancelled("fetch cancelled"))
+                    return Ok(State::Done)
                 }
-                res = self.clients.block_fetcher.rx.recv() => {
+                res = self.clients.block_fetcher.recv() => {
                     match res {
                         // An empty fetcher channel means we've received a
                         // response for all block requests. However, some of
@@ -194,27 +203,24 @@ impl Fetcher {
                                 }).unwrap_or_else(|_| { warn!("no status subscribers"); 0 });
 
                             // Update verifier
-                            self.clients.piece_verifier.tx.send(piece_verifier::Request::Piece(PieceState::new(
+                            self.clients.piece_verifier.send(piece_verifier::Request::Piece(PieceState::new(
                                 block.file_index,
                                 block.piece_index,
                                 block.piece_offset,
                                 self.want_index.payload().pieces()[block.piece_index].block_count(),
                                 block.block_index,
-                            )))
-                            .await
-                            .map_err(Error::other)?;
+                            ))).await?;
                         }
                         Some(block_fetcher::Response::FetchFailed { block, error }) => {
                             warn!("failed to fetch block: {}", error);
-                            self.clients.block_fetcher.tx.send(
-                                block_fetcher::Request::Fetch {
-                                    block: block.clone(),
-                                    flush: false
-                                }).await.map_err(Error::other)?;
+                            self.clients.block_fetcher.send(block_fetcher::Request::Fetch {
+                                block: block.clone(),
+                                flush: false
+                            }).await?;
                         }
                     }
                 }
-                res = self.clients.piece_verifier.rx.recv() => {
+                res = self.clients.piece_verifier.recv() => {
                     match res {
                         None => continue,
                         Some(piece_verifier::Response::ValidPiece { file_index:_, piece_index, index_complete }) => {
@@ -228,10 +234,10 @@ impl Fetcher {
                                 }).unwrap_or_else(|_| { warn!("no status subscribers"); 0 });
 
                             // Update have map
-                            self.clients.have_announcer.tx.send(
+                            self.clients.have_announcer.send(
                                 have_announcer::Request::Set {
                                     piece_index: piece_index.try_into().unwrap(),
-                                }).await.map_err(Error::other)?;
+                                }).await?;
 
                             if index_complete {
                                 return Ok(State::Done);
@@ -251,7 +257,7 @@ impl Fetcher {
                             // Re-fetch all the blocks in the failed piece
                             let piece_blocks = piece_length / BLOCK_SIZE_BYTES + if piece_length % BLOCK_SIZE_BYTES > 0 { 1 } else { 0 };
                             for block_index in 0..piece_blocks  {
-                                self.clients.block_fetcher.tx.send(
+                                self.clients.block_fetcher.send(
                                     block_fetcher::Request::Fetch {
                                         block: FileBlockFetch {
                                            file_index,
@@ -260,7 +266,7 @@ impl Fetcher {
                                            block_index
                                         },
                                         flush: false,
-                                    }).await.map_err(Error::other)?;
+                                    }).await?;
                             }
                         }
                         Some(piece_verifier::Response::IncompletePiece { .. }) => {}

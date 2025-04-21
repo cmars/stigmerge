@@ -8,10 +8,10 @@ use tracing::warn;
 use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
-    chan_rpc::{ChanServer, Service},
+    actor::{self, Actor, ChanServer},
     peer::TypedKey,
     proto::{Digest, Encoder, Header},
-    Error, Peer, Result,
+    Error, Peer,
 };
 
 /// The share_resolver service maintains private routes to the route posted at remote
@@ -19,7 +19,6 @@ use crate::{
 /// the expected index by verifying its content digest.
 pub struct ShareResolver<P: Peer> {
     peer: P,
-    ch: ChanServer<Request, Response>,
     target_tx: broadcast::Sender<Target>,
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
 }
@@ -28,11 +27,10 @@ const TARGET_BROADCAST_CAPACITY: usize = 16;
 
 impl<P: Peer> ShareResolver<P> {
     /// Create a new share_resolver service.
-    pub fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+    pub fn new(peer: P) -> Self {
         let updates = peer.subscribe_veilid_update();
         Self {
             peer,
-            ch,
             target_tx: broadcast::channel(TARGET_BROADCAST_CAPACITY).0,
             updates,
         }
@@ -42,7 +40,6 @@ impl<P: Peer> ShareResolver<P> {
         self.target_tx.subscribe()
     }
 }
-
 
 /// Share resolver request messages.
 pub enum Request {
@@ -140,17 +137,22 @@ impl Response {
     }
 }
 
-impl<P: Peer> Service for ShareResolver<P> {
+impl<P: Peer> Actor for ShareResolver<P> {
     type Request = Request;
     type Response = Response;
 
-    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(
+        &mut self,
+        cancel: CancellationToken,
+        mut server_ch: ChanServer<Self::Request, Self::Response>,
+    ) -> actor::Result<()> {
+        let mut updates = self.peer.subscribe_veilid_update();
         loop {
             select! {
                 _ = cancel.cancelled() => {
                     return Ok(())
                 }
-                res = self.ch.rx.recv() => {
+                res = server_ch.recv() => {
                     let req = match res {
                         None => return Ok(()),
                         Some(req) => req,
@@ -164,21 +166,21 @@ impl<P: Peer> Service for ShareResolver<P> {
                                 // Invalid or unusable shares are unwatched.
                                 self.peer.cancel_watch(req.key());
                             }
-                            self.ch.tx.send(resp).await.map_err(Error::other)?
+                            server_ch.send(resp).await.map_err(Error::other)?
                         }
                         Err(e) => {
-                            self.ch.tx.send(Response::NotAvailable { key: req.key().to_owned(), err: e }).await.map_err(Error::other)?
+                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err: e.into() }).await.map_err(Error::other)?
                         }
                     }
                 }
-                res = self.updates.recv() => {
+                res = updates.recv() => {
                     let update = res.map_err(Error::other)?;
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
                             // FIXME: this may leak private routes.
                             // TODO: keep track of prior routes and pass them here?
                             let resp = self.handle(&Request::Header{ key: ch.key, prior_target: None }).await?;
-                            self.ch.tx.send(resp).await.map_err(Error::other)?;
+                            server_ch.send(resp).await.map_err(Error::other)?;
                         }
                         veilid_core::VeilidUpdate::Shutdown => {
                             return Ok(());
@@ -191,7 +193,7 @@ impl<P: Peer> Service for ShareResolver<P> {
     }
 
     /// Handle a share_resolver request, provide a response.
-    async fn handle(&mut self, req: &Request) -> Result<Response> {
+    async fn handle(&mut self, req: &Request) -> actor::Result<Response> {
         Ok(match req {
             Request::Index {
                 key,
@@ -239,6 +241,16 @@ impl<P: Peer> Service for ShareResolver<P> {
     }
 }
 
+impl<P: Peer + Clone> Clone for ShareResolver<P> {
+    fn clone(&self) -> Self {
+        Self {
+            peer: self.peer.clone(),
+            target_tx: self.target_tx.clone(),
+            updates: self.updates.resubscribe(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -249,13 +261,11 @@ mod tests {
 
     use sha2::{Digest as _, Sha256};
     use stigmerge_fileindex::Indexer;
-    use tokio::spawn;
     use tokio_util::sync::CancellationToken;
     use veilid_core::{CryptoKey, Target, TimestampDuration, TypedKey, ValueSubkeyRangeSet};
 
-    use crate::chan_rpc::pipe;
+    use crate::actor::Operator;
     use crate::{
-        chan_rpc::Service,
         proto::{Encoder, HaveMapRef, Header, PeerMapRef},
         share_resolver::{self, ShareResolver},
         tests::{temp_file, StubPeer},
@@ -292,17 +302,14 @@ mod tests {
         ));
         peer.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedKey| {}));
 
-        let (mut share_client, share_server) = pipe(32);
-        let svc = ShareResolver::new(peer, share_server);
         let cancel = CancellationToken::new();
-        let svc_task = spawn(svc.run(cancel.clone()));
+        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(peer)).await;
 
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
 
         // Send a bad "want index digest"
-        share_client
-            .tx
+        operator
             .send(share_resolver::Request::Index {
                 key: fake_key,
                 want_index_digest: [0u8; 32],
@@ -310,15 +317,14 @@ mod tests {
             })
             .await
             .expect("send request");
-        let bad_index_resp = share_client.rx.recv().await;
+        let bad_index_resp = operator.recv().await;
         assert!(matches!(
             bad_index_resp,
             Some(share_resolver::Response::BadIndex { key: _ })
         ));
 
         // Send a "want index digest" that matches the mock resolved index
-        share_client
-            .tx
+        operator
             .send(share_resolver::Request::Index {
                 key: fake_key,
                 want_index_digest: index_digest_bytes.into(),
@@ -326,7 +332,7 @@ mod tests {
             })
             .await
             .expect("send request");
-        let good_index_resp = share_client.rx.recv().await;
+        let good_index_resp = operator.recv().await;
         assert!(matches!(
             good_index_resp,
             Some(share_resolver::Response::Index {
@@ -341,10 +347,10 @@ mod tests {
         cancel.cancel();
 
         // Client channel closes
-        assert!(matches!(share_client.rx.recv().await, None));
+        assert!(matches!(operator.recv().await, None));
 
         // Service run terminates
-        svc_task.await.expect("join").expect("svc run");
+        operator.join().await.expect("join").expect("svc run");
     }
 
     #[tokio::test]
@@ -384,24 +390,21 @@ mod tests {
             move |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| Ok(()),
         ));
 
-        let (mut share_client, share_server) = pipe(32);
-        let svc = ShareResolver::new(peer, share_server);
         let cancel = CancellationToken::new();
-        let svc_task = spawn(svc.run(cancel.clone()));
+        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(peer)).await;
 
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
 
         // Send a "want index digest" that matches the mock resolved index
-        share_client
-            .tx
+        operator
             .send(share_resolver::Request::Header {
                 key: fake_key,
                 prior_target: None,
             })
             .await
             .expect("send request");
-        let header_resp = share_client.rx.recv().await;
+        let header_resp = operator.recv().await;
         let (header_resp_key, header_resp_header, header_resp_target) = match header_resp {
             Some(share_resolver::Response::Header {
                 key,
@@ -428,9 +431,9 @@ mod tests {
         cancel.cancel();
 
         // Client channel closes
-        assert!(matches!(share_client.rx.recv().await, None));
+        assert!(matches!(operator.recv().await, None));
 
         // Service run terminates
-        svc_task.await.expect("join").expect("svc run");
+        operator.join().await.expect("join").expect("svc run");
     }
 }

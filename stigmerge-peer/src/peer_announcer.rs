@@ -4,9 +4,9 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    chan_rpc::{ChanServer, Service},
+    actor::{Actor, ChanServer, Result},
     peer::TypedKey,
-    Error, Peer, Result,
+    Peer,
 };
 
 /// The peer-announcer service handles requests to announce or redact remote
@@ -14,10 +14,10 @@ use crate::{
 ///
 /// Each remote peer is encoded to a separate subkey. Redacted peers are
 /// marked with empty contents.
+#[derive(Clone)]
 pub struct PeerAnnouncer<P: Peer> {
     peer: P,
     key: TypedKey,
-    ch: ChanServer<Request, Response>,
     peer_indexes: HashMap<TypedKey, usize>,
     peers: Vec<Option<TypedKey>>,
     max_peers: u16,
@@ -27,11 +27,10 @@ pub const DEFAULT_MAX_PEERS: u16 = 32;
 
 impl<P: Peer> PeerAnnouncer<P> {
     /// Create a new peer_announcer service.
-    pub(super) fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
+    pub(super) fn new(peer: P, key: TypedKey) -> Self {
         Self {
             peer,
             key,
-            ch,
             peer_indexes: HashMap::new(),
             peers: vec![],
             max_peers: DEFAULT_MAX_PEERS,
@@ -70,11 +69,15 @@ pub enum Request {
 /// Peer-map announcer response message, just an acknowledgement or error.
 pub type Response = Result<()>;
 
-impl<P: Peer> Service for PeerAnnouncer<P> {
+impl<P: Peer> Actor for PeerAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
-    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(
+        &mut self,
+        cancel: CancellationToken,
+        mut server_ch: ChanServer<Request, Response>,
+    ) -> Result<()> {
         self.peer
             .reset_peers(self.key.to_owned(), self.max_peers)
             .await?;
@@ -83,13 +86,13 @@ impl<P: Peer> Service for PeerAnnouncer<P> {
                 _ = cancel.cancelled() => {
                     return Ok(())
                 }
-                res = self.ch.rx.recv() => {
+                res = server_ch.recv() => {
                     let req = match res {
                         None => return Ok(()),
                         Some(req) => req,
                     };
                     let resp = self.handle(&req).await?;
-                    self.ch.tx.send(resp).await.map_err(Error::other)?;
+                    server_ch.send(resp).await?;
                 }
             }
         }
@@ -140,14 +143,13 @@ mod tests {
     use veilid_core::TypedKey;
 
     use crate::{
-        chan_rpc::{pipe, Service},
-        error::Result,
-        peer_announcer::{PeerAnnouncer, Request},
+        actor::Operator,
+        peer_announcer::{PeerAnnouncer, Request, DEFAULT_MAX_PEERS},
         tests::StubPeer,
     };
 
     #[tokio::test]
-    async fn test_peer_announcer_announces_peer() -> Result<()> {
+    async fn test_peer_announcer_announces_peer() {
         // Create a stub peer with a recording announce_peer_result
         let mut stub_peer = StubPeer::new();
         let recorded_key = Arc::new(RwLock::new(None));
@@ -180,29 +182,18 @@ mod tests {
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
         let peer_key =
             TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
 
         // Create peer announcer
-        let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone(), server_ch);
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-        let cancel_task = cancel.clone();
-
-        // Spawn the peer announcer service
-        let handle = tokio::spawn(async move { peer_announcer.run(cancel_task).await });
+        let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone());
+        let mut operator = Operator::new(cancel.clone(), peer_announcer).await;
 
         // Send an Announce request
         let req = Request::Announce {
             key: peer_key.clone(),
         };
-        client_ch.tx.send(req).await.unwrap();
-        client_ch
-            .rx
-            .recv()
-            .await
-            .expect("recv")
-            .expect("announce ok");
+        operator.send(req).await.unwrap();
+        operator.recv().await.expect("recv").expect("announce ok");
 
         // Verify the peer was announced correctly
         let recorded_key = recorded_key.read().unwrap();
@@ -220,13 +211,11 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        handle.await.unwrap().unwrap();
-
-        Ok(())
+        operator.join().await.expect("task").expect("run");
     }
 
     #[tokio::test]
-    async fn test_peer_announcer_redacts_peer() -> Result<()> {
+    async fn test_peer_announcer_redacts_peer() {
         // Create a stub peer with recording announce_peer_result
         let mut stub_peer = StubPeer::new();
         let recorded_key = Arc::new(RwLock::new(None));
@@ -259,36 +248,25 @@ mod tests {
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
         let peer_key =
             TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
 
         // Create peer announcer
-        let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone(), server_ch);
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-        let cancel_task = cancel.clone();
-
-        // Spawn the peer announcer service
-        let handle = tokio::spawn(async move { peer_announcer.run(cancel_task).await });
+        let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone());
+        let mut operator = Operator::new(cancel.clone(), peer_announcer).await;
 
         // First announce a peer
         let req_announce = Request::Announce {
             key: peer_key.clone(),
         };
-        client_ch.tx.send(req_announce).await.unwrap();
-        client_ch
-            .rx
-            .recv()
-            .await
-            .expect("recv")
-            .expect("announce ok");
+        operator.send(req_announce).await.unwrap();
+        operator.recv().await.expect("recv").expect("announce ok");
 
         // Then redact it
         let req_redact = Request::Redact {
             key: peer_key.clone(),
         };
-        client_ch.tx.send(req_redact).await.unwrap();
-        client_ch.rx.recv().await.expect("recv").expect("redact ok");
+        operator.send(req_redact).await.unwrap();
+        operator.recv().await.expect("recv").expect("redact ok");
 
         // Verify the peer was redacted correctly
         let recorded_key = recorded_key.read().unwrap();
@@ -306,13 +284,11 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        handle.await.unwrap().unwrap();
-
-        Ok(())
+        operator.join().await.expect("task").expect("run");
     }
 
     #[tokio::test]
-    async fn test_peer_announcer_resets_peers() -> Result<()> {
+    async fn test_peer_announcer_resets_peers() {
         // Create a stub peer with recording reset_peers_result
         let mut stub_peer = StubPeer::new();
         let recorded_key = Arc::new(RwLock::new(None));
@@ -331,22 +307,16 @@ mod tests {
         // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
 
         // Create peer announcer
-        let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone(), server_ch);
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-        let cancel_task = cancel.clone();
-
-        // Spawn the peer announcer service
-        let handle = tokio::spawn(async move { peer_announcer.run(cancel_task).await });
+        let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone());
+        let mut operator = Operator::new(cancel.clone(), peer_announcer).await;
 
         // Send a Reset request
         let req = Request::Reset;
-        client_ch.tx.send(req).await.unwrap();
-        client_ch.rx.recv().await.expect("recv").expect("reset ok");
+        operator.send(req).await.unwrap();
+        operator.recv().await.expect("recv").expect("reset ok");
 
         // Verify the peers were reset correctly
         let recorded_key = recorded_key.read().unwrap();
@@ -355,12 +325,10 @@ mod tests {
         assert!(recorded_key.is_some(), "Key was not recorded");
         assert!(recorded_max_peers.is_some(), "Max peers was not recorded");
         assert_eq!(recorded_key.as_ref(), Some(&test_key));
-        assert_eq!(recorded_max_peers.as_ref(), Some(&32)); // DEFAULT_MAX_PEERS
+        assert_eq!(recorded_max_peers.as_ref(), Some(&DEFAULT_MAX_PEERS));
 
         // Clean up
         cancel.cancel();
-        handle.await.unwrap().unwrap();
-
-        Ok(())
+        operator.join().await.expect("task").expect("run");
     }
 }

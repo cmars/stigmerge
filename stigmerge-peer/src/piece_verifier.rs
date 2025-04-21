@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashMap, io::SeekFrom};
+use std::{cmp::Ordering, collections::HashMap, io::SeekFrom, sync::Arc};
 
 use sha2::{Digest, Sha256};
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS, PIECE_SIZE_BYTES};
@@ -6,21 +6,19 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
-    sync::broadcast,
+    sync::{broadcast, RwLock},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use super::types::PieceState;
-use crate::Result;
 use crate::{
-    chan_rpc::{ChanServer, Service},
-    Error,
+    actor::{Actor, Result},
+    types::PieceState,
 };
 
-pub struct PieceVerifier<'a> {
-    index: &'a Index,
-    ch: ChanServer<Request, Response>,
+#[derive(Clone)]
+pub struct PieceVerifier {
+    index: Arc<RwLock<Index>>,
     piece_states: HashMap<(usize, usize), PieceState>,
     verified_pieces: usize,
     verified_tx: broadcast::Sender<PieceState>,
@@ -28,12 +26,11 @@ pub struct PieceVerifier<'a> {
 
 const VERIFIED_BROADCAST_CAPACITY: usize = 16;
 
-impl<'a> PieceVerifier<'a> {
-    pub fn new(index: &'a Index, ch: ChanServer<Request, Response>) -> PieceVerifier<'a> {
+impl PieceVerifier {
+    pub fn new(index: Arc<RwLock<Index>>) -> PieceVerifier {
         let (verified_tx, _) = broadcast::channel(VERIFIED_BROADCAST_CAPACITY);
         PieceVerifier {
             index,
-            ch,
             piece_states: HashMap::new(),
             verified_pieces: 0,
             verified_tx,
@@ -45,9 +42,11 @@ impl<'a> PieceVerifier<'a> {
     }
 
     async fn verify_piece(&self, file_index: usize, piece_index: usize) -> Result<bool> {
-        let file_spec = &self.index.files()[file_index];
-        let mut fh = File::open(self.index.root().join(file_spec.path())).await?;
-        let piece_spec = &self.index.payload().pieces()[piece_index];
+        let index = self.index.read().await;
+
+        let file_spec = &index.files()[file_index];
+        let mut fh = File::open(index.root().join(file_spec.path())).await?;
+        let piece_spec = &index.payload().pieces()[piece_index];
 
         // FIXME: this is wrong for multi-file!
         // We'd need to seek relative to the file's payload slice
@@ -119,22 +118,26 @@ impl Response {
     }
 }
 
-impl<'a> Service for PieceVerifier<'a> {
+impl Actor for PieceVerifier {
     type Request = Request;
     type Response = Response;
 
-    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(
+        &mut self,
+        cancel: CancellationToken,
+        mut server_ch: crate::actor::ChanServer<Self::Request, Self::Response>,
+    ) -> Result<()> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
                     return Ok(());
                 }
-                res = self.ch.rx.recv() => {
+                res = server_ch.recv() => {
                     match res {
                         None => return Ok(()),
                         Some(req) => {
                             let resp = self.handle(&req).await?;
-                            self.ch.tx.send(resp.clone()).await.map_err(Error::other)?;
+                            server_ch.send(resp.clone()).await?;
                             if resp.index_complete() {
                                 cancel.cancel();
                             }
@@ -173,7 +176,8 @@ impl<'a> Service for PieceVerifier<'a> {
                 Ok(Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
-                    index_complete: self.verified_pieces == self.index.payload().pieces().len(),
+                    index_complete: self.verified_pieces
+                        == self.index.read().await.payload().pieces().len(),
                 })
             } else {
                 Ok(Response::InvalidPiece {
@@ -197,7 +201,7 @@ mod tests {
     use stigmerge_fileindex::Indexer;
     use tokio_util::sync::CancellationToken;
 
-    use crate::{chan_rpc::pipe, tests::temp_file};
+    use crate::{actor::Operator, tests::temp_file};
 
     use super::*;
 
@@ -214,14 +218,12 @@ mod tests {
             .expect("indexer");
 
         // Set up verifier
-        let (mut client_ch, server_ch) = pipe(16);
         let cancel = CancellationToken::new();
-        let verifier_cancel = cancel.clone();
-        let verifier_task = tokio::spawn(async move {
-            let index = indexer.index().await.expect("index");
-            let verifier = PieceVerifier::new(&index, server_ch);
-            verifier.run(verifier_cancel).await
-        });
+        let mut operator = Operator::new(
+            cancel.clone(),
+            PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
+        )
+        .await;
 
         for piece_index in 0..NUM_PIECES {
             // Building up to piece validation
@@ -229,8 +231,8 @@ mod tests {
                 let piece_state =
                     PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
                 let req = Request::Piece(piece_state);
-                client_ch.tx.send(req).await.expect("send request");
-                let resp = client_ch.rx.recv().await.expect("receive response");
+                operator.send(req).await.expect("send request");
+                let resp = operator.recv().await.expect("receive response");
                 assert_eq!(
                     resp,
                     Response::IncompletePiece {
@@ -243,8 +245,8 @@ mod tests {
             let piece_state =
                 PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
             let req = Request::Piece(piece_state);
-            client_ch.tx.send(req).await.expect("send request");
-            let resp = client_ch.rx.recv().await.expect("receive response");
+            operator.send(req).await.expect("send request");
+            let resp = operator.recv().await.expect("receive response");
             assert_eq!(
                 resp,
                 Response::ValidPiece {
@@ -257,7 +259,8 @@ mod tests {
 
         // shut down verifier
         cancel.cancel();
-        verifier_task
+        operator
+            .join()
             .await
             .expect("verifier task")
             .expect("verifier run");
@@ -277,22 +280,20 @@ mod tests {
             .expect("indexer");
 
         // Set up verifier
-        let (mut client_ch, server_ch) = pipe(16);
         let cancel = CancellationToken::new();
-        let verifier_cancel = cancel.clone();
-        let verifier_task = tokio::spawn(async move {
-            let index = indexer.index().await.expect("index");
-            let verifier = PieceVerifier::new(&index, server_ch);
-            verifier.run(verifier_cancel).await
-        });
+        let mut operator = Operator::new(
+            cancel.clone(),
+            PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
+        )
+        .await;
 
         // Building up to corrupt piece validation
         for block_index in 0..PIECE_SIZE_BLOCKS - 1 {
             let piece_state =
                 PieceState::new(0, CORRUPT_PIECE_INDEX, 0, PIECE_SIZE_BLOCKS, block_index);
             let req = Request::Piece(piece_state);
-            client_ch.tx.send(req).await.expect("send request");
-            let resp = client_ch.rx.recv().await.expect("receive response");
+            operator.send(req).await.expect("send request");
+            let resp = operator.recv().await.expect("receive response");
             assert_eq!(
                 resp,
                 Response::IncompletePiece {
@@ -319,8 +320,8 @@ mod tests {
             PIECE_SIZE_BLOCKS - 1,
         );
         let req = Request::Piece(piece_state);
-        client_ch.tx.send(req).await.expect("send request");
-        let resp = client_ch.rx.recv().await.expect("receive response");
+        operator.send(req).await.expect("send request");
+        let resp = operator.recv().await.expect("receive response");
         assert_eq!(
             resp,
             Response::InvalidPiece {
@@ -334,8 +335,8 @@ mod tests {
             let piece_state =
                 PieceState::new(0, VALID_PIECE_INDEX, 0, PIECE_SIZE_BLOCKS, block_index);
             let req = Request::Piece(piece_state);
-            client_ch.tx.send(req).await.expect("send request");
-            let resp = client_ch.rx.recv().await.expect("receive response");
+            operator.send(req).await.expect("send request");
+            let resp = operator.recv().await.expect("receive response");
             assert_eq!(
                 resp,
                 Response::IncompletePiece {
@@ -354,8 +355,8 @@ mod tests {
             PIECE_SIZE_BLOCKS - 1,
         );
         let req = Request::Piece(piece_state);
-        client_ch.tx.send(req).await.expect("send request");
-        let resp = client_ch.rx.recv().await.expect("receive response");
+        operator.send(req).await.expect("send request");
+        let resp = operator.recv().await.expect("receive response");
         assert_eq!(
             resp,
             Response::ValidPiece {
@@ -368,7 +369,8 @@ mod tests {
 
         // shut down verifier
         cancel.cancel();
-        verifier_task
+        operator
+            .join()
             .await
             .expect("verifier task")
             .expect("verifier run");
@@ -389,14 +391,12 @@ mod tests {
             .expect("indexer");
 
         // Set up verifier
-        let (mut client_ch, server_ch) = pipe(16);
         let cancel = CancellationToken::new();
-        let verifier_cancel = cancel.clone();
-        let verifier_task = tokio::spawn(async move {
-            let index = indexer.index().await.expect("index");
-            let verifier = PieceVerifier::new(&index, server_ch);
-            verifier.run(verifier_cancel).await
-        });
+        let mut operator = Operator::new(
+            cancel.clone(),
+            PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
+        )
+        .await;
 
         for piece_index in 0..NUM_PIECES {
             // Building up to piece validation
@@ -404,8 +404,8 @@ mod tests {
                 let piece_state =
                     PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
                 let req = Request::Piece(piece_state);
-                client_ch.tx.send(req).await.expect("send request");
-                let resp = client_ch.rx.recv().await.expect("receive response");
+                operator.send(req).await.expect("send request");
+                let resp = operator.recv().await.expect("receive response");
                 assert_eq!(
                     resp,
                     Response::IncompletePiece {
@@ -419,8 +419,8 @@ mod tests {
             let piece_state =
                 PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
             let req = Request::Piece(piece_state);
-            client_ch.tx.send(req).await.expect("send request");
-            let resp = client_ch.rx.recv().await.expect("receive response");
+            operator.send(req).await.expect("send request");
+            let resp = operator.recv().await.expect("receive response");
             assert_eq!(
                 resp,
                 Response::ValidPiece {
@@ -433,7 +433,8 @@ mod tests {
 
         // shut down verifier
         cancel.cancel();
-        verifier_task
+        operator
+            .join()
             .await
             .expect("verifier task")
             .expect("verifier run");

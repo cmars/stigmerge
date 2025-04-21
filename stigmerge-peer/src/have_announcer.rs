@@ -4,10 +4,10 @@ use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    chan_rpc::{ChanServer, Service},
+    actor::{Actor, ChanServer, Result},
     peer::TypedKey,
     piece_map::PieceMap,
-    Error, Peer, Result,
+    Peer,
 };
 
 /// The have-announcer service handles requests for announcing the share pieces
@@ -15,21 +15,20 @@ use crate::{
 /// reference key, as an uncompressed bitmap of contiguous bits, indexed by
 /// piece index: a set bit (1) indicating the peer has the piece, a clear bit
 /// (0) indicating the peer does not have the piece.
+#[derive(Clone)]
 pub struct HaveAnnouncer<P: Peer> {
     peer: P,
     key: TypedKey,
-    ch: ChanServer<Request, Response>,
     pieces_map: Arc<RwLock<PieceMap>>,
     announce_interval: Duration,
 }
 
 impl<P: Peer> HaveAnnouncer<P> {
     /// Create a new have_announcer service.
-    pub fn new(peer: P, key: TypedKey, ch: ChanServer<Request, Response>) -> Self {
+    pub fn new(peer: P, key: TypedKey) -> Self {
         Self {
             peer,
             key,
-            ch,
             pieces_map: Arc::new(RwLock::new(PieceMap::new())),
             announce_interval: Duration::from_secs(15),
         }
@@ -51,11 +50,15 @@ pub enum Request {
 /// Have-map announcer response message, just an acknowledgement or error.
 pub type Response = Result<()>;
 
-impl<P: Peer> Service for HaveAnnouncer<P> {
+impl<P: Peer> Actor for HaveAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
-    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(
+        &mut self,
+        cancel: CancellationToken,
+        mut server_ch: ChanServer<Self::Request, Self::Response>,
+    ) -> Result<()> {
         let mut changed = false;
         let mut interval = tokio::time::interval(self.announce_interval);
         loop {
@@ -63,14 +66,14 @@ impl<P: Peer> Service for HaveAnnouncer<P> {
                 _ = cancel.cancelled() => {
                     return Ok(())
                 }
-                res = self.ch.rx.recv() => {
+                res = server_ch.recv() => {
                     let req = match res {
                         None => return Ok(()),
                         Some(req) => req,
                     };
                     let resp = self.handle(&req).await?;
                     changed = true;
-                    self.ch.tx.send(resp).await.map_err(Error::other)?;
+                    server_ch.send(resp).await?;
                 }
                 _ = interval.tick() => {
                     if changed {
@@ -113,15 +116,14 @@ mod tests {
     use veilid_core::TypedKey;
 
     use crate::{
-        chan_rpc::{pipe, Service},
-        error::Result,
+        actor::Operator,
         have_announcer::{HaveAnnouncer, Request},
         piece_map::PieceMap,
         tests::StubPeer,
     };
 
     #[tokio::test]
-    async fn test_have_announcer_announces_have_map() -> Result<()> {
+    async fn test_have_announcer_announces_have_map() {
         // Create a stub peer with a recording announce_have_map_result
         let mut stub_peer = StubPeer::new();
         let recorded_have_map = Arc::new(RwLock::new(None));
@@ -140,24 +142,17 @@ mod tests {
         // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
 
         // Create have announcer with a short announce interval
-        let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key.clone(), server_ch);
+        let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key.clone());
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-
-        // Spawn the have announcer service
-        tokio::spawn(async move {
-            have_announcer.run(cancel.child_token()).await.unwrap();
-        });
+        let mut operator = Operator::new(cancel.clone(), have_announcer).await;
 
         // Send a Set request to announce a piece
         let req = Request::Set { piece_index: 42 };
-        client_ch.tx.send(req).await.unwrap();
-        client_ch.rx.recv().await.expect("recv").expect("set ok");
+        operator.send(req).await.unwrap();
+        operator.recv().await.expect("recv").expect("set ok");
 
         // Wait for the announcement to happen
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -178,11 +173,12 @@ mod tests {
         assert!(!recorded_map.get(0), "Other piece indices should be clear");
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
-        Ok(())
+        cancel.cancel();
+        operator.join().await.expect("task").expect("run");
     }
 
     #[tokio::test]
-    async fn test_have_announcer_clears_have_map() -> Result<()> {
+    async fn test_have_announcer_clears_have_map() {
         // Create a stub peer with a recording announce_have_map_result
         let mut stub_peer = StubPeer::new();
         let recorded_have_map = Arc::new(RwLock::new(None));
@@ -197,27 +193,20 @@ mod tests {
         // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
-        let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key, server_ch);
+        let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key);
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-
-        // Spawn the have announcer service
-        tokio::spawn(async move {
-            have_announcer.run(cancel.child_token()).await.unwrap();
-        });
+        let mut operator = Operator::new(cancel.clone(), have_announcer).await;
 
         // First set a piece
         let req_set = Request::Set { piece_index: 42 };
-        client_ch.tx.send(req_set).await.unwrap();
-        client_ch.rx.recv().await.expect("recv").expect("set ok");
+        operator.send(req_set).await.unwrap();
+        operator.recv().await.expect("recv").expect("set ok");
 
         // Then clear it
         let req_clear = Request::Clear { piece_index: 42 };
-        client_ch.tx.send(req_clear).await.unwrap();
-        client_ch.rx.recv().await.expect("recv").expect("clear ok");
+        operator.send(req_clear).await.unwrap();
+        operator.recv().await.expect("recv").expect("clear ok");
 
         // Wait for the announcements to happen
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -230,11 +219,12 @@ mod tests {
         assert!(!recorded_map.get(0), "Other piece indices should be clear");
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
-        Ok(())
+        cancel.cancel();
+        operator.join().await.expect("task").expect("run");
     }
 
     #[tokio::test]
-    async fn test_have_announcer_resets_have_map() -> Result<()> {
+    async fn test_have_announcer_resets_have_map() {
         // Create a stub peer with a recording announce_have_map_result
         let mut stub_peer = StubPeer::new();
         let recorded_have_map = Arc::new(RwLock::new(None));
@@ -249,27 +239,21 @@ mod tests {
         // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
-        let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key, server_ch);
-        have_announcer.announce_interval = std::time::Duration::from_millis(1);
 
-        // Create cancellation token
+        let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key);
         let cancel = CancellationToken::new();
-
-        // Spawn the have announcer service
-        tokio::spawn(async move {
-            have_announcer.run(cancel.child_token()).await.unwrap();
-        });
+        have_announcer.announce_interval = std::time::Duration::from_millis(1);
+        let mut operator = Operator::new(cancel.clone(), have_announcer).await;
 
         // First set some pieces
         let req_set = Request::Set { piece_index: 42 };
-        client_ch.tx.send(req_set).await.unwrap();
-        client_ch.rx.recv().await.expect("recv").expect("set ok");
+        operator.send(req_set).await.unwrap();
+        operator.recv().await.expect("recv").expect("set ok");
 
         // Then reset the map
         let req_reset = Request::Reset;
-        client_ch.tx.send(req_reset).await.unwrap();
-        client_ch.rx.recv().await.expect("recv").expect("reset ok");
+        operator.send(req_reset).await.unwrap();
+        operator.recv().await.expect("recv").expect("reset ok");
 
         // Wait for the announcements to happen
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -285,6 +269,7 @@ mod tests {
         assert!(!recorded_map.get(0), "Other piece indices should be clear");
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
-        Ok(())
+        cancel.cancel();
+        operator.join().await.expect("task").expect("run");
     }
 }

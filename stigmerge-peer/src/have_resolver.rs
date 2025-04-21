@@ -8,10 +8,10 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
-    chan_rpc::{ChanServer, Service},
+    actor::{Actor, ChanServer, Error, Result},
     peer::TypedKey,
     piece_map::PieceMap,
-    Error, Peer, Result,
+    Peer,
 };
 
 /// The have_resolver service handles requests for remote peer have-maps, which
@@ -21,7 +21,6 @@ use crate::{
 /// share DHT header (subkey 0) as haveMapRef.
 pub struct HaveResolver<P: Peer> {
     peer: P,
-    ch: ChanServer<Request, Response>,
     pieces_maps: HashMap<TypedKey, Arc<RwLock<PieceMap>>>,
     updates: broadcast::Receiver<VeilidUpdate>,
 }
@@ -31,11 +30,10 @@ where
     P: Peer,
 {
     /// Create a new have_resolver service with the given peer.
-    pub(super) fn new(peer: P, ch: ChanServer<Request, Response>) -> Self {
+    pub(super) fn new(peer: P) -> Self {
         let updates = peer.subscribe_veilid_update();
         Self {
             peer,
-            ch,
             pieces_maps: HashMap::new(),
             updates,
         }
@@ -99,42 +97,46 @@ pub enum Response {
     WatchCancelled { key: TypedKey },
 }
 
-impl<P: Peer> Service for HaveResolver<P> {
+impl<P: Peer> Actor for HaveResolver<P> {
     type Request = Request;
     type Response = Response;
 
-    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(
+        &mut self,
+        cancel: CancellationToken,
+        mut server_ch: ChanServer<Self::Request, Self::Response>,
+    ) -> Result<()> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
                     return Ok(())
                 }
-                res = self.ch.rx.recv() => {
+                res = server_ch.recv() => {
                     let req = match res {
                         None => return Ok(()),
                         Some(req) => req,
                     };
                     match self.handle(&req).await {
                         Ok(resp) => {
-                            self.ch.tx.send(resp).await.map_err(Error::other)?
+                            server_ch.send(resp).await?
                         }
                         Err(err) => {
-                            self.ch.tx.send(Response::NotAvailable { key: req.key().to_owned(), err }).await.map_err(Error::other)?
+                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err }).await?
                         }
                     }
                 }
                 res = self.updates.recv() => {
-                    let update = res.map_err(Error::other)?;
+                    let update = res?;
                     match update {
-                        veilid_core::VeilidUpdate::ValueChange(ch) => {
+                        VeilidUpdate::ValueChange(ch) => {
                             let have_map_lock = self.assert_have_map(&ch.key);
                             {
                                 let mut have_map = have_map_lock.write().await;
                                 self.peer.merge_have_map(ch.key, ch.subkeys, &mut *have_map).await?;
                             }
-                            self.ch.tx.send(Response::Resolve{ key: ch.key, pieces: have_map_lock }).await.map_err(Error::other)?;
+                            server_ch.send(Response::Resolve{ key: ch.key, pieces: have_map_lock }).await?;
                         }
-                        veilid_core::VeilidUpdate::Shutdown => {
+                        VeilidUpdate::Shutdown => {
                             return Ok(());
                         }
                         _ => {}
@@ -185,6 +187,16 @@ impl<P: Peer> Service for HaveResolver<P> {
     }
 }
 
+impl<P: Peer + 'static> Clone for HaveResolver<P> {
+    fn clone(&self) -> Self {
+        Self {
+            peer: self.peer.clone(),
+            pieces_maps: self.pieces_maps.clone(),
+            updates: self.updates.resubscribe(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -199,8 +211,7 @@ mod tests {
     };
 
     use crate::{
-        chan_rpc::{pipe, Service},
-        error::Result,
+        actor::Operator,
         have_resolver::{HaveResolver, Request, Response},
         peer::TypedKey,
         piece_map::PieceMap,
@@ -208,7 +219,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn test_have_resolver_resolves_have_map() -> Result<()> {
+    async fn test_have_resolver_resolves_have_map() {
         // Create a stub peer with a recording merge_have_map_result
         let mut stub_peer = StubPeer::new();
         let recorded_key = Arc::new(RwLock::new(None));
@@ -228,27 +239,21 @@ mod tests {
         // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
 
         // Create have resolver
-        let have_resolver = HaveResolver::new(stub_peer.clone(), server_ch);
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-        let cancel_task = cancel.clone();
-
-        // Spawn the have resolver service
-        let handle = tokio::spawn(async move { have_resolver.run(cancel_task).await });
+        let have_resolver = HaveResolver::new(stub_peer.clone());
+        let mut operator = Operator::new(cancel.clone(), have_resolver).await;
 
         // Send a Resolve request
         let req = Request::Resolve {
             key: test_key.clone(),
             subkeys: 100,
         };
-        client_ch.tx.send(req).await.unwrap();
+        operator.send(req).await.unwrap();
 
         // Verify the response
-        match client_ch.rx.recv().await.expect("recv") {
+        match operator.recv().await.expect("recv") {
             Response::Resolve { key, pieces } => {
                 assert_eq!(key, test_key);
                 let _pieces = pieces.read().await; // Just verify we can access it
@@ -270,13 +275,11 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        handle.await.unwrap().unwrap();
-
-        Ok(())
+        operator.join().await.expect("task").expect("run");
     }
 
     #[tokio::test]
-    async fn test_have_resolver_watches_have_map() -> Result<()> {
+    async fn test_have_resolver_watches_have_map() {
         // Create a stub peer with a recording watch_result
         let mut stub_peer = StubPeer::new();
         let recorded_key = Arc::new(RwLock::new(None));
@@ -299,26 +302,20 @@ mod tests {
         // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
 
         // Create have resolver
-        let have_resolver = HaveResolver::new(stub_peer.clone(), server_ch);
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-        let cancel_task = cancel.clone();
-
-        // Spawn the have resolver service
-        let handle = tokio::spawn(async move { have_resolver.run(cancel_task).await });
+        let have_resolver = HaveResolver::new(stub_peer.clone());
+        let mut operator = Operator::new(cancel.clone(), have_resolver).await;
 
         // Send a Watch request
         let req = Request::Watch {
             key: test_key.clone(),
         };
-        client_ch.tx.send(req).await.unwrap();
+        operator.send(req).await.unwrap();
 
         // Verify the response
-        match client_ch.rx.recv().await.expect("recv") {
+        match operator.recv().await.expect("recv") {
             Response::Watching { key } => {
                 assert_eq!(key, test_key);
             }
@@ -345,13 +342,11 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        handle.await.unwrap().unwrap();
-
-        Ok(())
+        operator.join().await.expect("task").expect("run");
     }
 
     #[tokio::test]
-    async fn test_have_resolver_cancels_watch() -> Result<()> {
+    async fn test_have_resolver_cancels_watch() {
         // Create a stub peer with a recording cancel_watch_result
         let mut stub_peer = StubPeer::new();
         let recorded_key = Arc::new(RwLock::new(None));
@@ -364,26 +359,20 @@ mod tests {
         // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
 
         // Create have resolver
-        let have_resolver = HaveResolver::new(stub_peer.clone(), server_ch);
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-        let cancel_task = cancel.clone();
-
-        // Spawn the have resolver service
-        let handle = tokio::spawn(async move { have_resolver.run(cancel_task).await });
+        let have_resolver = HaveResolver::new(stub_peer.clone());
+        let mut operator = Operator::new(cancel.clone(), have_resolver).await;
 
         // Send a CancelWatch request
         let req = Request::CancelWatch {
             key: test_key.clone(),
         };
-        client_ch.tx.send(req).await.unwrap();
+        operator.send(req).await.unwrap();
 
         // Verify the response
-        match client_ch.rx.recv().await.expect("recv") {
+        match operator.recv().await.expect("recv") {
             Response::WatchCancelled { key } => {
                 assert_eq!(key, test_key);
             }
@@ -397,13 +386,11 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        handle.await.unwrap().unwrap();
-
-        Ok(())
+        operator.join().await.expect("task").expect("run");
     }
 
     #[tokio::test]
-    async fn test_have_resolver_handles_value_changes() -> Result<()> {
+    async fn test_have_resolver_handles_value_changes() {
         // Create a stub peer with a recording merge_have_map_result
         let mut stub_peer = StubPeer::new();
         let recorded_key = Arc::new(RwLock::new(None));
@@ -420,34 +407,24 @@ mod tests {
             },
         ));
 
-        // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let (mut client_ch, server_ch) = pipe(16);
-
-        // Create have resolver
         let update_tx = stub_peer.update_tx.clone();
-        let have_resolver = HaveResolver::new(stub_peer, server_ch);
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-        let cancel_task = cancel.clone();
-
-        // Spawn the have resolver service
-        let handle = tokio::spawn(async move { have_resolver.run(cancel_task).await });
+        let have_resolver = HaveResolver::new(stub_peer);
+        let mut operator = Operator::new(cancel.clone(), have_resolver).await;
 
         // Send a request and receive a response, to make sure the task is
         // running. That's important: if we're not in the run loop, the update
         // send may fail to broadcast.
-        client_ch
-            .tx
+        operator
             .send(Request::Resolve {
                 key: test_key.clone(),
                 subkeys: 100,
             })
             .await
             .unwrap();
-        assert!(matches!(client_ch.rx.recv().await, Some(_)));
+        assert!(matches!(operator.recv().await, Some(_)));
 
         // Simulate a value change notification
         let change = VeilidValueChange {
@@ -460,11 +437,11 @@ mod tests {
             count: 1,
         };
         update_tx
-            .send(veilid_core::VeilidUpdate::ValueChange(Box::new(change)))
+            .send(VeilidUpdate::ValueChange(Box::new(change)))
             .expect("send value change");
 
         // Verify the response
-        match client_ch.rx.recv().await.expect("recv") {
+        match operator.recv().await.expect("recv") {
             Response::Resolve { key, pieces } => {
                 assert_eq!(key, test_key);
                 let _pieces = pieces.read().await; // Just verify we can access it
@@ -486,8 +463,6 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        handle.await.unwrap().unwrap();
-
-        Ok(())
+        operator.join().await.expect("task").expect("run");
     }
 }

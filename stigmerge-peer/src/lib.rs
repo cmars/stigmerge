@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 
+mod actor;
 mod block_fetcher;
-mod chan_rpc;
 mod error;
 mod have_announcer;
 mod have_resolver;

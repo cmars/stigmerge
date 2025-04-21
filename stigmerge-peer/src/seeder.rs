@@ -10,12 +10,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use veilid_core::VeilidUpdate;
 
-use crate::types::{PieceState, ShareInfo};
 use crate::{
-    chan_rpc::ChanServer,
+    actor::{Actor, ChanServer, Result},
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
-    Error, Peer, Result,
+    types::{PieceState, ShareInfo},
+    Peer,
 };
 
 #[derive(Debug)]
@@ -30,68 +30,22 @@ pub enum Response {
 
 pub struct Seeder<P: Peer> {
     peer: P,
-    ch: ChanServer<Request, Response>,
     want_index: Index,
     root: PathBuf,
     clients: Clients,
     files: HashMap<u32, File>,
+    piece_map: PieceMap,
 }
 
 impl<P: Peer> Seeder<P> {
-    pub fn new(
-        peer: P,
-        ch: ChanServer<Request, Response>,
-        share: ShareInfo,
-        clients: Clients,
-    ) -> Result<Self> {
-        Ok(Seeder {
+    pub fn new(peer: P, share: ShareInfo, clients: Clients) -> Self {
+        Seeder {
             peer,
-            ch,
             want_index: share.want_index,
             root: share.root,
             clients,
             files: HashMap::new(),
-        })
-    }
-
-    pub async fn run(&mut self, cancel: CancellationToken) -> Result<()> {
-        let mut piece_map = PieceMap::new();
-        let mut buf = [0u8; BLOCK_SIZE_BYTES];
-        loop {
-            select! { biased;
-                _ = cancel.cancelled() => {
-                    return Ok(());
-                }
-                res = self.ch.rx.recv() => {
-                    if let Some(Request::HaveMap) = res {
-                        self.ch.tx.send(Response::HaveMap(piece_map.clone())).await.map_err(Error::other)?;
-                    }
-                }
-                res = self.clients.verified_rx.recv() => {
-                    let piece_state = res.map_err(Error::other)?;
-                    piece_map.set(piece_state.piece_index.try_into().unwrap());
-                }
-                res = self.clients.update_rx.recv() => {
-                    let update = res.map_err(Error::other)?;
-                    match update {
-                        VeilidUpdate::AppCall(veilid_app_call) => {
-                            let req = proto::Request::decode(veilid_app_call.message()).map_err(Error::RemoteProtocol)?;
-                            match req {
-                                proto::Request::BlockRequest(block_req) => {
-                                    if piece_map.get(block_req.piece) {
-                                        let rd = self.read_block_into(&block_req, &mut buf).await?;
-                                        self.peer.reply_block_contents(veilid_app_call.id(), &buf[..rd]).await?;
-                                    } else {
-                                        self.peer.reply_block_contents(veilid_app_call.id(), &[]).await?;
-                                    }
-                                }
-                                _ => {}  // Ignore other request types
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            piece_map: PieceMap::new(),
         }
     }
 
@@ -121,9 +75,84 @@ impl<P: Peer> Seeder<P> {
     }
 }
 
+impl<P: Peer> Actor for Seeder<P> {
+    type Request = Request;
+    type Response = Response;
+
+    async fn run(
+        &mut self,
+        cancel: CancellationToken,
+        mut server_ch: ChanServer<Self::Request, Self::Response>,
+    ) -> Result<()> {
+        let mut buf = [0u8; BLOCK_SIZE_BYTES];
+        loop {
+            select! { biased;
+                _ = cancel.cancelled() => {
+                    return Ok(());
+                }
+                Some(req) = server_ch.recv() => {
+                    server_ch.send(self.handle(&req).await?).await?;
+                }
+                res = self.clients.verified_rx.recv() => {
+                    let piece_state = res?;
+                    self.piece_map.set(piece_state.piece_index.try_into().unwrap());
+                }
+                res = self.clients.update_rx.recv() => {
+                    let update = res?;
+                    match update {
+                        VeilidUpdate::AppCall(veilid_app_call) => {
+                            let req = proto::Request::decode(veilid_app_call.message())?;
+                            match req {
+                                proto::Request::BlockRequest(block_req) => {
+                                    if self.piece_map.get(block_req.piece) {
+                                        let rd = self.read_block_into(&block_req, &mut buf).await?;
+                                        self.peer.reply_block_contents(veilid_app_call.id(), &buf[..rd]).await?;
+                                    } else {
+                                        self.peer.reply_block_contents(veilid_app_call.id(), &[]).await?;
+                                    }
+                                }
+                                _ => {}  // Ignore other request types
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
+        match req {
+            Request::HaveMap => Ok(Response::HaveMap(self.piece_map.clone())),
+        }
+    }
+}
+
+impl<P: Peer> Clone for Seeder<P> {
+    fn clone(&self) -> Self {
+        Self {
+            peer: self.peer.clone(),
+            want_index: self.want_index.clone(),
+            root: self.root.clone(),
+            clients: self.clients.clone(),
+            files: HashMap::new(),
+            piece_map: self.piece_map.clone(),
+        }
+    }
+}
+
 pub struct Clients {
     pub verified_rx: broadcast::Receiver<PieceState>,
     pub update_rx: broadcast::Receiver<VeilidUpdate>,
+}
+
+impl Clone for Clients {
+    fn clone(&self) -> Self {
+        Self {
+            verified_rx: self.verified_rx.resubscribe(),
+            update_rx: self.update_rx.resubscribe(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -138,7 +167,7 @@ mod tests {
     use veilid_core::{OperationId, VeilidAppCall};
 
     use crate::{
-        chan_rpc::pipe,
+        actor::Operator,
         proto::{BlockRequest, Encoder, Header},
         tests::{temp_file, StubPeer},
     };
@@ -184,8 +213,6 @@ mod tests {
                 Ok(())
             }));
 
-        let (mut client_ch, server_ch) = pipe(1);
-
         // Create share info
         let share_info = ShareInfo {
             header: test_header(),
@@ -201,24 +228,18 @@ mod tests {
 
         // Create cancellation token
         let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-
-        // Run seeder in a task
-        let seeder_task = tokio::spawn(async move {
-            let mut seeder = Seeder::new(peer, server_ch, share_info, clients)?;
-            seeder.run(cancel_clone).await
-        });
+        let mut operator =
+            Operator::new(cancel.clone(), Seeder::new(peer, share_info, clients)).await;
 
         // First, send a verified piece notification with confirmation it's applied
         let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
         verified_tx.send(piece_state).expect("send verified piece");
 
-        client_ch
-            .tx
+        operator
             .send(Request::HaveMap)
             .await
             .expect("requested havemap");
-        let Response::HaveMap(have_map) = client_ch.rx.recv().await.expect("havemap response");
+        let Response::HaveMap(have_map) = operator.recv().await.expect("havemap response");
         assert!(!have_map.is_empty(), "confirm verified block");
 
         // Send a block request for the verified piece
@@ -236,9 +257,11 @@ mod tests {
 
         // Cancel the seeder
         cancel.cancel();
-
-        // Verify seeder exits cleanly
-        seeder_task.await.expect("seeder task").expect("seeder run");
+        operator
+            .join()
+            .await
+            .expect("seeder task")
+            .expect("seeder run");
 
         // Verify reply_block_contents was called
         assert!(
@@ -295,8 +318,6 @@ mod tests {
                 Ok(())
             }));
 
-        let (_client_ch, server_ch) = pipe(1);
-
         // Create share info
         let share_info = ShareInfo {
             header: test_header(),
@@ -311,14 +332,8 @@ mod tests {
         };
 
         // Create seeder
-        let mut seeder = Seeder::new(peer, server_ch, share_info, clients).expect("create seeder");
-
-        // Create cancellation token
         let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-
-        // Run seeder in a task
-        let seeder_task = tokio::spawn(async move { seeder.run(cancel_clone).await });
+        let operator = Operator::new(cancel.clone(), Seeder::new(peer, share_info, clients)).await;
 
         // Send a block request for an unverified piece
         let block_req = BlockRequest { piece: 0, block: 0 };
@@ -339,7 +354,7 @@ mod tests {
         cancel.cancel();
 
         // Verify seeder exits cleanly
-        let result = seeder_task.await.expect("seeder task");
+        let result = operator.join().await.expect("seeder task");
         assert!(
             result.is_ok(),
             "seeder should exit cleanly after handling block request"

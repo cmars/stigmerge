@@ -2,42 +2,39 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::select;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use veilid_core::Target;
 
 use super::types::FileBlockFetch;
-use crate::chan_rpc::{ChanServer, Service};
+use crate::actor::{Actor, ChanServer, Error, Result};
 use crate::peer::Peer;
-use crate::{Error, Result};
 
-pub struct BlockFetcher<'a, P: Peer> {
+pub struct BlockFetcher<P: Peer> {
     peer: P,
-    ch: ChanServer<Request, Response>,
-    want_index: &'a Index,
+    want_index: Arc<RwLock<Index>>,
     root: PathBuf,
     target_update_rx: broadcast::Receiver<Target>,
     target: Option<Target>,
     files: HashMap<usize, File>,
 }
 
-impl<'a, P: Peer> BlockFetcher<'a, P> {
+impl<P: Peer> BlockFetcher<P> {
     pub fn new(
         peer: P,
-        ch: ChanServer<Request, Response>,
-        want_index: &'a Index,
+        want_index: Arc<RwLock<Index>>,
         root: PathBuf,
         target_update_rx: broadcast::Receiver<Target>,
     ) -> Self {
         Self {
             peer,
-            ch,
             want_index,
             root,
             target_update_rx,
@@ -58,7 +55,7 @@ impl<'a, P: Peer> BlockFetcher<'a, P> {
             None => {
                 let path = self
                     .root
-                    .join(self.want_index.files()[block.file_index].path());
+                    .join(self.want_index.read().await.files()[block.file_index].path());
                 let fh = File::options()
                     .write(true)
                     .truncate(false)
@@ -114,11 +111,15 @@ impl Response {
     }
 }
 
-impl<'a, P: Peer + Send> Service for BlockFetcher<'a, P> {
+impl<P: Peer + Send> Actor for BlockFetcher<P> {
     type Request = Request;
     type Response = Response;
 
-    async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    async fn run(
+        &mut self,
+        cancel: CancellationToken,
+        mut server_ch: ChanServer<Self::Request, Self::Response>,
+    ) -> Result<()> {
         self.target = None;
         loop {
             if let None = self.target {
@@ -127,7 +128,7 @@ impl<'a, P: Peer + Send> Service for BlockFetcher<'a, P> {
                          return Ok(())
                      }
                      res = self.target_update_rx.recv() => {
-                         self.target = Some(res.map_err(Error::other)?);
+                         self.target = Some(res?);
                      }
                 }
             }
@@ -137,15 +138,15 @@ impl<'a, P: Peer + Send> Service for BlockFetcher<'a, P> {
                     return Ok(())
                 }
                 res = self.target_update_rx.recv() => {
-                    self.target = Some(res.map_err(Error::other)?);
+                    self.target = Some(res?);
                 }
-                res = self.ch.rx.recv() => {
-                    match res {
+                req = server_ch.recv() => {
+                    match req {
                         None => return Ok(()),
                         Some(req) => {
                             // TODO: perform this in a background task
                             let resp = self.handle(&req).await?;
-                            self.ch.tx.send(resp).await.map_err(Error::other)?;
+                            server_ch.send(resp).await?;
                         }
                     }
                 }
@@ -186,6 +187,19 @@ impl<'a, P: Peer + Send> Service for BlockFetcher<'a, P> {
     }
 }
 
+impl<P: Peer> Clone for BlockFetcher<P> {
+    fn clone(&self) -> Self {
+        Self {
+            peer: self.peer.clone(),
+            want_index: self.want_index.clone(),
+            root: self.root.clone(),
+            target_update_rx: self.target_update_rx.resubscribe(),
+            target: self.target,
+            files: HashMap::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, sync::Mutex};
@@ -196,7 +210,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use veilid_core::CryptoKey;
 
-    use crate::chan_rpc::pipe;
+    use crate::actor::Operator;
     use crate::tests::{temp_file, StubPeer};
     use crate::types::FileBlockFetch;
 
@@ -224,20 +238,16 @@ mod tests {
             Ok(vec![BLOCK_DATA; BLOCK_SIZE_BYTES])
         }));
 
-        let (mut client_ch, server_ch) = pipe(16);
         let (target_tx, target_rx) = broadcast::channel(16);
-        let cancel = CancellationToken::new();
-
-        let fetcher_cancel = cancel.clone();
-        let fetcher_index = index.clone();
         let fetcher_root = tf_path.parent().unwrap().to_path_buf();
 
         // Start BlockFetcher
-        let fetcher_task = tokio::spawn(async move {
-            let fetcher =
-                BlockFetcher::new(peer, server_ch, &fetcher_index, fetcher_root, target_rx);
-            fetcher.run(fetcher_cancel).await
-        });
+        let cancel = CancellationToken::new();
+        let mut operator = Operator::new(
+            cancel.clone(),
+            BlockFetcher::new(peer, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+        )
+        .await;
 
         // Send target update
         target_tx
@@ -255,10 +265,10 @@ mod tests {
             block: block.clone(),
             flush: true,
         };
-        client_ch.tx.send(req).await.expect("send request");
+        operator.send(req).await.expect("send request");
 
         // Verify response
-        let resp = client_ch.rx.recv().await.expect("receive response");
+        let resp = operator.recv().await.expect("receive response");
         assert!(
             matches!(
                 resp,
@@ -288,7 +298,8 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        fetcher_task
+        operator
+            .join()
             .await
             .expect("fetcher task")
             .expect("fetcher run");
@@ -312,24 +323,20 @@ mod tests {
         // Set up BlockFetcher with error-returning stub
         let mut peer = StubPeer::new();
         // Mock the block request to return an error
-        peer.request_block_result = Arc::new(Mutex::new(move |_, _, _| -> Result<Vec<u8>> {
-            Err(Error::msg("mock block fetch error"))
-        }));
+        peer.request_block_result =
+            Arc::new(Mutex::new(move |_, _, _| -> crate::Result<Vec<u8>> {
+                Err(crate::Error::msg("mock block fetch error"))
+            }));
 
-        let (mut client_ch, server_ch) = pipe(16);
         let (target_tx, target_rx) = broadcast::channel(16);
-        let cancel = CancellationToken::new();
-
-        let fetcher_cancel = cancel.clone();
-        let fetcher_index = index.clone();
         let fetcher_root = tf_path.parent().unwrap().to_path_buf();
 
-        // Start BlockFetcher
-        let fetcher_task = tokio::spawn(async move {
-            let fetcher =
-                BlockFetcher::new(peer, server_ch, &fetcher_index, fetcher_root, target_rx);
-            fetcher.run(fetcher_cancel).await
-        });
+        let cancel = CancellationToken::new();
+        let mut operator = Operator::new(
+            cancel.clone(),
+            BlockFetcher::new(peer, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+        )
+        .await;
 
         // Send target update
         target_tx
@@ -347,10 +354,10 @@ mod tests {
             block: block.clone(),
             flush: true,
         };
-        client_ch.tx.send(req).await.expect("send request");
+        operator.send(req).await.expect("send request");
 
         // Verify we get a FetchFailed response with our error
-        let resp = client_ch.rx.recv().await.expect("receive response");
+        let resp = operator.recv().await.expect("receive response");
         match resp {
             Response::FetchFailed {
                 block: failed_block,
@@ -367,7 +374,8 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        fetcher_task
+        operator
+            .join()
             .await
             .expect("fetcher task")
             .expect("fetcher run");
@@ -390,20 +398,13 @@ mod tests {
 
         // Set up BlockFetcher
         let peer = StubPeer::new();
-        let (client_ch, server_ch) = pipe(1);
-        let (_tx, rx) = broadcast::channel(1);
+        let (_target_tx, target_rx) = broadcast::channel(1);
         let cancel = CancellationToken::new();
-        let fetcher_cancel = cancel.clone();
-
-        // Start BlockFetcher
-        let fetcher_task = tokio::spawn(async move {
-            let fetcher = BlockFetcher::new(peer, server_ch, &index, tf_path, rx);
-            fetcher.run(fetcher_cancel).await
-        });
+        let fetcher = BlockFetcher::new(peer, Arc::new(RwLock::new(index)), tf_path, target_rx);
+        let mut operator = Operator::new(cancel.clone(), fetcher).await;
 
         // Request a block without sending target update first
-        client_ch
-            .tx
+        operator
             .send(Request::Fetch {
                 block: FileBlockFetch {
                     file_index: 0,
@@ -416,26 +417,13 @@ mod tests {
             .await
             .expect("send request");
 
-        // Client is blocked waiting for target update
-        client_ch
-            .tx
-            .try_send(Request::Fetch {
-                block: FileBlockFetch {
-                    file_index: 0,
-                    piece_index: 0,
-                    piece_offset: 0,
-                    block_index: 1,
-                },
-                flush: false,
-            })
-            .expect_err("send channel full");
-
         // Client has not responded to requests
-        assert_eq!(client_ch.rx.len(), 0);
+        assert_eq!(operator.recv_pending().await, 0);
 
         // Clean up
         cancel.cancel();
-        fetcher_task
+        operator
+            .join()
             .await
             .expect("fetcher task")
             .expect("fetcher run");

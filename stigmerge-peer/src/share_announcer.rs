@@ -4,20 +4,20 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::Target;
 
 use crate::{
-    chan_rpc::{ChanServer, Service},
+    actor::{Actor, Result},
     peer::TypedKey,
     proto::Header,
-    Error, Peer, Result,
+    Peer,
 };
 
+#[derive(Clone)]
 pub struct ShareAnnouncer<P: Peer> {
     peer: P,
-    ch: ChanServer<Request, Response>,
     index: Index,
-
     share: Option<ShareAnnounce>,
 }
 
+#[derive(Clone)]
 struct ShareAnnounce {
     key: TypedKey,
     target: Target,
@@ -25,32 +25,26 @@ struct ShareAnnounce {
 }
 
 impl<P: Peer> ShareAnnouncer<P> {
-    pub fn new(peer: P, ch: ChanServer<Request, Response>, index: Index) -> ShareAnnouncer<P> {
+    pub fn new(peer: P, index: Index) -> ShareAnnouncer<P> {
         ShareAnnouncer {
             peer,
-            ch,
             index,
             share: None,
         }
     }
 
-    async fn announce(&mut self) -> Result<()> {
+    async fn announce(&mut self) -> Result<Response> {
         let (key, target, header) = self.peer.announce_index(&self.index).await?;
         self.share = Some(ShareAnnounce {
             key: key.clone(),
             target: target.clone(),
             header: header.clone(),
         });
-        self.ch
-            .tx
-            .send(Response::Announce {
-                key,
-                target,
-                header,
-            })
-            .await
-            .map_err(Error::other)?;
-        Ok(())
+        Ok(Response::Announce {
+            key,
+            target,
+            header,
+        })
     }
 }
 
@@ -67,26 +61,30 @@ pub enum Response {
     },
 }
 
-impl<P: Peer> Service for ShareAnnouncer<P> {
+impl<P: Peer> Actor for ShareAnnouncer<P> {
     type Request = Request;
-
     type Response = Response;
 
-    async fn run(mut self, cancel: CancellationToken) -> crate::Result<()> {
+    async fn run(
+        &mut self,
+        cancel: CancellationToken,
+        mut server_ch: crate::actor::ChanServer<Self::Request, Self::Response>,
+    ) -> Result<()> {
         loop {
             match self.share {
                 None => {
-                    self.announce().await?;
+                    let resp = self.announce().await?;
+                    server_ch.send(resp).await?;
                 }
                 Some(ShareAnnounce { .. }) => {
                     select! {
                         _ = cancel.cancelled() => {
                             return Ok(());
                         }
-                        res = self.ch.rx.recv() => {
+                        res = server_ch.recv() => {
                             if let Some(req) = res {
                                 let resp = self.handle(&req).await?;
-                                self.ch.tx.send(resp).await.map_err(Error::other)?;
+                                server_ch.send(resp).await?;
                             }
                         }
                     }
@@ -130,12 +128,11 @@ mod tests {
     };
 
     use stigmerge_fileindex::Indexer;
-    use tokio::spawn;
     use tokio_util::sync::CancellationToken;
     use veilid_core::{CryptoKey, Target, TypedKey};
 
     use crate::{
-        chan_rpc::{pipe, Service},
+        actor::{Actor, Operator},
         proto::{Encoder, Header},
         share_announcer::{self, ShareAnnouncer},
         tests::{temp_file, StubPeer},
@@ -167,13 +164,11 @@ mod tests {
         }));
 
         // Create the service and channels
-        let (mut share_client, share_server) = pipe(32);
-        let svc = ShareAnnouncer::new(peer, share_server, index);
         let cancel = CancellationToken::new();
-        let svc_task = spawn(svc.run(cancel.clone()));
+        let mut operator = Operator::new(cancel.clone(), ShareAnnouncer::new(peer, index)).await;
 
         // Wait for the initial announce response
-        let announce_resp = share_client.rx.recv().await.expect("response");
+        let announce_resp = operator.recv().await.expect("response");
         match announce_resp {
             share_announcer::Response::Announce {
                 key,
@@ -190,7 +185,7 @@ mod tests {
         cancel.cancel();
 
         // Service run terminates
-        svc_task.await.expect("join").expect("svc run");
+        operator.join().await.expect("svc task").expect("svc run");
     }
 
     #[tokio::test]
@@ -234,13 +229,11 @@ mod tests {
         ));
 
         // Create the service and channels
-        let (mut share_client, share_server) = pipe(32);
-        let svc = ShareAnnouncer::new(peer, share_server, index);
         let cancel = CancellationToken::new();
-        let svc_task = spawn(svc.run(cancel.clone()));
+        let mut operator = Operator::new(cancel.clone(), ShareAnnouncer::new(peer, index)).await;
 
         // Wait for the initial announce response
-        let announce_resp = share_client.rx.recv().await.expect("response");
+        let announce_resp = operator.recv().await.expect("response");
         match announce_resp {
             share_announcer::Response::Announce {
                 key,
@@ -255,14 +248,13 @@ mod tests {
         }
 
         // Send a reannounce request
-        share_client
-            .tx
+        operator
             .send(share_announcer::Request::Announce)
             .await
             .expect("send request");
 
         // Wait for the reannounce response
-        let reannounce_resp = share_client.rx.recv().await.expect("response");
+        let reannounce_resp = operator.recv().await.expect("response");
         match reannounce_resp {
             share_announcer::Response::Announce {
                 key,
@@ -280,7 +272,7 @@ mod tests {
         cancel.cancel();
 
         // Service run terminates
-        svc_task.await.expect("join").expect("svc run");
+        operator.join().await.expect("svc task").expect("svc run");
     }
 
     #[tokio::test]
@@ -295,9 +287,8 @@ mod tests {
         // Create a stub peer with mock behavior
         let peer = StubPeer::new();
 
-        // Create the service and channels with no share announced yet
-        let (_share_client, share_server) = pipe(32);
-        let mut announcer = ShareAnnouncer::new(peer, share_server, index);
+        // Create the service and operator with no share announced yet
+        let mut announcer = ShareAnnouncer::new(peer, index);
 
         // Test the handle method directly with no share set
         let response = announcer
