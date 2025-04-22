@@ -5,22 +5,22 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
-    actor::{Actor, ChanServer, Error, Result},
-    peer::TypedKey,
+    actor::{Actor, ChanServer},
+    node::TypedKey,
     proto::{Decoder, PeerInfo},
-    Peer,
+    Error, Node, Result,
 };
 
 /// The peer_resolver service handles requests for remote peer maps, which
 /// indicate which other peers a remote peer knows about.
-pub struct PeerResolver<P: Peer> {
+pub struct PeerResolver<P: Node> {
     peer: P,
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
 }
 
 impl<P> PeerResolver<P>
 where
-    P: Peer,
+    P: Node,
 {
     /// Create a new peer_resolver service.
     pub fn new(peer: P) -> Self {
@@ -74,7 +74,7 @@ pub enum Response {
     },
 }
 
-impl<P: Peer> Actor for PeerResolver<P> {
+impl<P: Node> Actor for PeerResolver<P> {
     type Request = Request;
     type Response = Response;
 
@@ -162,7 +162,7 @@ impl<P: Peer> Actor for PeerResolver<P> {
     }
 }
 
-impl<P: Peer> Clone for PeerResolver<P> {
+impl<P: Node> Clone for PeerResolver<P> {
     fn clone(&self) -> Self {
         Self {
             peer: self.peer.clone(),
@@ -182,7 +182,7 @@ mod tests {
     use veilid_core::{TimestampDuration, TypedKey, ValueSubkeyRangeSet};
 
     use crate::{
-        actor::Operator,
+        actor::{OneShot, Operator},
         peer_resolver::{PeerResolver, Request, Response},
         proto::{Encoder, PeerInfo},
         tests::StubPeer,
@@ -217,7 +217,7 @@ mod tests {
         // Create peer resolver
         let cancel = CancellationToken::new();
         let peer_resolver = PeerResolver::new(stub_peer);
-        let mut operator = Operator::new(cancel.clone(), peer_resolver).await;
+        let mut operator = Operator::new(cancel.clone(), peer_resolver, OneShot).await;
 
         // Send a Resolve request
         let req = Request::Resolve {
@@ -280,7 +280,7 @@ mod tests {
         // Create peer resolver
         let cancel = CancellationToken::new();
         let peer_resolver = PeerResolver::new(stub_peer.clone());
-        let mut operator = Operator::new(cancel.clone(), peer_resolver).await;
+        let mut operator = Operator::new(cancel.clone(), peer_resolver, OneShot).await;
 
         // Send a Watch request
         let req = Request::Watch {
@@ -337,7 +337,7 @@ mod tests {
         // Create peer resolver
         let cancel = CancellationToken::new();
         let peer_resolver = PeerResolver::new(stub_peer.clone());
-        let mut operator = Operator::new(cancel.clone(), peer_resolver).await;
+        let mut operator = Operator::new(cancel.clone(), peer_resolver, OneShot).await;
 
         // Send a CancelWatch request
         let req = Request::CancelWatch {
@@ -388,7 +388,7 @@ mod tests {
         let update_tx = stub_peer.update_tx.clone();
         let cancel = CancellationToken::new();
         let peer_resolver = PeerResolver::new(stub_peer);
-        let mut operator = Operator::new(cancel.clone(), peer_resolver).await;
+        let mut operator = Operator::new(cancel.clone(), peer_resolver, OneShot).await;
 
         // Send a request and receive a response, to make sure the task is
         // running. That's important: if we're not in the run loop, the update

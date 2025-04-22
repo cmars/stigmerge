@@ -1,11 +1,8 @@
 use std::time::Duration;
 use std::{future::Future, path::Path};
 
-use backoff::backoff::Backoff;
 use backoff::ExponentialBackoff;
 use tokio::sync::broadcast::Receiver;
-use tokio::time::sleep;
-use tokio_util::sync::CancellationToken;
 use veilid_core::{
     CryptoKey, CryptoTyped, OperationId, Target, TimestampDuration, ValueSubkeyRangeSet,
     VeilidUpdate,
@@ -19,7 +16,7 @@ use crate::{proto::Header, Result};
 
 pub type TypedKey = CryptoTyped<CryptoKey>;
 
-pub trait Peer: Clone + Send {
+pub trait Node: Clone + Send {
     fn subscribe_veilid_update(&self) -> Receiver<VeilidUpdate>;
 
     fn reset(&mut self) -> impl Future<Output = Result<()>> + Send;
@@ -106,29 +103,6 @@ pub trait Peer: Clone + Send {
 mod veilid;
 pub use veilid::Veilid;
 
-mod observable;
-pub use observable::Observable;
-pub use observable::State as PeerState;
-
-pub async fn reset_with_backoff<T: Peer>(peer: &mut T, done: &CancellationToken) -> Result<()> {
-    let mut backoff = ExponentialBackoff::default();
-    loop {
-        match peer.reset().await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                if !e.is_resetable() {
-                    done.cancel();
-                    return Err(e);
-                }
-                match backoff.next_backoff() {
-                    Some(delay) => sleep(delay).await,
-                    None => return Err(e),
-                }
-            }
-        }
-    }
-}
-
 pub fn retry_backoff() -> ExponentialBackoff {
     let mut backoff = ExponentialBackoff::default();
     backoff.max_elapsed_time = Some(Duration::from_secs(15));
@@ -142,7 +116,7 @@ pub fn reset_backoff() -> ExponentialBackoff {
 macro_rules! with_backoff_retry {
     ($op:expr) => {{
         use backoff::backoff::Backoff as _;
-        let mut retry_backoff = crate::peer::retry_backoff();
+        let mut retry_backoff = crate::node::retry_backoff();
         let mut result = $op;
         loop {
             match result {

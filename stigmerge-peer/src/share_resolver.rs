@@ -8,16 +8,16 @@ use tracing::warn;
 use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
-    actor::{self, Actor, ChanServer},
-    peer::TypedKey,
+    actor::{Actor, ChanServer},
+    node::TypedKey,
     proto::{Digest, Encoder, Header},
-    Error, Peer,
+    Error, Node, Result,
 };
 
 /// The share_resolver service maintains private routes to the route posted at remote
 /// peers' share keys. It also validates that the remote peer is sharing
 /// the expected index by verifying its content digest.
-pub struct ShareResolver<P: Peer> {
+pub struct ShareResolver<P: Node> {
     peer: P,
     target_tx: broadcast::Sender<Target>,
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
@@ -25,7 +25,7 @@ pub struct ShareResolver<P: Peer> {
 
 const TARGET_BROADCAST_CAPACITY: usize = 16;
 
-impl<P: Peer> ShareResolver<P> {
+impl<P: Node> ShareResolver<P> {
     /// Create a new share_resolver service.
     pub fn new(peer: P) -> Self {
         let updates = peer.subscribe_veilid_update();
@@ -137,7 +137,7 @@ impl Response {
     }
 }
 
-impl<P: Peer> Actor for ShareResolver<P> {
+impl<P: Node> Actor for ShareResolver<P> {
     type Request = Request;
     type Response = Response;
 
@@ -145,7 +145,7 @@ impl<P: Peer> Actor for ShareResolver<P> {
         &mut self,
         cancel: CancellationToken,
         mut server_ch: ChanServer<Self::Request, Self::Response>,
-    ) -> actor::Result<()> {
+    ) -> Result<()> {
         let mut updates = self.peer.subscribe_veilid_update();
         loop {
             select! {
@@ -166,21 +166,21 @@ impl<P: Peer> Actor for ShareResolver<P> {
                                 // Invalid or unusable shares are unwatched.
                                 self.peer.cancel_watch(req.key());
                             }
-                            server_ch.send(resp).await.map_err(Error::other)?
+                            server_ch.send(resp).await?;
                         }
                         Err(e) => {
-                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err: e.into() }).await.map_err(Error::other)?
+                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err: e.into() }).await?;
                         }
                     }
                 }
                 res = updates.recv() => {
-                    let update = res.map_err(Error::other)?;
+                    let update = res?;
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
                             // FIXME: this may leak private routes.
                             // TODO: keep track of prior routes and pass them here?
                             let resp = self.handle(&Request::Header{ key: ch.key, prior_target: None }).await?;
-                            server_ch.send(resp).await.map_err(Error::other)?;
+                            server_ch.send(resp).await?;
                         }
                         veilid_core::VeilidUpdate::Shutdown => {
                             return Ok(());
@@ -193,7 +193,7 @@ impl<P: Peer> Actor for ShareResolver<P> {
     }
 
     /// Handle a share_resolver request, provide a response.
-    async fn handle(&mut self, req: &Request) -> actor::Result<Response> {
+    async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Index {
                 key,
@@ -202,7 +202,7 @@ impl<P: Peer> Actor for ShareResolver<P> {
             } => {
                 let (target, header, index) = self.peer.resolve(key, root.as_path()).await?;
                 let mut peer_index_digest = Sha256::new();
-                peer_index_digest.update(index.encode().map_err(Error::other)?);
+                peer_index_digest.update(index.encode()?);
                 if peer_index_digest.finalize().as_slice() == want_index_digest {
                     self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
                         warn!("no target subscribers: {}", e);
@@ -241,7 +241,7 @@ impl<P: Peer> Actor for ShareResolver<P> {
     }
 }
 
-impl<P: Peer + Clone> Clone for ShareResolver<P> {
+impl<P: Node + Clone> Clone for ShareResolver<P> {
     fn clone(&self) -> Self {
         Self {
             peer: self.peer.clone(),
@@ -264,7 +264,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use veilid_core::{CryptoKey, Target, TimestampDuration, TypedKey, ValueSubkeyRangeSet};
 
-    use crate::actor::Operator;
+    use crate::actor::{OneShot, Operator};
     use crate::{
         proto::{Encoder, HaveMapRef, Header, PeerMapRef},
         share_resolver::{self, ShareResolver},
@@ -303,7 +303,7 @@ mod tests {
         peer.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedKey| {}));
 
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(peer)).await;
+        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(peer), OneShot).await;
 
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
@@ -391,7 +391,7 @@ mod tests {
         ));
 
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(peer)).await;
+        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(peer), OneShot).await;
 
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");

@@ -1,0 +1,77 @@
+//! Example: announce a file using a real Veilid peer
+// Usage: cargo run --example share_and_seed -- <FILE>
+
+use std::env;
+use std::path::PathBuf;
+
+use tokio::select;
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+
+use stigmerge_fileindex::Indexer;
+use stigmerge_peer::actor::{OneShot, Operator, WithVeilidConnection};
+use stigmerge_peer::node::Veilid;
+use stigmerge_peer::seeder::Clients as SeederClients;
+use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
+use stigmerge_peer::Error;
+use stigmerge_peer::{new_routing_context, Node};
+
+#[tokio::main]
+async fn main() -> std::result::Result<(), Error> {
+    tracing_subscriber::fmt::init();
+
+    let file = env::args().nth(1).expect("usage: <prog> <FILE>");
+    let file = PathBuf::from(file);
+    //let root = file
+    //    .parent()
+    //    .unwrap_or_else(|| std::path::Path::new("."))
+    //    .to_path_buf();
+
+    // Index the file
+    let indexer = Indexer::from_file(file.clone()).await?;
+    let index = indexer.index().await?;
+
+    let state_dir = tempfile::tempdir()?;
+
+    // Set up Veilid peer
+    let (routing_context, update_tx, _) =
+        new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
+    let peer = Veilid::new(routing_context, update_tx).await?;
+    let update_rx = peer.subscribe_veilid_update();
+
+    let cancel = CancellationToken::new();
+
+    // Announce the share
+    let mut announce_op = Operator::new(
+        cancel.clone(),
+        ShareAnnouncer::new(peer.clone(), index.clone()),
+        WithVeilidConnection::new(OneShot, peer.clone()),
+    )
+    .await;
+    announce_op.send(share_announcer::Request::Announce).await?;
+
+    let resp = announce_op.recv().await;
+    let (key, target, header) = match resp {
+        Some(share_announcer::Response::Announce {
+            key,
+            target,
+            header,
+        }) => (key, target, header),
+        _ => anyhow::bail!("Announce failed"),
+    };
+    info!("announced: key={key}, target={target:?}");
+
+    select! {
+        _ = tokio::signal::ctrl_c() => {
+            cancel.cancel();
+        }
+    }
+
+    announce_op
+        .join()
+        .await
+        .expect("announce task")
+        .expect("announce run");
+    Ok(())
+}

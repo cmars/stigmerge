@@ -11,24 +11,24 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::VeilidUpdate;
 
 use crate::{
-    actor::{Actor, ChanServer, Result},
+    actor::{Actor, ChanServer},
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
     types::{PieceState, ShareInfo},
-    Peer,
+    Node, Result,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Request {
     HaveMap,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Response {
     HaveMap(PieceMap),
 }
 
-pub struct Seeder<P: Peer> {
+pub struct Seeder<P: Node> {
     peer: P,
     want_index: Index,
     root: PathBuf,
@@ -37,7 +37,7 @@ pub struct Seeder<P: Peer> {
     piece_map: PieceMap,
 }
 
-impl<P: Peer> Seeder<P> {
+impl<P: Node> Seeder<P> {
     pub fn new(peer: P, share: ShareInfo, clients: Clients) -> Self {
         Seeder {
             peer,
@@ -75,7 +75,7 @@ impl<P: Peer> Seeder<P> {
     }
 }
 
-impl<P: Peer> Actor for Seeder<P> {
+impl<P: Node> Actor for Seeder<P> {
     type Request = Request;
     type Response = Response;
 
@@ -128,7 +128,7 @@ impl<P: Peer> Actor for Seeder<P> {
     }
 }
 
-impl<P: Peer> Clone for Seeder<P> {
+impl<P: Node> Clone for Seeder<P> {
     fn clone(&self) -> Self {
         Self {
             peer: self.peer.clone(),
@@ -167,7 +167,7 @@ mod tests {
     use veilid_core::{OperationId, VeilidAppCall};
 
     use crate::{
-        actor::Operator,
+        actor::{OneShot, Operator},
         proto::{BlockRequest, Encoder, Header},
         tests::{temp_file, StubPeer},
     };
@@ -228,8 +228,12 @@ mod tests {
 
         // Create cancellation token
         let cancel = CancellationToken::new();
-        let mut operator =
-            Operator::new(cancel.clone(), Seeder::new(peer, share_info, clients)).await;
+        let mut operator = Operator::new(
+            cancel.clone(),
+            Seeder::new(peer, share_info, clients),
+            OneShot,
+        )
+        .await;
 
         // First, send a verified piece notification with confirmation it's applied
         let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
@@ -333,7 +337,12 @@ mod tests {
 
         // Create seeder
         let cancel = CancellationToken::new();
-        let operator = Operator::new(cancel.clone(), Seeder::new(peer, share_info, clients)).await;
+        let operator = Operator::new(
+            cancel.clone(),
+            Seeder::new(peer, share_info, clients),
+            OneShot,
+        )
+        .await;
 
         // Send a block request for an unverified piece
         let block_req = BlockRequest { piece: 0, block: 0 };

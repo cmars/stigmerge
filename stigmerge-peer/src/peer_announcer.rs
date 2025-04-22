@@ -4,9 +4,9 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    actor::{Actor, ChanServer, Result},
-    peer::TypedKey,
-    Peer,
+    actor::{Actor, ChanServer},
+    node::TypedKey,
+    Node, Result,
 };
 
 /// The peer-announcer service handles requests to announce or redact remote
@@ -15,7 +15,7 @@ use crate::{
 /// Each remote peer is encoded to a separate subkey. Redacted peers are
 /// marked with empty contents.
 #[derive(Clone)]
-pub struct PeerAnnouncer<P: Peer> {
+pub struct PeerAnnouncer<P: Node> {
     peer: P,
     key: TypedKey,
     peer_indexes: HashMap<TypedKey, usize>,
@@ -25,7 +25,7 @@ pub struct PeerAnnouncer<P: Peer> {
 
 pub const DEFAULT_MAX_PEERS: u16 = 32;
 
-impl<P: Peer> PeerAnnouncer<P> {
+impl<P: Node> PeerAnnouncer<P> {
     /// Create a new peer_announcer service.
     pub(super) fn new(peer: P, key: TypedKey) -> Self {
         Self {
@@ -69,7 +69,7 @@ pub enum Request {
 /// Peer-map announcer response message, just an acknowledgement or error.
 pub type Response = Result<()>;
 
-impl<P: Peer> Actor for PeerAnnouncer<P> {
+impl<P: Node> Actor for PeerAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
@@ -143,7 +143,7 @@ mod tests {
     use veilid_core::TypedKey;
 
     use crate::{
-        actor::Operator,
+        actor::{OneShot, Operator},
         peer_announcer::{PeerAnnouncer, Request, DEFAULT_MAX_PEERS},
         tests::StubPeer,
     };
@@ -186,7 +186,7 @@ mod tests {
         // Create peer announcer
         let cancel = CancellationToken::new();
         let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone());
-        let mut operator = Operator::new(cancel.clone(), peer_announcer).await;
+        let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot).await;
 
         // Send an Announce request
         let req = Request::Announce {
@@ -252,7 +252,7 @@ mod tests {
         // Create peer announcer
         let cancel = CancellationToken::new();
         let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone());
-        let mut operator = Operator::new(cancel.clone(), peer_announcer).await;
+        let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot).await;
 
         // First announce a peer
         let req_announce = Request::Announce {
@@ -311,7 +311,7 @@ mod tests {
         // Create peer announcer
         let cancel = CancellationToken::new();
         let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone());
-        let mut operator = Operator::new(cancel.clone(), peer_announcer).await;
+        let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot).await;
 
         // Send a Reset request
         let req = Request::Reset;

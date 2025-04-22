@@ -8,7 +8,7 @@ use stigmerge_fileindex::Indexer;
 use tokio::{select, spawn, time::sleep};
 use tokio_util::sync::CancellationToken;
 
-use stigmerge_peer::{new_routing_context, Fetcher, Observable, Peer, PeerState, Seeder, Veilid};
+use stigmerge_peer::{new_routing_context, Fetcher, Observable, Node, PeerState, Seeder, Veilid};
 use tracing::error;
 
 use crate::{cli::Commands, initialize_stderr_logging, initialize_ui_logging, Cli};

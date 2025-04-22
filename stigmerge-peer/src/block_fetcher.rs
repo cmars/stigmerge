@@ -13,11 +13,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use veilid_core::Target;
 
-use super::types::FileBlockFetch;
-use crate::actor::{Actor, ChanServer, Error, Result};
-use crate::peer::Peer;
+use crate::actor::{Actor, ChanServer};
+use crate::error::{Error, Result};
+use crate::node::Node;
 
-pub struct BlockFetcher<P: Peer> {
+use super::types::FileBlockFetch;
+
+pub struct BlockFetcher<P: Node> {
     peer: P,
     want_index: Arc<RwLock<Index>>,
     root: PathBuf,
@@ -26,7 +28,7 @@ pub struct BlockFetcher<P: Peer> {
     files: HashMap<usize, File>,
 }
 
-impl<P: Peer> BlockFetcher<P> {
+impl<P: Node> BlockFetcher<P> {
     pub fn new(
         peer: P,
         want_index: Arc<RwLock<Index>>,
@@ -111,7 +113,7 @@ impl Response {
     }
 }
 
-impl<P: Peer + Send> Actor for BlockFetcher<P> {
+impl<P: Node + Send> Actor for BlockFetcher<P> {
     type Request = Request;
     type Response = Response;
 
@@ -187,7 +189,7 @@ impl<P: Peer + Send> Actor for BlockFetcher<P> {
     }
 }
 
-impl<P: Peer> Clone for BlockFetcher<P> {
+impl<P: Node> Clone for BlockFetcher<P> {
     fn clone(&self) -> Self {
         Self {
             peer: self.peer.clone(),
@@ -210,7 +212,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use veilid_core::CryptoKey;
 
-    use crate::actor::Operator;
+    use crate::actor::{OneShot, Operator};
     use crate::tests::{temp_file, StubPeer};
     use crate::types::FileBlockFetch;
 
@@ -246,6 +248,7 @@ mod tests {
         let mut operator = Operator::new(
             cancel.clone(),
             BlockFetcher::new(peer, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+            OneShot,
         )
         .await;
 
@@ -325,7 +328,7 @@ mod tests {
         // Mock the block request to return an error
         peer.request_block_result =
             Arc::new(Mutex::new(move |_, _, _| -> crate::Result<Vec<u8>> {
-                Err(crate::Error::msg("mock block fetch error"))
+                Err(Error::msg("mock block fetch error"))
             }));
 
         let (target_tx, target_rx) = broadcast::channel(16);
@@ -335,6 +338,7 @@ mod tests {
         let mut operator = Operator::new(
             cancel.clone(),
             BlockFetcher::new(peer, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+            OneShot,
         )
         .await;
 
@@ -401,7 +405,7 @@ mod tests {
         let (_target_tx, target_rx) = broadcast::channel(1);
         let cancel = CancellationToken::new();
         let fetcher = BlockFetcher::new(peer, Arc::new(RwLock::new(index)), tf_path, target_rx);
-        let mut operator = Operator::new(cancel.clone(), fetcher).await;
+        let mut operator = Operator::new(cancel.clone(), fetcher, OneShot).await;
 
         // Request a block without sending target update first
         operator

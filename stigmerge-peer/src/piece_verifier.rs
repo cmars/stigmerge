@@ -11,10 +11,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::{
-    actor::{Actor, Result},
-    types::PieceState,
-};
+use crate::{actor::Actor, error::Result, types::PieceState};
 
 #[derive(Clone)]
 pub struct PieceVerifier {
@@ -201,7 +198,10 @@ mod tests {
     use stigmerge_fileindex::Indexer;
     use tokio_util::sync::CancellationToken;
 
-    use crate::{actor::Operator, tests::temp_file};
+    use crate::{
+        actor::{OneShot, Operator},
+        tests::temp_file,
+    };
 
     use super::*;
 
@@ -222,6 +222,7 @@ mod tests {
         let mut operator = Operator::new(
             cancel.clone(),
             PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
+            OneShot,
         )
         .await;
 
@@ -284,6 +285,7 @@ mod tests {
         let mut operator = Operator::new(
             cancel.clone(),
             PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
+            OneShot,
         )
         .await;
 
@@ -395,6 +397,7 @@ mod tests {
         let mut operator = Operator::new(
             cancel.clone(),
             PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
+            OneShot,
         )
         .await;
 

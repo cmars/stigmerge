@@ -3,15 +3,10 @@ use tokio::select;
 use tokio_util::sync::CancellationToken;
 use veilid_core::Target;
 
-use crate::{
-    actor::{Actor, Result},
-    peer::TypedKey,
-    proto::Header,
-    Peer,
-};
+use crate::{actor::Actor, node::TypedKey, proto::Header, Node, Result};
 
 #[derive(Clone)]
-pub struct ShareAnnouncer<P: Peer> {
+pub struct ShareAnnouncer<P: Node> {
     peer: P,
     index: Index,
     share: Option<ShareAnnounce>,
@@ -24,7 +19,7 @@ struct ShareAnnounce {
     header: Header,
 }
 
-impl<P: Peer> ShareAnnouncer<P> {
+impl<P: Node> ShareAnnouncer<P> {
     pub fn new(peer: P, index: Index) -> ShareAnnouncer<P> {
         ShareAnnouncer {
             peer,
@@ -48,10 +43,12 @@ impl<P: Peer> ShareAnnouncer<P> {
     }
 }
 
+#[derive(Clone)]
 pub enum Request {
     Announce,
 }
 
+#[derive(Clone)]
 pub enum Response {
     NotAvailable,
     Announce {
@@ -61,7 +58,7 @@ pub enum Response {
     },
 }
 
-impl<P: Peer> Actor for ShareAnnouncer<P> {
+impl<P: Node> Actor for ShareAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
@@ -132,7 +129,7 @@ mod tests {
     use veilid_core::{CryptoKey, Target, TypedKey};
 
     use crate::{
-        actor::{Actor, Operator},
+        actor::{Actor, OneShot, Operator},
         proto::{Encoder, Header},
         share_announcer::{self, ShareAnnouncer},
         tests::{temp_file, StubPeer},
@@ -165,7 +162,8 @@ mod tests {
 
         // Create the service and channels
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareAnnouncer::new(peer, index)).await;
+        let mut operator =
+            Operator::new(cancel.clone(), ShareAnnouncer::new(peer, index), OneShot).await;
 
         // Wait for the initial announce response
         let announce_resp = operator.recv().await.expect("response");
@@ -230,7 +228,8 @@ mod tests {
 
         // Create the service and channels
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareAnnouncer::new(peer, index)).await;
+        let mut operator =
+            Operator::new(cancel.clone(), ShareAnnouncer::new(peer, index), OneShot).await;
 
         // Wait for the initial announce response
         let announce_resp = operator.recv().await.expect("response");

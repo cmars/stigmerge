@@ -3,17 +3,13 @@ use tokio::select;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use veilid_core::Target;
 
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
-use crate::{
-    actor::{Error, Operator, Result},
-    have_announcer,
-};
-use crate::{block_fetcher, piece_verifier, Peer};
+use crate::{actor::Operator, have_announcer};
+use crate::{block_fetcher, piece_verifier, Error, Result};
 
-pub struct Fetcher<P: Peer + 'static> {
-    clients: Clients<P>,
+pub struct Fetcher {
+    clients: Clients,
 
     want_index: Index,
     have_index: Index,
@@ -22,17 +18,10 @@ pub struct Fetcher<P: Peer + 'static> {
     status_tx: broadcast::Sender<Status>,
 }
 
-pub struct Clients<P: Peer + 'static> {
-    pub target_update_rx: broadcast::Receiver<Target>,
-    pub block_fetcher:
-        Operator<block_fetcher::BlockFetcher<P>, block_fetcher::Request, block_fetcher::Response>,
-    pub piece_verifier:
-        Operator<piece_verifier::PieceVerifier, piece_verifier::Request, piece_verifier::Response>,
-    pub have_announcer: Operator<
-        have_announcer::HaveAnnouncer<P>,
-        have_announcer::Request,
-        have_announcer::Response,
-    >,
+pub struct Clients {
+    pub block_fetcher: Operator<block_fetcher::Request, block_fetcher::Response>,
+    pub piece_verifier: Operator<piece_verifier::Request, piece_verifier::Response>,
+    pub have_announcer: Operator<have_announcer::Request, have_announcer::Response>,
 }
 
 pub enum State {
@@ -51,8 +40,8 @@ pub enum Status {
     Done,
 }
 
-impl<P: Peer + 'static> Fetcher<P> {
-    pub fn new(share: ShareInfo, clients: Clients<P>) -> Fetcher<P> {
+impl Fetcher {
+    pub fn new(share: ShareInfo, clients: Clients) -> Fetcher {
         Fetcher {
             clients,
             have_index: share.want_index.empty(),

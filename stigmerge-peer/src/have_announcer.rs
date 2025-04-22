@@ -4,10 +4,11 @@ use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    actor::{Actor, ChanServer, Result},
-    peer::TypedKey,
+    actor::{Actor, ChanServer},
+    error::Result,
+    node::TypedKey,
     piece_map::PieceMap,
-    Peer,
+    Node,
 };
 
 /// The have-announcer service handles requests for announcing the share pieces
@@ -16,14 +17,14 @@ use crate::{
 /// piece index: a set bit (1) indicating the peer has the piece, a clear bit
 /// (0) indicating the peer does not have the piece.
 #[derive(Clone)]
-pub struct HaveAnnouncer<P: Peer> {
+pub struct HaveAnnouncer<P: Node> {
     peer: P,
     key: TypedKey,
     pieces_map: Arc<RwLock<PieceMap>>,
     announce_interval: Duration,
 }
 
-impl<P: Peer> HaveAnnouncer<P> {
+impl<P: Node> HaveAnnouncer<P> {
     /// Create a new have_announcer service.
     pub fn new(peer: P, key: TypedKey) -> Self {
         Self {
@@ -50,7 +51,7 @@ pub enum Request {
 /// Have-map announcer response message, just an acknowledgement or error.
 pub type Response = Result<()>;
 
-impl<P: Peer> Actor for HaveAnnouncer<P> {
+impl<P: Node> Actor for HaveAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
@@ -116,7 +117,7 @@ mod tests {
     use veilid_core::TypedKey;
 
     use crate::{
-        actor::Operator,
+        actor::{OneShot, Operator},
         have_announcer::{HaveAnnouncer, Request},
         piece_map::PieceMap,
         tests::StubPeer,
@@ -147,7 +148,7 @@ mod tests {
         let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key.clone());
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), have_announcer).await;
+        let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot).await;
 
         // Send a Set request to announce a piece
         let req = Request::Set { piece_index: 42 };
@@ -196,7 +197,7 @@ mod tests {
         let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key);
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), have_announcer).await;
+        let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot).await;
 
         // First set a piece
         let req_set = Request::Set { piece_index: 42 };
@@ -243,7 +244,7 @@ mod tests {
         let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key);
         let cancel = CancellationToken::new();
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
-        let mut operator = Operator::new(cancel.clone(), have_announcer).await;
+        let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot).await;
 
         // First set some pieces
         let req_set = Request::Set { piece_index: 42 };

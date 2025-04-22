@@ -7,7 +7,7 @@ use chrono::Utc;
 use clap::{command, Parser};
 use rand::{random, rngs::OsRng, TryRngCore};
 use sha2::{Digest, Sha256};
-use stigmerge_peer::{new_routing_context, NodeState};
+use stigmerge_peer::{new_routing_context, PeerState};
 use tokio::{
     select, signal,
     sync::broadcast::{self, Receiver},
@@ -370,11 +370,11 @@ async fn wait_for_attachment(
                 let update = res?;
                 match update {
                     VeilidUpdate::Attachment(ref attachment) => {
-                        let updated_state = NodeState::from(attachment);
+                        let updated_state = PeerState::from(attachment);
                         println!(
                             "{}: node state {} attachment {:?}", task.id(), updated_state,
                             attachment);
-                        if let NodeState::Connected = updated_state {
+                        if let PeerState::Connected = updated_state {
                             println!("{}: connected", task.id());
                             return Ok(());
                         }

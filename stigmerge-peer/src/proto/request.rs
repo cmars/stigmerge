@@ -1,4 +1,4 @@
-use crate::peer::TypedKey;
+use crate::node::TypedKey;
 use capnp::{
     message::{self, ReaderOptions},
     serialize,
@@ -103,7 +103,7 @@ impl Decoder for Request {
 mod tests {
     use veilid_core::CRYPTO_KIND_VLD0;
 
-    use crate::peer::TypedKey;
+    use crate::node::TypedKey;
 
     use super::*;
 

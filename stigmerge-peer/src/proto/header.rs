@@ -5,7 +5,7 @@ use capnp::{
 use stigmerge_fileindex::Index;
 use veilid_core::ValueData;
 
-use crate::peer::TypedKey;
+use crate::node::TypedKey;
 
 use super::{
     stigmerge_capnp::{have_map, header, peer_map},

@@ -7,8 +7,8 @@ use stigmerge_fileindex::Index;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use veilid_core::{OperationId, Target, TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
-use crate::{error::Result, peer::TypedKey, piece_map::PieceMap, proto::PeerInfo};
-use crate::{proto::Header, Peer};
+use crate::{error::Result, node::TypedKey, piece_map::PieceMap, proto::PeerInfo};
+use crate::{proto::Header, Node};
 
 #[derive(Clone)]
 pub struct StubPeer {
@@ -122,7 +122,7 @@ impl StubPeer {
     }
 }
 
-impl Peer for StubPeer {
+impl Node for StubPeer {
     fn subscribe_veilid_update(&self) -> Receiver<VeilidUpdate> {
         self.update_tx.subscribe()
     }

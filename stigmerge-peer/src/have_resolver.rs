@@ -8,10 +8,10 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
-    actor::{Actor, ChanServer, Error, Result},
-    peer::TypedKey,
+    actor::{Actor, ChanServer},
+    node::TypedKey,
     piece_map::PieceMap,
-    Peer,
+    Error, Node, Result,
 };
 
 /// The have_resolver service handles requests for remote peer have-maps, which
@@ -19,7 +19,7 @@ use crate::{
 ///
 /// This service operates on the have-map reference keys indicated in the main
 /// share DHT header (subkey 0) as haveMapRef.
-pub struct HaveResolver<P: Peer> {
+pub struct HaveResolver<P: Node> {
     peer: P,
     pieces_maps: HashMap<TypedKey, Arc<RwLock<PieceMap>>>,
     updates: broadcast::Receiver<VeilidUpdate>,
@@ -27,7 +27,7 @@ pub struct HaveResolver<P: Peer> {
 
 impl<P> HaveResolver<P>
 where
-    P: Peer,
+    P: Node,
 {
     /// Create a new have_resolver service with the given peer.
     pub(super) fn new(peer: P) -> Self {
@@ -97,7 +97,7 @@ pub enum Response {
     WatchCancelled { key: TypedKey },
 }
 
-impl<P: Peer> Actor for HaveResolver<P> {
+impl<P: Node> Actor for HaveResolver<P> {
     type Request = Request;
     type Response = Response;
 
@@ -187,7 +187,7 @@ impl<P: Peer> Actor for HaveResolver<P> {
     }
 }
 
-impl<P: Peer + 'static> Clone for HaveResolver<P> {
+impl<P: Node + 'static> Clone for HaveResolver<P> {
     fn clone(&self) -> Self {
         Self {
             peer: self.peer.clone(),
@@ -211,9 +211,9 @@ mod tests {
     };
 
     use crate::{
-        actor::Operator,
+        actor::{OneShot, Operator},
         have_resolver::{HaveResolver, Request, Response},
-        peer::TypedKey,
+        node::TypedKey,
         piece_map::PieceMap,
         tests::StubPeer,
     };
@@ -243,7 +243,7 @@ mod tests {
         // Create have resolver
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(stub_peer.clone());
-        let mut operator = Operator::new(cancel.clone(), have_resolver).await;
+        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
 
         // Send a Resolve request
         let req = Request::Resolve {
@@ -306,7 +306,7 @@ mod tests {
         // Create have resolver
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(stub_peer.clone());
-        let mut operator = Operator::new(cancel.clone(), have_resolver).await;
+        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
 
         // Send a Watch request
         let req = Request::Watch {
@@ -363,7 +363,7 @@ mod tests {
         // Create have resolver
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(stub_peer.clone());
-        let mut operator = Operator::new(cancel.clone(), have_resolver).await;
+        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
 
         // Send a CancelWatch request
         let req = Request::CancelWatch {
@@ -412,7 +412,7 @@ mod tests {
         let update_tx = stub_peer.update_tx.clone();
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(stub_peer);
-        let mut operator = Operator::new(cancel.clone(), have_resolver).await;
+        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
 
         // Send a request and receive a response, to make sure the task is
         // running. That's important: if we're not in the run loop, the update

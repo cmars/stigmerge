@@ -79,7 +79,7 @@ mod tests {
     use veilid_core::CRYPTO_KIND_VLD0;
 
     use crate::{
-        peer::TypedKey,
+        node::TypedKey,
         proto::{Decoder, Encoder, PeerInfo},
     };
 

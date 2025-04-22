@@ -22,7 +22,7 @@ use crate::{
     Error, Result,
 };
 
-use super::{with_backoff_retry, Peer, TypedKey};
+use super::{with_backoff_retry, Node, TypedKey};
 
 pub struct Veilid {
     routing_context: Arc<RwLock<RoutingContext>>,
@@ -149,7 +149,7 @@ impl Veilid {
         header: &Header,
     ) -> Result<()> {
         // Encode the header
-        let header_bytes = header.encode().map_err(Error::internal_protocol)?;
+        let header_bytes = header.encode()?;
         debug!(header_length = header_bytes.len(), "writing header");
 
         rc.set_dht_value(key.to_owned(), 0, header_bytes, None)
@@ -193,7 +193,7 @@ impl Veilid {
                 .into())
             }
         };
-        Ok(Header::decode(subkey_value.data()).map_err(Error::remote_protocol)?)
+        Ok(Header::decode(subkey_value.data())?)
     }
 
     async fn read_index(
@@ -220,8 +220,7 @@ impl Veilid {
             index_bytes.extend_from_slice(subkey_value.data());
         }
         let (payload_pieces, payload_files) =
-            <(Vec<PayloadPiece>, Vec<FileSpec>)>::decode(index_bytes.as_slice())
-                .map_err(Error::remote_protocol)?;
+            <(Vec<PayloadPiece>, Vec<FileSpec>)>::decode(index_bytes.as_slice())?;
         Ok(Index::new(
             root.to_path_buf(),
             PayloadSpec::new(
@@ -255,7 +254,7 @@ impl Clone for Veilid {
     }
 }
 
-impl Peer for Veilid {
+impl Node for Veilid {
     fn subscribe_veilid_update(&self) -> broadcast::Receiver<VeilidUpdate> {
         self.update_tx.subscribe()
     }
@@ -279,7 +278,7 @@ impl Peer for Veilid {
     async fn announce_index(&mut self, index: &Index) -> Result<(TypedKey, Target, Header)> {
         let rc = self.routing_context.read().await;
         // Serialize index to index_bytes
-        let index_bytes = index.encode().map_err(Error::internal_protocol)?;
+        let index_bytes = index.encode()?;
         let (announce_route, route_data) = rc.api().new_private_route().await?;
         let mut header = Header::from_index(index, index_bytes.as_slice(), route_data.as_slice());
         trace!(header = format!("{:?}", header));
@@ -359,7 +358,7 @@ impl Peer for Veilid {
             piece: piece as u32,
             block: block as u8,
         });
-        let block_req_bytes = block_req.encode().map_err(Error::internal_protocol)?;
+        let block_req_bytes = block_req.encode()?;
         let resp_bytes = rc.app_call(target, block_req_bytes).await?;
         Ok(resp_bytes)
     }
@@ -476,8 +475,8 @@ impl Peer for Veilid {
         let data = rc
             .get_dht_value(key, subkey.into(), true)
             .await?
-            .ok_or(Error::other(anyhow::Error::msg("not found")))?;
-        let peer_info = PeerInfo::decode(data.data()).map_err(Error::other)?;
+            .ok_or(Error::msg("not found"))?;
+        let peer_info = PeerInfo::decode(data.data())?;
         Ok(peer_info)
     }
 
@@ -491,13 +490,8 @@ impl Peer for Veilid {
         match peer_key {
             Some(peer_key) => {
                 let peer_info = PeerInfo::new(peer_key);
-                rc.set_dht_value(
-                    peer_map_key,
-                    subkey.into(),
-                    peer_info.encode().map_err(Error::InternalProtocol)?,
-                    None,
-                )
-                .await?;
+                rc.set_dht_value(peer_map_key, subkey.into(), peer_info.encode()?, None)
+                    .await?;
             }
             None => {
                 rc.set_dht_value(peer_map_key, subkey.into(), vec![], None)
