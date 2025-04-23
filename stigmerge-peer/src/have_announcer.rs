@@ -37,6 +37,7 @@ impl<N: Node> HaveAnnouncer<N> {
 }
 
 /// Have-map announcer request messages.
+#[derive(Clone, Debug)]
 pub enum Request {
     /// Announce that this peer has a given piece.
     Set { piece_index: u32 },
@@ -49,7 +50,7 @@ pub enum Request {
 }
 
 /// Have-map announcer response message, just an acknowledgement or error.
-pub type Response = Result<()>;
+pub type Response = ();
 
 impl<P: Node> Actor for HaveAnnouncer<P> {
     type Request = Request;
@@ -92,15 +93,12 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
         Ok(match req {
             Request::Set { piece_index } => {
                 pieces_map.set(*piece_index);
-                Ok(())
             }
             Request::Clear { piece_index } => {
                 pieces_map.clear(*piece_index);
-                Ok(())
             }
             Request::Reset => {
                 pieces_map.reset();
-                Ok(())
             }
         })
     }
@@ -118,7 +116,7 @@ mod tests {
 
     use crate::{
         actor::{OneShot, Operator},
-        have_announcer::{HaveAnnouncer, Request},
+        have_announcer::{HaveAnnouncer, Request, Response},
         piece_map::PieceMap,
         tests::StubNode,
     };
@@ -148,12 +146,12 @@ mod tests {
         let mut have_announcer = HaveAnnouncer::new(node.clone(), test_key.clone());
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot);
 
         // Send a Set request to announce a piece
         let req = Request::Set { piece_index: 42 };
         operator.send(req).await.unwrap();
-        operator.recv().await.expect("recv").expect("set ok");
+        assert_eq!(operator.recv().await.expect("recv"), ());
 
         // Wait for the announcement to happen
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -197,17 +195,17 @@ mod tests {
         let mut have_announcer = HaveAnnouncer::new(node.clone(), test_key);
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot);
 
         // First set a piece
         let req_set = Request::Set { piece_index: 42 };
         operator.send(req_set).await.unwrap();
-        operator.recv().await.expect("recv").expect("set ok");
+        assert_eq!(operator.recv().await.expect("recv"), ());
 
         // Then clear it
         let req_clear = Request::Clear { piece_index: 42 };
         operator.send(req_clear).await.unwrap();
-        operator.recv().await.expect("recv").expect("clear ok");
+        assert_eq!(operator.recv().await.expect("recv"), ());
 
         // Wait for the announcements to happen
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -244,17 +242,17 @@ mod tests {
         let mut have_announcer = HaveAnnouncer::new(node.clone(), test_key);
         let cancel = CancellationToken::new();
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
-        let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot);
 
         // First set some pieces
         let req_set = Request::Set { piece_index: 42 };
         operator.send(req_set).await.unwrap();
-        operator.recv().await.expect("recv").expect("set ok");
+        assert_eq!(operator.recv().await.expect("recv"), ());
 
         // Then reset the map
         let req_reset = Request::Reset;
         operator.send(req_reset).await.unwrap();
-        operator.recv().await.expect("recv").expect("reset ok");
+        assert_eq!(operator.recv().await.expect("recv"), ());
 
         // Wait for the announcements to happen
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;

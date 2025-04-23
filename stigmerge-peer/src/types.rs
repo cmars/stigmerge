@@ -4,7 +4,7 @@ use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS, PIECE_SIZE
 
 use crate::proto::Header;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ShareInfo {
     pub header: Header,
     pub want_index: Index,

@@ -303,7 +303,7 @@ mod tests {
         node.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedKey| {}));
 
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot);
 
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
@@ -391,7 +391,7 @@ mod tests {
         ));
 
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot);
 
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");

@@ -162,8 +162,7 @@ mod tests {
 
         // Create the service and channels
         let cancel = CancellationToken::new();
-        let mut operator =
-            Operator::new(cancel.clone(), ShareAnnouncer::new(node, index), OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), ShareAnnouncer::new(node, index), OneShot);
 
         // Wait for the initial announce response
         let announce_resp = operator.recv().await.expect("response");
@@ -228,8 +227,7 @@ mod tests {
 
         // Create the service and channels
         let cancel = CancellationToken::new();
-        let mut operator =
-            Operator::new(cancel.clone(), ShareAnnouncer::new(node, index), OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), ShareAnnouncer::new(node, index), OneShot);
 
         // Wait for the initial announce response
         let announce_resp = operator.recv().await.expect("response");

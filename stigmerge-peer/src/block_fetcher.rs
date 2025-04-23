@@ -92,7 +92,7 @@ impl Request {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Response {
     Fetched {
         block: FileBlockFetch,
@@ -100,7 +100,7 @@ pub enum Response {
     },
     FetchFailed {
         block: FileBlockFetch,
-        error: Error,
+        error_msg: String,
     },
 }
 
@@ -160,7 +160,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         if self.target.is_none() {
             return Ok(Response::FetchFailed {
                 block: req.block().to_owned(),
-                error: Error::msg("fetch target not available yet"),
+                error_msg: "fetch target not available yet".to_owned(),
             });
         }
         match req {
@@ -180,7 +180,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                         warn!("Failed to fetch block: {}", e);
                         Ok(Response::FetchFailed {
                             block: block.clone(),
-                            error: e,
+                            error_msg: e.to_string(),
                         })
                     }
                 }
@@ -249,8 +249,7 @@ mod tests {
             cancel.clone(),
             BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
             OneShot,
-        )
-        .await;
+        );
 
         // Send target update
         target_tx
@@ -339,8 +338,7 @@ mod tests {
             cancel.clone(),
             BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
             OneShot,
-        )
-        .await;
+        );
 
         // Send target update
         target_tx
@@ -365,10 +363,10 @@ mod tests {
         match resp {
             Response::FetchFailed {
                 block: failed_block,
-                error,
+                error_msg,
             } => {
                 assert_eq!(failed_block, block);
-                assert_eq!(error.to_string(), "mock block fetch error");
+                assert_eq!(error_msg, "mock block fetch error");
             }
             _ => panic!("expected FetchFailed response, got {:?}", resp),
         }
@@ -402,7 +400,7 @@ mod tests {
         let (_target_tx, target_rx) = broadcast::channel(1);
         let cancel = CancellationToken::new();
         let fetcher = BlockFetcher::new(peer, Arc::new(RwLock::new(index)), tf_path, target_rx);
-        let mut operator = Operator::new(cancel.clone(), fetcher, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), fetcher, OneShot);
 
         // Request a block without sending target update first
         operator

@@ -200,8 +200,8 @@ impl Fetcher {
                                 block.block_index,
                             ))).await?;
                         }
-                        Some(block_fetcher::Response::FetchFailed { block, error }) => {
-                            warn!("failed to fetch block: {}", error);
+                        Some(block_fetcher::Response::FetchFailed { block, error_msg }) => {
+                            warn!("failed to fetch block: {}", error_msg);
                             self.clients.block_fetcher.send(block_fetcher::Request::Fetch {
                                 block: block.clone(),
                                 flush: false

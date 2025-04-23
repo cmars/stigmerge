@@ -44,8 +44,7 @@ async fn main() -> std::result::Result<(), Error> {
         cancel.clone(),
         ShareAnnouncer::new(node.clone(), index.clone()),
         WithVeilidConnection::new(OneShot, node.clone()),
-    )
-    .await;
+    );
     announce_op.send(share_announcer::Request::Announce).await?;
 
     let resp = announce_op.recv().await;

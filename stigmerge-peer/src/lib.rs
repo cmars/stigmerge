@@ -1,18 +1,18 @@
 #![recursion_limit = "256"]
 
 pub mod actor;
-mod block_fetcher;
+pub mod block_fetcher;
 mod error;
-mod have_announcer;
+pub mod have_announcer;
 mod have_resolver;
 pub mod node;
 mod peer_announcer;
 mod peer_resolver;
 mod piece_map;
-mod piece_verifier;
+pub mod piece_verifier;
 pub mod proto;
 pub mod share_announcer;
-mod share_resolver;
+pub mod share_resolver;
 pub mod types;
 
 pub mod fetcher;

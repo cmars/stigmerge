@@ -243,7 +243,7 @@ mod tests {
         // Create have resolver
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(node.clone());
-        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot);
 
         // Send a Resolve request
         let req = Request::Resolve {
@@ -306,7 +306,7 @@ mod tests {
         // Create have resolver
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(node.clone());
-        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot);
 
         // Send a Watch request
         let req = Request::Watch {
@@ -363,7 +363,7 @@ mod tests {
         // Create have resolver
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(node.clone());
-        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot);
 
         // Send a CancelWatch request
         let req = Request::CancelWatch {
@@ -412,7 +412,7 @@ mod tests {
         let update_tx = node.update_tx.clone();
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(node);
-        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot);
 
         // Send a request and receive a response, to make sure the task is
         // running. That's important: if we're not in the run loop, the update

@@ -186,7 +186,7 @@ mod tests {
         // Create peer announcer
         let cancel = CancellationToken::new();
         let peer_announcer = PeerAnnouncer::new(node.clone(), test_key.clone());
-        let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send an Announce request
         let req = Request::Announce {
@@ -252,7 +252,7 @@ mod tests {
         // Create peer announcer
         let cancel = CancellationToken::new();
         let peer_announcer = PeerAnnouncer::new(node.clone(), test_key.clone());
-        let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // First announce a peer
         let req_announce = Request::Announce {
@@ -310,7 +310,7 @@ mod tests {
         // Create peer announcer
         let cancel = CancellationToken::new();
         let peer_announcer = PeerAnnouncer::new(node.clone(), test_key.clone());
-        let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send a Reset request
         let req = Request::Reset;

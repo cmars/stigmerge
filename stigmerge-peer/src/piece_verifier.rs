@@ -223,8 +223,7 @@ mod tests {
             cancel.clone(),
             PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
             OneShot,
-        )
-        .await;
+        );
 
         for piece_index in 0..NUM_PIECES {
             // Building up to piece validation
@@ -286,8 +285,7 @@ mod tests {
             cancel.clone(),
             PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
             OneShot,
-        )
-        .await;
+        );
 
         // Building up to corrupt piece validation
         for block_index in 0..PIECE_SIZE_BLOCKS - 1 {
@@ -398,8 +396,7 @@ mod tests {
             cancel.clone(),
             PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
             OneShot,
-        )
-        .await;
+        );
 
         for piece_index in 0..NUM_PIECES {
             // Building up to piece validation

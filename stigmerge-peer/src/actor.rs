@@ -82,7 +82,7 @@ pub struct Operator<Req, Resp> {
 }
 
 impl<Req: Send + Sync + 'static, Resp: Send + Sync + 'static> Operator<Req, Resp> {
-    pub async fn new<
+    pub fn new<
         A: Actor<Request = Req, Response = Resp> + Clone + Send + 'static,
         R: Runner<A> + Send + 'static,
     >(

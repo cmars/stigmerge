@@ -232,8 +232,7 @@ mod tests {
             cancel.clone(),
             Seeder::new(node, share_info, clients),
             OneShot,
-        )
-        .await;
+        );
 
         // First, send a verified piece notification with confirmation it's applied
         let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
@@ -341,8 +340,7 @@ mod tests {
             cancel.clone(),
             Seeder::new(node, share_info, clients),
             OneShot,
-        )
-        .await;
+        );
 
         // Send a block request for an unverified piece
         let block_req = BlockRequest { piece: 0, block: 0 };
