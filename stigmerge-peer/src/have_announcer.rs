@@ -17,18 +17,18 @@ use crate::{
 /// piece index: a set bit (1) indicating the peer has the piece, a clear bit
 /// (0) indicating the peer does not have the piece.
 #[derive(Clone)]
-pub struct HaveAnnouncer<P: Node> {
-    peer: P,
+pub struct HaveAnnouncer<N: Node> {
+    node: N,
     key: TypedKey,
     pieces_map: Arc<RwLock<PieceMap>>,
     announce_interval: Duration,
 }
 
-impl<P: Node> HaveAnnouncer<P> {
+impl<N: Node> HaveAnnouncer<N> {
     /// Create a new have_announcer service.
-    pub fn new(peer: P, key: TypedKey) -> Self {
+    pub fn new(node: N, key: TypedKey) -> Self {
         Self {
-            peer,
+            node,
             key,
             pieces_map: Arc::new(RwLock::new(PieceMap::new())),
             announce_interval: Duration::from_secs(15),
@@ -79,7 +79,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
                 _ = interval.tick() => {
                     if changed {
                         let have_map = self.pieces_map.read().await;
-                        self.peer.announce_have_map(self.key.to_owned(), have_map.deref()).await?;
+                        self.node.announce_have_map(self.key.to_owned(), have_map.deref()).await?;
                         changed = false;
                     }
                 }
@@ -120,20 +120,20 @@ mod tests {
         actor::{OneShot, Operator},
         have_announcer::{HaveAnnouncer, Request},
         piece_map::PieceMap,
-        tests::StubPeer,
+        tests::StubNode,
     };
 
     #[tokio::test]
     async fn test_have_announcer_announces_have_map() {
         // Create a stub peer with a recording announce_have_map_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_have_map = Arc::new(RwLock::new(None));
         let recorded_key = Arc::new(RwLock::new(None));
 
         let recorded_have_map_clone = recorded_have_map.clone();
         let recorded_key_clone = recorded_key.clone();
 
-        stub_peer.announce_have_map_result =
+        node.announce_have_map_result =
             Arc::new(Mutex::new(move |key: TypedKey, have_map: &PieceMap| {
                 *recorded_have_map_clone.write().unwrap() = Some(have_map.clone());
                 *recorded_key_clone.write().unwrap() = Some(key.clone());
@@ -145,7 +145,7 @@ mod tests {
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
 
         // Create have announcer with a short announce interval
-        let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key.clone());
+        let mut have_announcer = HaveAnnouncer::new(node.clone(), test_key.clone());
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot).await;
@@ -181,11 +181,11 @@ mod tests {
     #[tokio::test]
     async fn test_have_announcer_clears_have_map() {
         // Create a stub peer with a recording announce_have_map_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_have_map = Arc::new(RwLock::new(None));
 
         let recorded_have_map_clone = recorded_have_map.clone();
-        stub_peer.announce_have_map_result =
+        node.announce_have_map_result =
             Arc::new(Mutex::new(move |_key: TypedKey, have_map: &PieceMap| {
                 *recorded_have_map_clone.write().unwrap() = Some(have_map.clone());
                 Ok(())
@@ -194,7 +194,7 @@ mod tests {
         // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key);
+        let mut have_announcer = HaveAnnouncer::new(node.clone(), test_key);
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot).await;
@@ -227,11 +227,11 @@ mod tests {
     #[tokio::test]
     async fn test_have_announcer_resets_have_map() {
         // Create a stub peer with a recording announce_have_map_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_have_map = Arc::new(RwLock::new(None));
 
         let recorded_have_map_clone = recorded_have_map.clone();
-        stub_peer.announce_have_map_result =
+        node.announce_have_map_result =
             Arc::new(Mutex::new(move |_key: TypedKey, have_map: &PieceMap| {
                 *recorded_have_map_clone.write().unwrap() = Some(have_map.clone());
                 Ok(())
@@ -241,7 +241,7 @@ mod tests {
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
 
-        let mut have_announcer = HaveAnnouncer::new(stub_peer.clone(), test_key);
+        let mut have_announcer = HaveAnnouncer::new(node.clone(), test_key);
         let cancel = CancellationToken::new();
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
         let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot).await;

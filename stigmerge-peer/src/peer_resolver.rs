@@ -13,8 +13,8 @@ use crate::{
 
 /// The peer_resolver service handles requests for remote peer maps, which
 /// indicate which other peers a remote peer knows about.
-pub struct PeerResolver<P: Node> {
-    peer: P,
+pub struct PeerResolver<N: Node> {
+    node: N,
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
 }
 
@@ -23,9 +23,9 @@ where
     P: Node,
 {
     /// Create a new peer_resolver service.
-    pub fn new(peer: P) -> Self {
-        let updates = peer.subscribe_veilid_update();
-        Self { peer, updates }
+    pub fn new(node: P) -> Self {
+        let updates = node.subscribe_veilid_update();
+        Self { node, updates }
     }
 }
 
@@ -130,7 +130,7 @@ impl<P: Node> Actor for PeerResolver<P> {
             Request::Resolve { key, subkeys } => {
                 let mut result = HashMap::new();
                 for subkey in 0u16..*subkeys {
-                    if let Ok(peer_info) = self.peer.resolve_peer_info(key.to_owned(), subkey).await
+                    if let Ok(peer_info) = self.node.resolve_peer_info(key.to_owned(), subkey).await
                     {
                         result.insert(peer_info.key().clone(), peer_info);
                     }
@@ -141,7 +141,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                 }
             }
             Request::Watch { key } => {
-                self.peer
+                self.node
                     .watch(
                         key.to_owned(),
                         ValueSubkeyRangeSet::full(),
@@ -153,7 +153,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                 }
             }
             Request::CancelWatch { key } => {
-                self.peer.cancel_watch(key);
+                self.node.cancel_watch(key);
                 Response::WatchCancelled {
                     key: key.to_owned(),
                 }
@@ -165,7 +165,7 @@ impl<P: Node> Actor for PeerResolver<P> {
 impl<P: Node> Clone for PeerResolver<P> {
     fn clone(&self) -> Self {
         Self {
-            peer: self.peer.clone(),
+            node: self.node.clone(),
             updates: self.updates.resubscribe(),
         }
     }
@@ -185,13 +185,13 @@ mod tests {
         actor::{OneShot, Operator},
         peer_resolver::{PeerResolver, Request, Response},
         proto::{Encoder, PeerInfo},
-        tests::StubPeer,
+        tests::StubNode,
     };
 
     #[tokio::test]
     async fn test_peer_resolver_resolves_peers() {
         // Create a stub peer with a recording resolve_peer_info_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_subkey = Arc::new(RwLock::new(None));
 
@@ -203,12 +203,11 @@ mod tests {
             TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
         let test_peer_info = PeerInfo::new(test_peer_key.clone());
 
-        stub_peer.resolve_peer_info_result =
-            Arc::new(Mutex::new(move |key: TypedKey, subkey: u16| {
-                *recorded_key_clone.write().unwrap() = Some(key);
-                *recorded_subkey_clone.write().unwrap() = Some(subkey);
-                Ok(test_peer_info.clone())
-            }));
+        node.resolve_peer_info_result = Arc::new(Mutex::new(move |key: TypedKey, subkey: u16| {
+            *recorded_key_clone.write().unwrap() = Some(key);
+            *recorded_subkey_clone.write().unwrap() = Some(subkey);
+            Ok(test_peer_info.clone())
+        }));
 
         // Create a test key and channel
         let test_key =
@@ -216,7 +215,7 @@ mod tests {
 
         // Create peer resolver
         let cancel = CancellationToken::new();
-        let peer_resolver = PeerResolver::new(stub_peer);
+        let peer_resolver = PeerResolver::new(node);
         let mut operator = Operator::new(cancel.clone(), peer_resolver, OneShot).await;
 
         // Send a Resolve request
@@ -255,7 +254,7 @@ mod tests {
     #[tokio::test]
     async fn test_peer_resolver_watches_peers() {
         // Create a stub peer with a recording watch_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_subkeys = Arc::new(RwLock::new(None));
         let recorded_duration = Arc::new(RwLock::new(None));
@@ -264,7 +263,7 @@ mod tests {
         let recorded_subkeys_clone = recorded_subkeys.clone();
         let recorded_duration_clone = recorded_duration.clone();
 
-        stub_peer.watch_result = Arc::new(Mutex::new(
+        node.watch_result = Arc::new(Mutex::new(
             move |key: TypedKey, subkeys: ValueSubkeyRangeSet, duration: TimestampDuration| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
@@ -279,7 +278,7 @@ mod tests {
 
         // Create peer resolver
         let cancel = CancellationToken::new();
-        let peer_resolver = PeerResolver::new(stub_peer.clone());
+        let peer_resolver = PeerResolver::new(node.clone());
         let mut operator = Operator::new(cancel.clone(), peer_resolver, OneShot).await;
 
         // Send a Watch request
@@ -322,11 +321,11 @@ mod tests {
     #[tokio::test]
     async fn test_peer_resolver_cancels_watch() {
         // Create a stub peer with a recording cancel_watch_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
-        stub_peer.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+        node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
             *recorded_key_clone.write().unwrap() = Some(key.clone());
         }));
 
@@ -336,7 +335,7 @@ mod tests {
 
         // Create peer resolver
         let cancel = CancellationToken::new();
-        let peer_resolver = PeerResolver::new(stub_peer.clone());
+        let peer_resolver = PeerResolver::new(node.clone());
         let mut operator = Operator::new(cancel.clone(), peer_resolver, OneShot).await;
 
         // Send a CancelWatch request
@@ -366,7 +365,7 @@ mod tests {
     #[tokio::test]
     async fn test_peer_resolver_handles_value_changes() {
         // Create a stub peer
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
 
         // Create a test key and channel
         let test_key =
@@ -377,7 +376,7 @@ mod tests {
         let recorded_resolve_peer_info = Arc::new(RwLock::new(0u32));
         let recorded_resolve_peer_info_clone = recorded_resolve_peer_info.clone();
         let stub_peer_key = peer_key.clone();
-        stub_peer.resolve_peer_info_result =
+        node.resolve_peer_info_result =
             Arc::new(Mutex::new(move |_key: TypedKey, _subkey: u16| {
                 let mut count = recorded_resolve_peer_info_clone.write().unwrap();
                 *count += 1;
@@ -385,9 +384,9 @@ mod tests {
             }));
 
         // Create peer resolver
-        let update_tx = stub_peer.update_tx.clone();
+        let update_tx = node.update_tx.clone();
         let cancel = CancellationToken::new();
-        let peer_resolver = PeerResolver::new(stub_peer);
+        let peer_resolver = PeerResolver::new(node);
         let mut operator = Operator::new(cancel.clone(), peer_resolver, OneShot).await;
 
         // Send a request and receive a response, to make sure the task is

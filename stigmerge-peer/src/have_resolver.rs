@@ -19,8 +19,8 @@ use crate::{
 ///
 /// This service operates on the have-map reference keys indicated in the main
 /// share DHT header (subkey 0) as haveMapRef.
-pub struct HaveResolver<P: Node> {
-    peer: P,
+pub struct HaveResolver<N: Node> {
+    node: N,
     pieces_maps: HashMap<TypedKey, Arc<RwLock<PieceMap>>>,
     updates: broadcast::Receiver<VeilidUpdate>,
 }
@@ -30,10 +30,10 @@ where
     P: Node,
 {
     /// Create a new have_resolver service with the given peer.
-    pub(super) fn new(peer: P) -> Self {
-        let updates = peer.subscribe_veilid_update();
+    pub(super) fn new(node: P) -> Self {
+        let updates = node.subscribe_veilid_update();
         Self {
-            peer,
+            node,
             pieces_maps: HashMap::new(),
             updates,
         }
@@ -132,7 +132,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                             let have_map_lock = self.assert_have_map(&ch.key);
                             {
                                 let mut have_map = have_map_lock.write().await;
-                                self.peer.merge_have_map(ch.key, ch.subkeys, &mut *have_map).await?;
+                                self.node.merge_have_map(ch.key, ch.subkeys, &mut *have_map).await?;
                             }
                             server_ch.send(Response::Resolve{ key: ch.key, pieces: have_map_lock }).await?;
                         }
@@ -152,7 +152,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                 let have_map_lock = self.assert_have_map(key);
                 {
                     let mut have_map = have_map_lock.write().await;
-                    self.peer
+                    self.node
                         .merge_have_map(
                             key.to_owned(),
                             ValueSubkeyRangeSet::single_range(0, (*subkeys - 1).into()),
@@ -166,7 +166,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                 }
             }
             Request::Watch { key } => {
-                self.peer
+                self.node
                     .watch(
                         key.to_owned(),
                         ValueSubkeyRangeSet::full(),
@@ -178,7 +178,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                 }
             }
             Request::CancelWatch { key } => {
-                self.peer.cancel_watch(key);
+                self.node.cancel_watch(key);
                 Response::WatchCancelled {
                     key: key.to_owned(),
                 }
@@ -190,7 +190,7 @@ impl<P: Node> Actor for HaveResolver<P> {
 impl<P: Node + 'static> Clone for HaveResolver<P> {
     fn clone(&self) -> Self {
         Self {
-            peer: self.peer.clone(),
+            node: self.node.clone(),
             pieces_maps: self.pieces_maps.clone(),
             updates: self.updates.resubscribe(),
         }
@@ -215,20 +215,20 @@ mod tests {
         have_resolver::{HaveResolver, Request, Response},
         node::TypedKey,
         piece_map::PieceMap,
-        tests::StubPeer,
+        tests::StubNode,
     };
 
     #[tokio::test]
     async fn test_have_resolver_resolves_have_map() {
         // Create a stub peer with a recording merge_have_map_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_subkeys = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
         let recorded_subkeys_clone = recorded_subkeys.clone();
 
-        stub_peer.merge_have_map_result = Arc::new(Mutex::new(
+        node.merge_have_map_result = Arc::new(Mutex::new(
             move |key: TypedKey, subkeys: ValueSubkeyRangeSet, _have_map: &mut PieceMap| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
@@ -242,7 +242,7 @@ mod tests {
 
         // Create have resolver
         let cancel = CancellationToken::new();
-        let have_resolver = HaveResolver::new(stub_peer.clone());
+        let have_resolver = HaveResolver::new(node.clone());
         let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
 
         // Send a Resolve request
@@ -281,7 +281,7 @@ mod tests {
     #[tokio::test]
     async fn test_have_resolver_watches_have_map() {
         // Create a stub peer with a recording watch_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_subkeys = Arc::new(RwLock::new(None));
         let recorded_duration = Arc::new(RwLock::new(None));
@@ -290,7 +290,7 @@ mod tests {
         let recorded_subkeys_clone = recorded_subkeys.clone();
         let recorded_duration_clone = recorded_duration.clone();
 
-        stub_peer.watch_result = Arc::new(Mutex::new(
+        node.watch_result = Arc::new(Mutex::new(
             move |key: TypedKey, subkeys: ValueSubkeyRangeSet, duration: TimestampDuration| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
@@ -305,7 +305,7 @@ mod tests {
 
         // Create have resolver
         let cancel = CancellationToken::new();
-        let have_resolver = HaveResolver::new(stub_peer.clone());
+        let have_resolver = HaveResolver::new(node.clone());
         let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
 
         // Send a Watch request
@@ -348,11 +348,11 @@ mod tests {
     #[tokio::test]
     async fn test_have_resolver_cancels_watch() {
         // Create a stub peer with a recording cancel_watch_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
-        stub_peer.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+        node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
             *recorded_key_clone.write().unwrap() = Some(key.clone());
         }));
 
@@ -362,7 +362,7 @@ mod tests {
 
         // Create have resolver
         let cancel = CancellationToken::new();
-        let have_resolver = HaveResolver::new(stub_peer.clone());
+        let have_resolver = HaveResolver::new(node.clone());
         let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
 
         // Send a CancelWatch request
@@ -392,14 +392,14 @@ mod tests {
     #[tokio::test]
     async fn test_have_resolver_handles_value_changes() {
         // Create a stub peer with a recording merge_have_map_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_subkeys = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
         let recorded_subkeys_clone = recorded_subkeys.clone();
 
-        stub_peer.merge_have_map_result = Arc::new(Mutex::new(
+        node.merge_have_map_result = Arc::new(Mutex::new(
             move |key: TypedKey, subkeys: ValueSubkeyRangeSet, _have_map: &mut PieceMap| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
@@ -409,9 +409,9 @@ mod tests {
 
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let update_tx = stub_peer.update_tx.clone();
+        let update_tx = node.update_tx.clone();
         let cancel = CancellationToken::new();
-        let have_resolver = HaveResolver::new(stub_peer);
+        let have_resolver = HaveResolver::new(node);
         let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot).await;
 
         // Send a request and receive a response, to make sure the task is

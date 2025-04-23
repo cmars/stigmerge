@@ -28,8 +28,8 @@ pub enum Response {
     HaveMap(PieceMap),
 }
 
-pub struct Seeder<P: Node> {
-    peer: P,
+pub struct Seeder<N: Node> {
+    node: N,
     want_index: Index,
     root: PathBuf,
     clients: Clients,
@@ -37,10 +37,10 @@ pub struct Seeder<P: Node> {
     piece_map: PieceMap,
 }
 
-impl<P: Node> Seeder<P> {
-    pub fn new(peer: P, share: ShareInfo, clients: Clients) -> Self {
+impl<N: Node> Seeder<N> {
+    pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
         Seeder {
-            peer,
+            node,
             want_index: share.want_index,
             root: share.root,
             clients,
@@ -106,9 +106,9 @@ impl<P: Node> Actor for Seeder<P> {
                                 proto::Request::BlockRequest(block_req) => {
                                     if self.piece_map.get(block_req.piece) {
                                         let rd = self.read_block_into(&block_req, &mut buf).await?;
-                                        self.peer.reply_block_contents(veilid_app_call.id(), &buf[..rd]).await?;
+                                        self.node.reply_block_contents(veilid_app_call.id(), &buf[..rd]).await?;
                                     } else {
-                                        self.peer.reply_block_contents(veilid_app_call.id(), &[]).await?;
+                                        self.node.reply_block_contents(veilid_app_call.id(), &[]).await?;
                                     }
                                 }
                                 _ => {}  // Ignore other request types
@@ -131,7 +131,7 @@ impl<P: Node> Actor for Seeder<P> {
 impl<P: Node> Clone for Seeder<P> {
     fn clone(&self) -> Self {
         Self {
-            peer: self.peer.clone(),
+            node: self.node.clone(),
             want_index: self.want_index.clone(),
             root: self.root.clone(),
             clients: self.clients.clone(),
@@ -169,7 +169,7 @@ mod tests {
     use crate::{
         actor::{OneShot, Operator},
         proto::{BlockRequest, Encoder, Header},
-        tests::{temp_file, StubPeer},
+        tests::{temp_file, StubNode},
     };
 
     use super::*;
@@ -193,8 +193,8 @@ mod tests {
         let (verified_tx, _) = broadcast::channel(16);
 
         // Create a stub peer with mock reply_block_contents
-        let mut peer = StubPeer::new();
-        let update_tx = peer.update_tx.clone();
+        let mut node = StubNode::new();
+        let update_tx = node.update_tx.clone();
         let reply_contents_called = Arc::new(Mutex::new(false));
         let reply_contents_data = Arc::new(Mutex::new(Vec::new()));
         let reply_contents_called_clone = reply_contents_called.clone();
@@ -202,7 +202,7 @@ mod tests {
 
         let (replied_tx, mut replied_rx) = mpsc::channel(1);
 
-        peer.reply_block_contents_result =
+        node.reply_block_contents_result =
             Arc::new(Mutex::new(move |_call_id: OperationId, contents: &[u8]| {
                 *reply_contents_called_clone.lock().unwrap() = true;
                 reply_contents_data_clone
@@ -223,14 +223,14 @@ mod tests {
         // Create clients
         let clients = Clients {
             verified_rx: verified_tx.subscribe(),
-            update_rx: peer.update_tx.subscribe(),
+            update_rx: node.update_tx.subscribe(),
         };
 
         // Create cancellation token
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            Seeder::new(peer, share_info, clients),
+            Seeder::new(node, share_info, clients),
             OneShot,
         )
         .await;
@@ -301,8 +301,8 @@ mod tests {
         let (_verified_tx, verified_rx) = broadcast::channel(16);
 
         // Create a stub peer with mock reply_block_contents
-        let mut peer = StubPeer::new();
-        let update_tx = peer.update_tx.clone();
+        let mut node = StubNode::new();
+        let update_tx = node.update_tx.clone();
 
         let reply_contents_called = Arc::new(Mutex::new(false));
         let reply_contents_data = Arc::new(Mutex::new(Vec::new()));
@@ -311,7 +311,7 @@ mod tests {
 
         let (replied_tx, mut replied_rx) = mpsc::channel(1);
 
-        peer.reply_block_contents_result =
+        node.reply_block_contents_result =
             Arc::new(Mutex::new(move |_call_id: OperationId, contents: &[u8]| {
                 *reply_contents_called_clone.lock().unwrap() = true;
                 reply_contents_data_clone
@@ -332,14 +332,14 @@ mod tests {
         // Create clients
         let clients = Clients {
             verified_rx,
-            update_rx: peer.update_tx.subscribe(),
+            update_rx: node.update_tx.subscribe(),
         };
 
         // Create seeder
         let cancel = CancellationToken::new();
         let operator = Operator::new(
             cancel.clone(),
-            Seeder::new(peer, share_info, clients),
+            Seeder::new(node, share_info, clients),
             OneShot,
         )
         .await;

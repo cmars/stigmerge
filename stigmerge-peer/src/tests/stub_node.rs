@@ -11,7 +11,7 @@ use crate::{error::Result, node::TypedKey, piece_map::PieceMap, proto::PeerInfo}
 use crate::{proto::Header, Node};
 
 #[derive(Clone)]
-pub struct StubPeer {
+pub struct StubNode {
     pub update_tx: Sender<VeilidUpdate>,
 
     pub reset_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
@@ -51,10 +51,10 @@ pub struct StubPeer {
     pub reset_peers_result: Arc<Mutex<dyn Fn(TypedKey, u16) -> Result<()> + Send + 'static>>,
 }
 
-impl StubPeer {
+impl StubNode {
     pub fn new() -> Self {
         let (update_tx, _) = broadcast::channel(16);
-        StubPeer {
+        StubNode {
             update_tx,
             reset_result: Arc::new(Mutex::new(|| panic!("unexpected call to reset"))),
             shutdown_result: Arc::new(Mutex::new(|| panic!("unexpected call to shutdown"))),
@@ -122,7 +122,7 @@ impl StubPeer {
     }
 }
 
-impl Node for StubPeer {
+impl Node for StubNode {
     fn subscribe_veilid_update(&self) -> Receiver<VeilidUpdate> {
         self.update_tx.subscribe()
     }

@@ -6,8 +6,8 @@ use veilid_core::Target;
 use crate::{actor::Actor, node::TypedKey, proto::Header, Node, Result};
 
 #[derive(Clone)]
-pub struct ShareAnnouncer<P: Node> {
-    peer: P,
+pub struct ShareAnnouncer<N: Node> {
+    node: N,
     index: Index,
     share: Option<ShareAnnounce>,
 }
@@ -19,17 +19,17 @@ struct ShareAnnounce {
     header: Header,
 }
 
-impl<P: Node> ShareAnnouncer<P> {
-    pub fn new(peer: P, index: Index) -> ShareAnnouncer<P> {
+impl<N: Node> ShareAnnouncer<N> {
+    pub fn new(node: N, index: Index) -> ShareAnnouncer<N> {
         ShareAnnouncer {
-            peer,
+            node,
             index,
             share: None,
         }
     }
 
     async fn announce(&mut self) -> Result<Response> {
-        let (key, target, header) = self.peer.announce_index(&self.index).await?;
+        let (key, target, header) = self.node.announce_index(&self.index).await?;
         self.share = Some(ShareAnnounce {
             key: key.clone(),
             target: target.clone(),
@@ -100,7 +100,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                 }) = &mut self.share
                 {
                     let (updated_target, updated_header) = self
-                        .peer
+                        .node
                         .reannounce_route(key, Some(*target), &self.index, header)
                         .await?;
                     *target = updated_target;
@@ -132,7 +132,7 @@ mod tests {
         actor::{Actor, OneShot, Operator},
         proto::{Encoder, Header},
         share_announcer::{self, ShareAnnouncer},
-        tests::{temp_file, StubPeer},
+        tests::{temp_file, StubNode},
     };
 
     #[tokio::test]
@@ -145,7 +145,7 @@ mod tests {
         let index = indexer.index().await.expect("index");
 
         // Create a stub peer with mock behavior
-        let mut peer = StubPeer::new();
+        let mut node = StubNode::new();
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
         let fake_target = Target::PrivateRoute(CryptoKey::new([0u8; 32]));
@@ -153,7 +153,7 @@ mod tests {
         // Set up the announce_result mock
         let mock_key = fake_key.clone();
         let mock_target = fake_target.clone();
-        peer.announce_result = Arc::new(Mutex::new(move |index: &stigmerge_fileindex::Index| {
+        node.announce_result = Arc::new(Mutex::new(move |index: &stigmerge_fileindex::Index| {
             let index_bytes = index.encode().expect("encode index");
             let header =
                 Header::from_index(index, index_bytes.as_slice(), &[0xde, 0xad, 0xbe, 0xef]);
@@ -163,7 +163,7 @@ mod tests {
         // Create the service and channels
         let cancel = CancellationToken::new();
         let mut operator =
-            Operator::new(cancel.clone(), ShareAnnouncer::new(peer, index), OneShot).await;
+            Operator::new(cancel.clone(), ShareAnnouncer::new(node, index), OneShot).await;
 
         // Wait for the initial announce response
         let announce_resp = operator.recv().await.expect("response");
@@ -196,7 +196,7 @@ mod tests {
         let index = indexer.index().await.expect("index");
 
         // Create a stub peer with mock behavior
-        let mut peer = StubPeer::new();
+        let mut node = StubNode::new();
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
         let fake_target = Target::PrivateRoute(CryptoKey::new([0u8; 32]));
@@ -205,7 +205,7 @@ mod tests {
         // Set up the announce_result mock
         let mock_key = fake_key.clone();
         let mock_target = fake_target.clone();
-        peer.announce_result = Arc::new(Mutex::new(move |index: &stigmerge_fileindex::Index| {
+        node.announce_result = Arc::new(Mutex::new(move |index: &stigmerge_fileindex::Index| {
             let index_bytes = index.encode().expect("encode index");
             let header =
                 Header::from_index(index, index_bytes.as_slice(), &[0xde, 0xad, 0xbe, 0xef]);
@@ -214,7 +214,7 @@ mod tests {
 
         // Set up the reannounce_route_result mock
         let mock_updated_target = updated_target.clone();
-        peer.reannounce_route_result = Arc::new(Mutex::new(
+        node.reannounce_route_result = Arc::new(Mutex::new(
             move |_key: &TypedKey,
                   _prior_route: Option<Target>,
                   index: &stigmerge_fileindex::Index,
@@ -229,7 +229,7 @@ mod tests {
         // Create the service and channels
         let cancel = CancellationToken::new();
         let mut operator =
-            Operator::new(cancel.clone(), ShareAnnouncer::new(peer, index), OneShot).await;
+            Operator::new(cancel.clone(), ShareAnnouncer::new(node, index), OneShot).await;
 
         // Wait for the initial announce response
         let announce_resp = operator.recv().await.expect("response");
@@ -284,7 +284,7 @@ mod tests {
         let index = indexer.index().await.expect("index");
 
         // Create a stub peer with mock behavior
-        let peer = StubPeer::new();
+        let peer = StubNode::new();
 
         // Create the service and operator with no share announced yet
         let mut announcer = ShareAnnouncer::new(peer, index);

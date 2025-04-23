@@ -17,8 +17,8 @@ use crate::{
 /// The share_resolver service maintains private routes to the route posted at remote
 /// peers' share keys. It also validates that the remote peer is sharing
 /// the expected index by verifying its content digest.
-pub struct ShareResolver<P: Node> {
-    peer: P,
+pub struct ShareResolver<N: Node> {
+    node: N,
     target_tx: broadcast::Sender<Target>,
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
 }
@@ -27,10 +27,10 @@ const TARGET_BROADCAST_CAPACITY: usize = 16;
 
 impl<P: Node> ShareResolver<P> {
     /// Create a new share_resolver service.
-    pub fn new(peer: P) -> Self {
-        let updates = peer.subscribe_veilid_update();
+    pub fn new(node: P) -> Self {
+        let updates = node.subscribe_veilid_update();
         Self {
-            peer,
+            node,
             target_tx: broadcast::channel(TARGET_BROADCAST_CAPACITY).0,
             updates,
         }
@@ -146,7 +146,7 @@ impl<P: Node> Actor for ShareResolver<P> {
         cancel: CancellationToken,
         mut server_ch: ChanServer<Self::Request, Self::Response>,
     ) -> Result<()> {
-        let mut updates = self.peer.subscribe_veilid_update();
+        let mut updates = self.node.subscribe_veilid_update();
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -161,10 +161,10 @@ impl<P: Node> Actor for ShareResolver<P> {
                         Ok(resp) => {
                             if let Some(valid_key) = resp.valid_key() {
                                 // Valid usable shares are watched.
-                                self.peer.watch(valid_key.clone(), ValueSubkeyRangeSet::single(0), TimestampDuration::new(60_000_000)).await?;
+                                self.node.watch(valid_key.clone(), ValueSubkeyRangeSet::single(0), TimestampDuration::new(60_000_000)).await?;
                             } else {
                                 // Invalid or unusable shares are unwatched.
-                                self.peer.cancel_watch(req.key());
+                                self.node.cancel_watch(req.key());
                             }
                             server_ch.send(resp).await?;
                         }
@@ -200,7 +200,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                 want_index_digest,
                 root,
             } => {
-                let (target, header, index) = self.peer.resolve(key, root.as_path()).await?;
+                let (target, header, index) = self.node.resolve(key, root.as_path()).await?;
                 let mut peer_index_digest = Sha256::new();
                 peer_index_digest.update(index.encode()?);
                 if peer_index_digest.finalize().as_slice() == want_index_digest {
@@ -222,7 +222,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                 ref key,
                 prior_target,
             } => {
-                let (target, header) = self.peer.reresolve_route(key, *prior_target).await?;
+                let (target, header) = self.node.reresolve_route(key, *prior_target).await?;
                 self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
                     warn!("no target subscribers: {}", e);
                     0
@@ -244,7 +244,7 @@ impl<P: Node> Actor for ShareResolver<P> {
 impl<P: Node + Clone> Clone for ShareResolver<P> {
     fn clone(&self) -> Self {
         Self {
-            peer: self.peer.clone(),
+            node: self.node.clone(),
             target_tx: self.target_tx.clone(),
             updates: self.updates.resubscribe(),
         }
@@ -268,7 +268,7 @@ mod tests {
     use crate::{
         proto::{Encoder, HaveMapRef, Header, PeerMapRef},
         share_resolver::{self, ShareResolver},
-        tests::{temp_file, StubPeer},
+        tests::{temp_file, StubNode},
     };
 
     #[tokio::test]
@@ -282,9 +282,9 @@ mod tests {
         index_digest.update(index.encode().expect("encode index"));
         let index_digest_bytes = index_digest.finalize();
 
-        let mut peer = StubPeer::new();
+        let mut node = StubNode::new();
         let mock_index = index.clone();
-        peer.resolve_result = Arc::new(Mutex::new(move |_key: &TypedKey, _root: &Path| {
+        node.resolve_result = Arc::new(Mutex::new(move |_key: &TypedKey, _root: &Path| {
             let index_internal = mock_index.clone();
             let index_bytes = index_internal.encode().expect("encode index");
             Ok((
@@ -297,13 +297,13 @@ mod tests {
                 index_internal,
             ))
         }));
-        peer.watch_result = Arc::new(Mutex::new(
+        node.watch_result = Arc::new(Mutex::new(
             move |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| Ok(()),
         ));
-        peer.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedKey| {}));
+        node.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedKey| {}));
 
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(peer), OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot).await;
 
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
@@ -368,11 +368,11 @@ mod tests {
         let fake_have_map_key =
             TypedKey::from_str("VLD0:rl3AyyZNFWP8GQGyY9xSnnIjCDagXzbCA47HFmsbLDU").expect("key");
 
-        let mut peer = StubPeer::new();
+        let mut node = StubNode::new();
         let mock_index = index.clone();
         let mock_peer_map_key = fake_peer_map_key.clone();
         let mock_have_map_key = fake_have_map_key.clone();
-        peer.reresolve_route_result = Arc::new(Mutex::new(
+        node.reresolve_route_result = Arc::new(Mutex::new(
             move |_key: &TypedKey, _prior_route: Option<Target>| {
                 let index_internal = mock_index.clone();
                 let index_bytes = index_internal.encode().expect("encode index");
@@ -386,12 +386,12 @@ mod tests {
                 Ok((Target::PrivateRoute(CryptoKey::new([0u8; 32])), header))
             },
         ));
-        peer.watch_result = Arc::new(Mutex::new(
+        node.watch_result = Arc::new(Mutex::new(
             move |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| Ok(()),
         ));
 
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(peer), OneShot).await;
+        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot).await;
 
         let fake_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");

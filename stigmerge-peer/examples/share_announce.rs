@@ -5,17 +5,15 @@ use std::env;
 use std::path::PathBuf;
 
 use tokio::select;
-use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use stigmerge_fileindex::Indexer;
 use stigmerge_peer::actor::{OneShot, Operator, WithVeilidConnection};
+use stigmerge_peer::new_routing_context;
 use stigmerge_peer::node::Veilid;
-use stigmerge_peer::seeder::Clients as SeederClients;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
 use stigmerge_peer::Error;
-use stigmerge_peer::{new_routing_context, Node};
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {
@@ -37,22 +35,21 @@ async fn main() -> std::result::Result<(), Error> {
     // Set up Veilid peer
     let (routing_context, update_tx, _) =
         new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let peer = Veilid::new(routing_context, update_tx).await?;
-    let update_rx = peer.subscribe_veilid_update();
+    let node = Veilid::new(routing_context, update_tx).await?;
 
     let cancel = CancellationToken::new();
 
     // Announce the share
     let mut announce_op = Operator::new(
         cancel.clone(),
-        ShareAnnouncer::new(peer.clone(), index.clone()),
-        WithVeilidConnection::new(OneShot, peer.clone()),
+        ShareAnnouncer::new(node.clone(), index.clone()),
+        WithVeilidConnection::new(OneShot, node.clone()),
     )
     .await;
     announce_op.send(share_announcer::Request::Announce).await?;
 
     let resp = announce_op.recv().await;
-    let (key, target, header) = match resp {
+    let (key, target, _header) = match resp {
         Some(share_announcer::Response::Announce {
             key,
             target,

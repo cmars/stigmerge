@@ -19,8 +19,8 @@ use crate::node::Node;
 
 use super::types::FileBlockFetch;
 
-pub struct BlockFetcher<P: Node> {
-    peer: P,
+pub struct BlockFetcher<N: Node> {
+    node: N,
     want_index: Arc<RwLock<Index>>,
     root: PathBuf,
     target_update_rx: broadcast::Receiver<Target>,
@@ -28,15 +28,15 @@ pub struct BlockFetcher<P: Node> {
     files: HashMap<usize, File>,
 }
 
-impl<P: Node> BlockFetcher<P> {
+impl<N: Node> BlockFetcher<N> {
     pub fn new(
-        peer: P,
+        node: N,
         want_index: Arc<RwLock<Index>>,
         root: PathBuf,
         target_update_rx: broadcast::Receiver<Target>,
     ) -> Self {
         Self {
-            peer,
+            node,
             want_index,
             root,
             target_update_rx,
@@ -48,7 +48,7 @@ impl<P: Node> BlockFetcher<P> {
     async fn fetch_block(&mut self, block: &FileBlockFetch, flush: bool) -> Result<usize> {
         // Request block from peer with retry logic
         let result = self
-            .peer
+            .node
             .request_block(self.target.unwrap(), block.piece_index, block.block_index)
             .await?;
         // Write the block to the file
@@ -192,7 +192,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
 impl<P: Node> Clone for BlockFetcher<P> {
     fn clone(&self) -> Self {
         Self {
-            peer: self.peer.clone(),
+            node: self.node.clone(),
             want_index: self.want_index.clone(),
             root: self.root.clone(),
             target_update_rx: self.target_update_rx.resubscribe(),
@@ -213,7 +213,7 @@ mod tests {
     use veilid_core::CryptoKey;
 
     use crate::actor::{OneShot, Operator};
-    use crate::tests::{temp_file, StubPeer};
+    use crate::tests::{temp_file, StubNode};
     use crate::types::FileBlockFetch;
 
     use super::*;
@@ -234,9 +234,9 @@ mod tests {
         drop(tf);
 
         // Set up BlockFetcher
-        let mut peer = StubPeer::new();
+        let mut node = StubNode::new();
         // Mock the block data that StubPeer will return
-        peer.request_block_result = Arc::new(Mutex::new(move |_, _, _| {
+        node.request_block_result = Arc::new(Mutex::new(move |_, _, _| {
             Ok(vec![BLOCK_DATA; BLOCK_SIZE_BYTES])
         }));
 
@@ -247,7 +247,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            BlockFetcher::new(peer, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+            BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
             OneShot,
         )
         .await;
@@ -324,9 +324,9 @@ mod tests {
         drop(tf);
 
         // Set up BlockFetcher with error-returning stub
-        let mut peer = StubPeer::new();
+        let mut node = StubNode::new();
         // Mock the block request to return an error
-        peer.request_block_result =
+        node.request_block_result =
             Arc::new(Mutex::new(move |_, _, _| -> crate::Result<Vec<u8>> {
                 Err(Error::msg("mock block fetch error"))
             }));
@@ -337,7 +337,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            BlockFetcher::new(peer, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+            BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
             OneShot,
         )
         .await;
@@ -368,10 +368,7 @@ mod tests {
                 error,
             } => {
                 assert_eq!(failed_block, block);
-                assert_eq!(
-                    error.to_string(),
-                    "unexpected fault: mock block fetch error"
-                );
+                assert_eq!(error.to_string(), "mock block fetch error");
             }
             _ => panic!("expected FetchFailed response, got {:?}", resp),
         }
@@ -401,7 +398,7 @@ mod tests {
         drop(tf);
 
         // Set up BlockFetcher
-        let peer = StubPeer::new();
+        let peer = StubNode::new();
         let (_target_tx, target_rx) = broadcast::channel(1);
         let cancel = CancellationToken::new();
         let fetcher = BlockFetcher::new(peer, Arc::new(RwLock::new(index)), tf_path, target_rx);

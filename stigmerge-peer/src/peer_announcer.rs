@@ -15,8 +15,8 @@ use crate::{
 /// Each remote peer is encoded to a separate subkey. Redacted peers are
 /// marked with empty contents.
 #[derive(Clone)]
-pub struct PeerAnnouncer<P: Node> {
-    peer: P,
+pub struct PeerAnnouncer<N: Node> {
+    node: N,
     key: TypedKey,
     peer_indexes: HashMap<TypedKey, usize>,
     peers: Vec<Option<TypedKey>>,
@@ -25,11 +25,11 @@ pub struct PeerAnnouncer<P: Node> {
 
 pub const DEFAULT_MAX_PEERS: u16 = 32;
 
-impl<P: Node> PeerAnnouncer<P> {
+impl<N: Node> PeerAnnouncer<N> {
     /// Create a new peer_announcer service.
-    pub(super) fn new(peer: P, key: TypedKey) -> Self {
+    pub(super) fn new(node: N, key: TypedKey) -> Self {
         Self {
-            peer,
+            node,
             key,
             peer_indexes: HashMap::new(),
             peers: vec![],
@@ -78,7 +78,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
         cancel: CancellationToken,
         mut server_ch: ChanServer<Request, Response>,
     ) -> Result<()> {
-        self.peer
+        self.node
             .reset_peers(self.key.to_owned(), self.max_peers)
             .await?;
         loop {
@@ -103,7 +103,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
             Request::Announce { key } => {
                 if !self.peer_indexes.contains_key(key) {
                     let index = self.assign_peer_index(*key);
-                    self.peer
+                    self.node
                         .announce_peer(self.key.to_owned(), Some(*key), index)
                         .await?;
                 }
@@ -112,7 +112,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
             Request::Redact { key } => {
                 if let Some(index) = self.peer_indexes.get(key) {
                     let subkey = TryInto::<u16>::try_into(*index).unwrap();
-                    self.peer
+                    self.node
                         .announce_peer(self.key.to_owned(), None, subkey)
                         .await?;
                     self.peers[*index] = None;
@@ -121,7 +121,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 Ok(())
             }
             Request::Reset => {
-                self.peer
+                self.node
                     .reset_peers(self.key.to_owned(), self.max_peers)
                     .await?;
                 self.peers.clear();
@@ -145,13 +145,13 @@ mod tests {
     use crate::{
         actor::{OneShot, Operator},
         peer_announcer::{PeerAnnouncer, Request, DEFAULT_MAX_PEERS},
-        tests::StubPeer,
+        tests::StubNode,
     };
 
     #[tokio::test]
     async fn test_peer_announcer_announces_peer() {
         // Create a stub peer with a recording announce_peer_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_peer_key = Arc::new(RwLock::new(None));
         let recorded_index = Arc::new(RwLock::new(None));
@@ -162,13 +162,13 @@ mod tests {
 
         let recorded_resets = Arc::new(RwLock::new(0u32));
         let recorded_resets_clone = recorded_resets.clone();
-        stub_peer.reset_peers_result = Arc::new(Mutex::new(move |_key, _subkeys| {
+        node.reset_peers_result = Arc::new(Mutex::new(move |_key, _subkeys| {
             let mut count = recorded_resets_clone.write().unwrap();
             *count += 1;
             Ok(())
         }));
 
-        stub_peer.announce_peer_result = Arc::new(Mutex::new(
+        node.announce_peer_result = Arc::new(Mutex::new(
             move |key: TypedKey, peer_key: Option<TypedKey>, index: u16| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_peer_key_clone.write().unwrap() = peer_key;
@@ -185,7 +185,7 @@ mod tests {
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone());
+        let peer_announcer = PeerAnnouncer::new(node.clone(), test_key.clone());
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot).await;
 
         // Send an Announce request
@@ -217,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn test_peer_announcer_redacts_peer() {
         // Create a stub peer with recording announce_peer_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_peer_key = Arc::new(RwLock::new(None));
         let recorded_index = Arc::new(RwLock::new(None));
@@ -228,13 +228,13 @@ mod tests {
 
         let recorded_resets = Arc::new(RwLock::new(0u32));
         let recorded_resets_clone = recorded_resets.clone();
-        stub_peer.reset_peers_result = Arc::new(Mutex::new(move |_key, _subkeys| {
+        node.reset_peers_result = Arc::new(Mutex::new(move |_key, _subkeys| {
             let mut count = recorded_resets_clone.write().unwrap();
             *count += 1;
             Ok(())
         }));
 
-        stub_peer.announce_peer_result = Arc::new(Mutex::new(
+        node.announce_peer_result = Arc::new(Mutex::new(
             move |key: TypedKey, peer_key: Option<TypedKey>, index: u16| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_peer_key_clone.write().unwrap() = peer_key;
@@ -251,7 +251,7 @@ mod tests {
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone());
+        let peer_announcer = PeerAnnouncer::new(node.clone(), test_key.clone());
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot).await;
 
         // First announce a peer
@@ -290,19 +290,18 @@ mod tests {
     #[tokio::test]
     async fn test_peer_announcer_resets_peers() {
         // Create a stub peer with recording reset_peers_result
-        let mut stub_peer = StubPeer::new();
+        let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_max_peers = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
         let recorded_max_peers_clone = recorded_max_peers.clone();
 
-        stub_peer.reset_peers_result =
-            Arc::new(Mutex::new(move |key: TypedKey, max_peers: u16| {
-                *recorded_key_clone.write().unwrap() = Some(key);
-                *recorded_max_peers_clone.write().unwrap() = Some(max_peers);
-                Ok(())
-            }));
+        node.reset_peers_result = Arc::new(Mutex::new(move |key: TypedKey, max_peers: u16| {
+            *recorded_key_clone.write().unwrap() = Some(key);
+            *recorded_max_peers_clone.write().unwrap() = Some(max_peers);
+            Ok(())
+        }));
 
         // Create a test key and channel
         let test_key =
@@ -310,7 +309,7 @@ mod tests {
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(stub_peer.clone(), test_key.clone());
+        let peer_announcer = PeerAnnouncer::new(node.clone(), test_key.clone());
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot).await;
 
         // Send a Reset request
