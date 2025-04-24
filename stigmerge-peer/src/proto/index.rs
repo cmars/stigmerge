@@ -9,6 +9,10 @@ use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSlice};
 use super::{stigmerge_capnp::index, Decoder, Digest, Encoder, Error, Result, MAX_INDEX_BYTES};
 
 impl Encoder for Index {
+    /// Encode the portable fields (file and payload specs) of an Index to a binary representation with capnp.
+    ///
+    /// Index::root is not encoded, as it's specific to an Index's application
+    /// to the local filesystem.
     fn encode(&self) -> Result<Vec<u8>> {
         let mut builder = message::Builder::new_default();
         let mut index_builder = builder.get_root::<index::Builder>()?;

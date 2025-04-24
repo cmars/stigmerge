@@ -9,6 +9,7 @@ use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
     actor::{Actor, ChanServer},
+    content_addressable::ContentAddressable,
     node::TypedKey,
     proto::{Digest, Encoder, Header},
     Error, Node, Result,
@@ -200,10 +201,9 @@ impl<P: Node> Actor for ShareResolver<P> {
                 want_index_digest,
                 root,
             } => {
-                let (target, header, index) = self.node.resolve(key, root.as_path()).await?;
-                let mut peer_index_digest = Sha256::new();
-                peer_index_digest.update(index.encode()?);
-                if peer_index_digest.finalize().as_slice() == want_index_digest {
+                let (target, header, mut index) = self.node.resolve(key, root.as_path()).await?;
+                let peer_index_digest = index.digest()?;
+                if peer_index_digest.as_slice() == want_index_digest {
                     self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
                         warn!("no target subscribers: {}", e);
                         0
