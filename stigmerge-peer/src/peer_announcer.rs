@@ -73,6 +73,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
+    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
         cancel: CancellationToken,

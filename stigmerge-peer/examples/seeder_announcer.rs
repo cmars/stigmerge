@@ -8,13 +8,15 @@ use std::sync::Arc;
 use stigmerge_peer::fetcher::{self, Fetcher};
 use stigmerge_peer::seeder::{self, Seeder};
 use stigmerge_peer::types::ShareInfo;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::{select, spawn};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{OneShot, Operator, WithVeilidConnection};
+use stigmerge_peer::actor::{
+    ConnectionState, OneShot, Operator, UntilCancelled, WithVeilidConnection,
+};
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
 use stigmerge_peer::{block_fetcher, have_announcer, share_resolver, Error};
@@ -43,12 +45,13 @@ async fn main() -> std::result::Result<(), Error> {
     let node = Veilid::new(routing_context, update_tx).await?;
 
     let cancel = CancellationToken::new();
+    let conn_state = Arc::new(Mutex::new(ConnectionState::new()));
 
     // Announce the share
     let mut announce_op = Operator::new(
         cancel.clone(),
         ShareAnnouncer::new(node.clone(), index.clone()),
-        WithVeilidConnection::new(OneShot, node.clone()),
+        WithVeilidConnection::new(OneShot, node.clone(), conn_state.clone()),
     );
     announce_op.send(share_announcer::Request::Announce).await?;
 
@@ -93,12 +96,12 @@ async fn main() -> std::result::Result<(), Error> {
                     root.clone(),
                     target_update_rx,
                 ),
-                WithVeilidConnection::new(OneShot, node.clone()),
+                WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
             ),
             piece_verifier: Operator::new(
                 cancel.clone(),
                 verifier,
-                WithVeilidConnection::new(OneShot, node.clone()),
+                WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
             ),
             have_announcer: Operator::new(
                 cancel.clone(),
@@ -106,7 +109,7 @@ async fn main() -> std::result::Result<(), Error> {
                     node.clone(),
                     header.have_map().unwrap().key().clone(),
                 ),
-                WithVeilidConnection::new(OneShot, node.clone()),
+                WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
             ),
         },
     );
@@ -115,7 +118,7 @@ async fn main() -> std::result::Result<(), Error> {
     Operator::new(
         cancel.clone(),
         Seeder::new(node.clone(), share, seeder_clients),
-        WithVeilidConnection::new(OneShot, node.clone()),
+        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
     );
 
     select! {

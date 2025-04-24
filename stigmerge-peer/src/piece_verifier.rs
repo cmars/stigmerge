@@ -119,6 +119,7 @@ impl Actor for PieceVerifier {
     type Request = Request;
     type Response = Response;
 
+    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -135,9 +136,6 @@ impl Actor for PieceVerifier {
                         Some(req) => {
                             let resp = self.handle(&req).await?;
                             server_ch.send(resp.clone()).await?;
-                            if resp.index_complete() {
-                                cancel.cancel();
-                            }
                         }
                     }
                 }

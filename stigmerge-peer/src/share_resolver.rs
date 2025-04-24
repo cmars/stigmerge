@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use sha2::{Digest as _, Sha256};
 use stigmerge_fileindex::Index;
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
@@ -11,7 +10,7 @@ use crate::{
     actor::{Actor, ChanServer},
     content_addressable::ContentAddressable,
     node::TypedKey,
-    proto::{Digest, Encoder, Header},
+    proto::{Digest, Header},
     Error, Node, Result,
 };
 
@@ -142,6 +141,7 @@ impl<P: Node> Actor for ShareResolver<P> {
     type Request = Request;
     type Response = Response;
 
+    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
         cancel: CancellationToken,

@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use tokio::{
     select, spawn,
-    sync::broadcast,
+    sync::{broadcast, Mutex, MutexGuard},
     task::{self, JoinError},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{error, info, warn};
 use veilid_core::{VeilidAPIError, VeilidUpdate};
 
 use crate::{
@@ -186,22 +188,35 @@ pub struct WithVeilidConnection<T, N> {
     runner: T,
     node: N,
     update_rx: broadcast::Receiver<VeilidUpdate>,
+    state: Arc<Mutex<ConnectionState>>,
+}
+
+pub struct ConnectionState {
     connected: bool,
 }
 
+impl ConnectionState {
+    pub fn new() -> ConnectionState {
+        ConnectionState { connected: false }
+    }
+}
+
 impl<T, N: Node> WithVeilidConnection<T, N> {
-    pub fn new(runner: T, node: N) -> Self {
+    pub fn new(runner: T, node: N, state: Arc<Mutex<ConnectionState>>) -> Self {
         let update_rx = node.subscribe_veilid_update();
         Self {
             runner,
             node,
             update_rx,
-            connected: false,
+            state,
         }
     }
 
-    async fn disconnected(&mut self, cancel: CancellationToken) -> Result<()> {
-        info!("disconnected");
+    async fn disconnected<'a>(
+        &mut self,
+        cancel: CancellationToken,
+        mut state: MutexGuard<'a, ConnectionState>,
+    ) -> Result<()> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -212,13 +227,14 @@ impl<T, N: Node> WithVeilidConnection<T, N> {
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
                             if veilid_state_attachment.public_internet_ready {
-                                info!("connected");
-                                self.connected = true;
+                                info!("connected: {:?}", veilid_state_attachment);
+                                state.connected = true;
                                 return Ok(())
                             }
                             info!("disconnected: {:?}", veilid_state_attachment);
                         }
                         VeilidUpdate::Shutdown => {
+                            warn!("shutdown");
                             cancel.cancel();
                             return Err(VeilidAPIError::Shutdown.into())
                         }
@@ -245,10 +261,14 @@ impl<
         cancel: CancellationToken,
         server_ch: ChanServer<<A as Actor>::Request, <A as Actor>::Response>,
     ) -> Result<()> {
+        let state = self.state.clone();
         loop {
-            if !self.connected {
-                self.disconnected(cancel.clone()).await?;
-                continue;
+            {
+                let st = state.lock().await;
+                if !st.connected {
+                    self.disconnected(cancel.clone(), st).await?;
+                    continue;
+                }
             }
             select! {
                 _ = cancel.cancelled() => {
@@ -258,15 +278,21 @@ impl<
                     match res {
                         Ok(())=>return Ok(()),
                         Err(e) => {
+                            error!("{:?}", e);
                             if e.is_transient() {
                                 // TODO: backoff retry? circuit breaker?
                                 continue;
                             }
                             if e.is_permanent() {
+                                cancel.cancel();
                                 return Err(e);
                             }
-                            self.node.reset().await?;
-                            self.connected = false;
+                            {
+                                if let Ok(mut st) = state.try_lock() {
+                                    info!("marking disconnected");
+                                    st.connected = false;
+                                }
+                            }
                         }
                     }
                 }
@@ -281,7 +307,7 @@ impl<T: Clone, N: Clone> Clone for WithVeilidConnection<T, N> {
             runner: self.runner.clone(),
             node: self.node.clone(),
             update_rx: self.update_rx.resubscribe(),
-            connected: self.connected.clone(),
+            state: self.state.clone(),
         }
     }
 }

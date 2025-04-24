@@ -24,6 +24,7 @@ pub struct Clients {
     pub have_announcer: Operator<have_announcer::Request, have_announcer::Response>,
 }
 
+#[derive(Debug)]
 pub enum State {
     Indexing,
     Planning,
@@ -31,7 +32,7 @@ pub enum State {
     Done,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Status {
     IndexProgress { position: u64, length: u64 },
     DigestProgress { position: u64, length: u64 },
@@ -51,6 +52,7 @@ impl Fetcher {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         loop {
             self.state = match self.state {
@@ -62,6 +64,7 @@ impl Fetcher {
         }
     }
 
+    #[tracing::instrument(skip_all, err, ret)]
     async fn index(&mut self, cancel: CancellationToken) -> Result<State> {
         let indexer = Indexer::from_wanted(&self.want_index).await?;
 
@@ -111,6 +114,7 @@ impl Fetcher {
         Ok(State::Planning)
     }
 
+    #[tracing::instrument(skip_all, err, ret)]
     async fn plan(&mut self, cancel: CancellationToken) -> Result<State> {
         let diff = self.want_index.diff(&self.have_index);
         let mut want_length = 0;
@@ -168,6 +172,7 @@ impl Fetcher {
         })
     }
 
+    #[tracing::instrument(skip_all, err, ret)]
     async fn fetch(&mut self, cancel: CancellationToken) -> Result<State> {
         let mut verified_pieces = 0u64;
         let total_pieces = self.want_index.payload().pieces().len().try_into().unwrap();

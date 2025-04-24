@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 use veilid_core::Target;
 
 use crate::actor::{Actor, ChanServer};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::node::Node;
 
 use super::types::FileBlockFetch;
@@ -117,6 +117,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
     type Request = Request;
     type Response = Response;
 
+    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -215,6 +216,7 @@ mod tests {
     use crate::actor::{OneShot, Operator};
     use crate::tests::{temp_file, StubNode};
     use crate::types::FileBlockFetch;
+    use crate::Error;
 
     use super::*;
 

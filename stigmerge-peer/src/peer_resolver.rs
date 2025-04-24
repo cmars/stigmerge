@@ -79,6 +79,7 @@ impl<P: Node> Actor for PeerResolver<P> {
     type Response = Response;
 
     /// Run the service until cancelled.
+    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
         cancel: CancellationToken,

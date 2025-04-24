@@ -3,13 +3,15 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::select;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{OneShot, Operator, WithVeilidConnection};
+use stigmerge_peer::actor::{ConnectionState, OneShot, Operator, WithVeilidConnection};
 use stigmerge_peer::new_routing_context;
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
@@ -38,12 +40,13 @@ async fn main() -> std::result::Result<(), Error> {
     let node = Veilid::new(routing_context, update_tx).await?;
 
     let cancel = CancellationToken::new();
+    let conn_state = Arc::new(Mutex::new(ConnectionState::new()));
 
     // Announce the share
     let mut announce_op = Operator::new(
         cancel.clone(),
         ShareAnnouncer::new(node.clone(), index.clone()),
-        WithVeilidConnection::new(OneShot, node.clone()),
+        WithVeilidConnection::new(OneShot, node.clone(), conn_state.clone()),
     );
     announce_op.send(share_announcer::Request::Announce).await?;
 
