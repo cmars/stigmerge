@@ -5,11 +5,10 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use stigmerge_peer::fetcher::{self, Fetcher};
 use stigmerge_peer::seeder::{self, Seeder};
-use stigmerge_peer::types::ShareInfo;
+use stigmerge_peer::types::{PieceState, ShareInfo};
+use tokio::select;
 use tokio::sync::{Mutex, RwLock};
-use tokio::{select, spawn};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -19,7 +18,7 @@ use stigmerge_peer::actor::{
 };
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
-use stigmerge_peer::{block_fetcher, have_announcer, share_resolver, Error};
+use stigmerge_peer::Error;
 use stigmerge_peer::{new_routing_context, piece_verifier, Node};
 
 #[tokio::main]
@@ -66,13 +65,12 @@ async fn main() -> std::result::Result<(), Error> {
     };
     info!("announced: key={key}, target={target:?}");
 
-    let resolver = share_resolver::ShareResolver::new(node.clone());
-    let target_update_rx = resolver.subscribe_target();
-
     let shared_index = Arc::new(RwLock::new(index.clone()));
 
-    // Verify the local share
+    // Set up the verifier
     let verifier = piece_verifier::PieceVerifier::new(shared_index.clone());
+    let verified_rx = verifier.subscribe_verified();
+    let mut verifier_op = Operator::new(cancel.clone(), verifier, OneShot);
 
     // Set up the seeder
     let share = ShareInfo {
@@ -82,44 +80,36 @@ async fn main() -> std::result::Result<(), Error> {
     };
     let seeder_clients = seeder::Clients {
         update_rx: node.subscribe_veilid_update(),
-        verified_rx: verifier.subscribe_verified(),
+        verified_rx,
     };
 
-    let fetcher = Fetcher::new(
-        share.clone(),
-        fetcher::Clients {
-            block_fetcher: Operator::new(
-                cancel.clone(),
-                block_fetcher::BlockFetcher::new(
-                    node.clone(),
-                    shared_index.clone(),
-                    root.clone(),
-                    target_update_rx,
-                ),
-                WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
-            ),
-            piece_verifier: Operator::new(
-                cancel.clone(),
-                verifier,
-                WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
-            ),
-            have_announcer: Operator::new(
-                cancel.clone(),
-                have_announcer::HaveAnnouncer::new(
-                    node.clone(),
-                    header.have_map().unwrap().key().clone(),
-                ),
-                WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
-            ),
-        },
-    );
-    spawn(fetcher.run(cancel.clone()));
-
-    Operator::new(
+    let mut seeder_op = Operator::new(
         cancel.clone(),
         Seeder::new(node.clone(), share, seeder_clients),
         WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
     );
+
+    // Verify the index, notifying seeder of verified pieces
+    for (piece_index, piece) in index.payload().pieces().iter().enumerate() {
+        for block_index in 0..piece.block_count() {
+            let req = piece_verifier::Request::Piece(PieceState::new(
+                0,
+                piece_index,
+                0,
+                piece.block_count(),
+                block_index,
+            ));
+            verifier_op.send(req).await?;
+            let resp = verifier_op.recv().await;
+            info!("verifier: {resp:?}");
+        }
+    }
+
+    // Query the seeder's have map
+    seeder_op.send(seeder::Request::HaveMap).await?;
+    let seeder::Response::HaveMap(have_map) = seeder_op.recv().await.unwrap();
+
+    info!("seeding {key:?} {have_map:?}");
 
     select! {
         _ = tokio::signal::ctrl_c() => {
