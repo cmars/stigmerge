@@ -11,7 +11,7 @@ use crate::{
     actor::{Actor, ChanServer},
     node::TypedKey,
     piece_map::PieceMap,
-    Error, Node, Result,
+    Node, Result,
 };
 
 /// The have_resolver service handles requests for remote peer have-maps, which
@@ -54,7 +54,7 @@ where
 }
 
 /// Have-map resolver request messages.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Request {
     /// Resolve the have-map key to get a map of which pieces the remote peer has.
     Resolve { key: TypedKey, subkeys: u16 },
@@ -78,10 +78,10 @@ impl Request {
 }
 
 /// Have-map resolver response messages.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Response {
     /// Have-map is not available at the given key, with error cause.
-    NotAvailable { key: TypedKey, err: Error },
+    NotAvailable { key: TypedKey, err_msg: String },
 
     /// Have-map response.
     Resolve {
@@ -122,7 +122,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                             server_ch.send(resp).await?
                         }
                         Err(err) => {
-                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err }).await?
+                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err_msg: err.to_string() }).await?
                         }
                     }
                 }

@@ -1,5 +1,5 @@
-//! Example: announce a file using a real Veilid peer
-// Usage: cargo run --example share_and_seed -- <FILE>
+//! Example: announce and seed a file
+// Usage: cargo run --example seeder_announcer -- <FILE>
 
 use std::env;
 use std::path::PathBuf;
@@ -16,6 +16,7 @@ use stigmerge_fileindex::Indexer;
 use stigmerge_peer::actor::{
     ConnectionState, OneShot, Operator, UntilCancelled, WithVeilidConnection,
 };
+use stigmerge_peer::content_addressable::ContentAddressable;
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
 use stigmerge_peer::Error;
@@ -34,7 +35,8 @@ async fn main() -> std::result::Result<(), Error> {
 
     // Index the file
     let indexer = Indexer::from_file(file.clone()).await?;
-    let index = indexer.index().await?;
+    let mut index = indexer.index().await?;
+    let index_digest = index.digest()?;
 
     let state_dir = tempfile::tempdir()?;
 
@@ -109,7 +111,11 @@ async fn main() -> std::result::Result<(), Error> {
     seeder_op.send(seeder::Request::HaveMap).await?;
     let seeder::Response::HaveMap(have_map) = seeder_op.recv().await.unwrap();
 
-    info!("seeding {key:?} {have_map:?}");
+    info!(
+        "seeding {} {} {have_map:?}",
+        key.to_string(),
+        hex::encode(index_digest)
+    );
 
     select! {
         _ = tokio::signal::ctrl_c() => {

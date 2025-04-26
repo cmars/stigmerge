@@ -1,5 +1,5 @@
-//! Example: announce a file using a real Veilid peer
-// Usage: cargo run --example share_and_seed -- <FILE>
+//! Example: announce a file
+// Usage: cargo run --example share_announce -- <FILE>
 
 use std::env;
 use std::path::PathBuf;

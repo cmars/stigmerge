@@ -11,7 +11,7 @@ use crate::{
     content_addressable::ContentAddressable,
     node::TypedKey,
     proto::{Digest, Header},
-    Error, Node, Result,
+    Node, Result,
 };
 
 /// The share_resolver service maintains private routes to the route posted at remote
@@ -42,6 +42,7 @@ impl<P: Node> ShareResolver<P> {
 }
 
 /// Share resolver request messages.
+#[derive(Clone)]
 pub enum Request {
     /// Resolve the Index located at a remote share key, with a known index
     /// digest, for merging into a local file share.
@@ -87,9 +88,10 @@ impl Request {
 }
 
 /// Share resolver response messages.
+#[derive(Clone)]
 pub enum Response {
     /// Remote share is not available at the given key, with error cause.
-    NotAvailable { key: TypedKey, err: Error },
+    NotAvailable { key: TypedKey, err_msg: String },
 
     /// Remote share has a bad index. This could be caused by a defective or malicious peer,
     /// or the wrong share key given for the desired index digest.
@@ -119,7 +121,7 @@ impl Response {
     /// Get the share key for a valid usable share.
     fn valid_key(&self) -> Option<&TypedKey> {
         match self {
-            Response::NotAvailable { key: _, err: _ } => None,
+            Response::NotAvailable { key: _, err_msg: _ } => None,
             Response::BadIndex { key: _ } => None,
             Response::Index {
                 key,
@@ -170,7 +172,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                             server_ch.send(resp).await?;
                         }
                         Err(e) => {
-                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err: e.into() }).await?;
+                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err_msg: e.to_string() }).await?;
                         }
                     }
                 }

@@ -8,7 +8,7 @@ use crate::{
     actor::{Actor, ChanServer},
     node::TypedKey,
     proto::{Decoder, PeerInfo},
-    Error, Node, Result,
+    Node, Result,
 };
 
 /// The peer_resolver service handles requests for remote peer maps, which
@@ -29,7 +29,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Request {
     /// Resolve the peer information stored at the given peer map key. This will
     /// result in a response containing the peer info, or a not available
@@ -56,11 +56,11 @@ impl Request {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Response {
     NotAvailable {
         key: TypedKey,
-        err: Error,
+        err_msg: String,
     },
     Resolve {
         key: TypedKey,
@@ -99,7 +99,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                         Ok(resp) => {
                             server_ch.send(resp).await?
                         }
-                        Err(err) => server_ch.send(Response::NotAvailable{key: req.key().clone(), err}).await?,
+                        Err(err) => server_ch.send(Response::NotAvailable{key: req.key().clone(), err_msg: err.to_string()}).await?,
                     }
                 }
                 res = self.updates.recv() => {

@@ -2,7 +2,7 @@
 
 pub mod actor;
 pub mod block_fetcher;
-mod content_addressable;
+pub mod content_addressable;
 mod error;
 pub mod have_announcer;
 mod have_resolver;
