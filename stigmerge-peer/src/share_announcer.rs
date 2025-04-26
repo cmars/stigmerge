@@ -1,15 +1,16 @@
 use stigmerge_fileindex::Index;
-use tokio::select;
+use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
-use veilid_core::Target;
+use tracing::info;
+use veilid_core::{Target, VeilidUpdate};
 
 use crate::{actor::Actor, node::TypedKey, proto::Header, Node, Result};
 
-#[derive(Clone)]
 pub struct ShareAnnouncer<N: Node> {
     node: N,
     index: Index,
     share: Option<ShareAnnounce>,
+    update_rx: broadcast::Receiver<VeilidUpdate>,
 }
 
 #[derive(Clone)]
@@ -21,10 +22,12 @@ struct ShareAnnounce {
 
 impl<N: Node> ShareAnnouncer<N> {
     pub fn new(node: N, index: Index) -> ShareAnnouncer<N> {
+        let update_rx = node.subscribe_veilid_update();
         ShareAnnouncer {
             node,
             index,
             share: None,
+            update_rx,
         }
     }
 
@@ -40,6 +43,29 @@ impl<N: Node> ShareAnnouncer<N> {
             target,
             header,
         })
+    }
+
+    async fn reannounce(&mut self) -> Result<Response> {
+        match self.share.as_mut() {
+            Some(ShareAnnounce {
+                key,
+                target,
+                header,
+            }) => {
+                let (updated_target, updated_header) = self
+                    .node
+                    .reannounce_route(key, Some(*target), &self.index, header)
+                    .await?;
+                *target = updated_target;
+                *header = updated_header;
+                Ok(Response::Announce {
+                    key: *key,
+                    target: *target,
+                    header: header.clone(),
+                })
+            }
+            None => Ok(Response::NotAvailable),
+        }
     }
 }
 
@@ -68,13 +94,14 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
         cancel: CancellationToken,
         mut server_ch: crate::actor::ChanServer<Self::Request, Self::Response>,
     ) -> Result<()> {
+        self.share = None;
         loop {
             match self.share {
                 None => {
                     let resp = self.announce().await?;
                     server_ch.send(resp).await?;
                 }
-                Some(ShareAnnounce { .. }) => {
+                Some(ShareAnnounce { target, .. }) => {
                     select! {
                         _ = cancel.cancelled() => {
                             return Ok(());
@@ -83,6 +110,20 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                             if let Some(req) = res {
                                 let resp = self.handle(&req).await?;
                                 server_ch.send(resp).await?;
+                            }
+                        }
+                        res = self.update_rx.recv() => {
+                            if let Target::PrivateRoute(ref route_id) = target {
+                                let update = res?;
+                                match update {
+                                    VeilidUpdate::RouteChange(route_change) => {
+                                        if route_change.dead_routes.contains(route_id) {
+                                            info!("route changed, reannouncing");
+                                            self.reannounce().await?;
+                                        }
+                                    },
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -94,27 +135,20 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         match req {
             Request::Announce => {
-                if let Some(ShareAnnounce {
-                    key,
-                    target,
-                    header,
-                }) = &mut self.share
-                {
-                    let (updated_target, updated_header) = self
-                        .node
-                        .reannounce_route(key, Some(*target), &self.index, header)
-                        .await?;
-                    *target = updated_target;
-                    *header = updated_header;
-                    return Ok(Response::Announce {
-                        key: *key,
-                        target: *target,
-                        header: header.clone(),
-                    });
-                }
+                return self.reannounce().await;
             }
         }
-        Ok(Response::NotAvailable)
+    }
+}
+
+impl<N: Node> Clone for ShareAnnouncer<N> {
+    fn clone(&self) -> Self {
+        Self {
+            node: self.node.clone(),
+            index: self.index.clone(),
+            share: self.share.clone(),
+            update_rx: self.update_rx.resubscribe(),
+        }
     }
 }
 

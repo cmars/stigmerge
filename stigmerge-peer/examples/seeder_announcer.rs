@@ -52,7 +52,7 @@ async fn main() -> std::result::Result<(), Error> {
     let mut announce_op = Operator::new(
         cancel.clone(),
         ShareAnnouncer::new(node.clone(), index.clone()),
-        WithVeilidConnection::new(OneShot, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
     );
     announce_op.send(share_announcer::Request::Announce).await?;
 
@@ -128,5 +128,10 @@ async fn main() -> std::result::Result<(), Error> {
         .await
         .expect("announce task")
         .expect("announce run");
+    seeder_op
+        .join()
+        .await
+        .expect("seeder task")
+        .expect("seeder run");
     Ok(())
 }
