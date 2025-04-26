@@ -54,6 +54,7 @@ impl<N: Node> PeerAnnouncer<N> {
 }
 
 /// Peer-map announcer request messages.
+#[derive(Clone)]
 pub enum Request {
     /// Announce a known remote peer in good standing.
     Announce { key: TypedKey },
@@ -67,7 +68,11 @@ pub enum Request {
 }
 
 /// Peer-map announcer response message, just an acknowledgement or error.
-pub type Response = Result<()>;
+#[derive(Clone, Debug, PartialEq)]
+pub enum Response {
+    Ok,
+    Err { err_msg: String },
+}
 
 impl<P: Node> Actor for PeerAnnouncer<P> {
     type Request = Request;
@@ -92,7 +97,10 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                         None => return Ok(()),
                         Some(req) => req,
                     };
-                    let resp = self.handle(&req).await?;
+                    let resp = match self.handle(&req).await {
+                        Ok(resp) => resp,
+                        Err(e) => Response::Err{err_msg: e.to_string()},
+                    };
                     server_ch.send(resp).await?;
                 }
             }
@@ -108,7 +116,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                         .announce_peer(self.key.to_owned(), Some(*key), index)
                         .await?;
                 }
-                Ok(())
+                Response::Ok
             }
             Request::Redact { key } => {
                 if let Some(index) = self.peer_indexes.get(key) {
@@ -119,7 +127,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     self.peers[*index] = None;
                     self.peer_indexes.remove(key);
                 }
-                Ok(())
+                Response::Ok
             }
             Request::Reset => {
                 self.node
@@ -127,7 +135,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     .await?;
                 self.peers.clear();
                 self.peer_indexes.clear();
-                Ok(())
+                Response::Ok
             }
         })
     }
@@ -145,7 +153,7 @@ mod tests {
 
     use crate::{
         actor::{OneShot, Operator},
-        peer_announcer::{PeerAnnouncer, Request, DEFAULT_MAX_PEERS},
+        peer_announcer::{PeerAnnouncer, Request, Response, DEFAULT_MAX_PEERS},
         tests::StubNode,
     };
 
@@ -194,7 +202,7 @@ mod tests {
             key: peer_key.clone(),
         };
         operator.send(req).await.unwrap();
-        operator.recv().await.expect("recv").expect("announce ok");
+        assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
 
         // Verify the peer was announced correctly
         let recorded_key = recorded_key.read().unwrap();
@@ -260,14 +268,14 @@ mod tests {
             key: peer_key.clone(),
         };
         operator.send(req_announce).await.unwrap();
-        operator.recv().await.expect("recv").expect("announce ok");
+        assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
 
         // Then redact it
         let req_redact = Request::Redact {
             key: peer_key.clone(),
         };
         operator.send(req_redact).await.unwrap();
-        operator.recv().await.expect("recv").expect("redact ok");
+        assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
 
         // Verify the peer was redacted correctly
         let recorded_key = recorded_key.read().unwrap();
@@ -316,7 +324,7 @@ mod tests {
         // Send a Reset request
         let req = Request::Reset;
         operator.send(req).await.unwrap();
-        operator.recv().await.expect("recv").expect("reset ok");
+        assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
 
         // Verify the peers were reset correctly
         let recorded_key = recorded_key.read().unwrap();
