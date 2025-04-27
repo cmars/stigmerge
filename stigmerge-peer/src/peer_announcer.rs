@@ -27,7 +27,7 @@ pub const DEFAULT_MAX_PEERS: u16 = 32;
 
 impl<N: Node> PeerAnnouncer<N> {
     /// Create a new peer_announcer service.
-    pub(super) fn new(node: N, key: TypedKey) -> Self {
+    pub fn new(node: N, key: TypedKey) -> Self {
         Self {
             node,
             key,
