@@ -1,10 +1,10 @@
 //! Example: fetch a file and keep seeding it
 //! This example doesn't support swarm fetching from gossip-discovered peers.
 //! It also isn't have-map aware.
-//! 
+//!
 //! Those will be built in followup examples, as we incrementally build up to a
 //! fully-autonomous swarming peer.
-//! 
+//!
 //! However, you can daisy-chain syncers off an initial share with this example, like this:
 //! - Peer 1 seeds a file at share_key_1
 //! - Peer 2 fetches from share_key_1, publishing at share_key_2
@@ -186,10 +186,7 @@ async fn main() -> std::result::Result<(), Error> {
     // Announce our own have-map as we fetch, at our announced share's have-map key
     let have_announcer = Operator::new(
         cancel.clone(),
-        HaveAnnouncer::new(
-            node.clone(),
-            share_header.have_map().unwrap().key().clone(),
-        ),
+        HaveAnnouncer::new(node.clone(), share_header.have_map().unwrap().key().clone()),
         WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
     );
 

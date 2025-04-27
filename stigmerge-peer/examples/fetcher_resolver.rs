@@ -100,7 +100,7 @@ async fn main() -> std::result::Result<(), Error> {
 
     // Set up fetcher dependencies
     let want_index = Arc::new(RwLock::new(index.clone()));
-    let block_fetcher = Operator::new(
+    let block_fetcher = Operator::new_pool(
         cancel.clone(),
         BlockFetcher::new(
             node.clone(),
@@ -109,6 +109,7 @@ async fn main() -> std::result::Result<(), Error> {
             target_rx,
         ),
         WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        50,
     );
 
     let piece_verifier = Operator::new(
@@ -136,7 +137,7 @@ async fn main() -> std::result::Result<(), Error> {
     };
 
     // Create and run fetcher
-    let fetcher = Fetcher::new(share, clients);
+    let mut fetcher = Fetcher::new(share, clients);
 
     info!("Starting fetch...");
 

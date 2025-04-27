@@ -59,7 +59,7 @@ impl Fetcher {
                 State::Indexing => self.index(cancel.clone()).await?,
                 State::Planning => self.plan(cancel.clone()).await?,
                 State::Fetching => self.fetch(cancel.clone()).await?,
-                State::Done => return Ok(()),
+                State::Done => return self.join().await,
             }
         }
     }
@@ -131,7 +131,7 @@ impl Fetcher {
                         piece_offset: want_block.piece_offset,
                         block_index: want_block.block_index,
                     },
-                    flush: false,
+                    flush: true,
                 }) => {
                     res?;
                     want_length += want_block.block_length;
@@ -245,7 +245,7 @@ impl Fetcher {
                             self.status_tx.send(
                                 Status::FetchProgress{
                                     length: total_length.try_into().unwrap(),
-                                    count: (0-piece_length).try_into().unwrap()
+                                    count: 0-TryInto::<i64>::try_into(piece_length).unwrap(),
                                 }).unwrap_or_else(|_| { warn!("no status subscribers"); 0 });
 
                             // Re-fetch all the blocks in the failed piece
@@ -268,5 +268,12 @@ impl Fetcher {
                 }
             }
         }
+    }
+
+    async fn join(self) -> Result<()> {
+        self.clients.piece_verifier.join().await??;
+        self.clients.block_fetcher.join().await??;
+        self.clients.have_announcer.join().await??;
+        Ok(())
     }
 }

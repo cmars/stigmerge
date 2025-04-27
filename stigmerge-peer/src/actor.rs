@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use tokio::{
-    select, spawn,
+    select,
     sync::{broadcast, Mutex, MutexGuard},
-    task::{self, JoinError},
+    task::{self, JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -80,10 +80,10 @@ impl<Request, Response: Send + Sync + 'static> ChanServer<Request, Response> {
 pub struct Operator<Req, Resp> {
     cancel: CancellationToken,
     client_ch: ChanClient<Req, Resp>,
-    task: task::JoinHandle<Result<()>>,
+    tasks: task::JoinSet<Result<()>>,
 }
 
-impl<Req: Send + Sync + 'static, Resp: Send + Sync + 'static> Operator<Req, Resp> {
+impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Operator<Req, Resp> {
     pub fn new<
         A: Actor<Request = Req, Response = Resp> + Clone + Send + 'static,
         R: Runner<A> + Send + 'static,
@@ -95,11 +95,41 @@ impl<Req: Send + Sync + 'static, Resp: Send + Sync + 'static> Operator<Req, Resp
         let (client_ch, server_ch) = unbounded();
         let mut task_actor = actor.clone();
         let task_cancel = cancel.child_token();
-        let task = spawn(async move { runner.run(&mut task_actor, task_cancel, server_ch).await });
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move { runner.run(&mut task_actor, task_cancel, server_ch).await });
         Self {
             cancel,
             client_ch,
-            task,
+            tasks,
+        }
+    }
+
+    pub fn new_pool<
+        A: Actor<Request = Req, Response = Resp> + Clone + Send + 'static,
+        R: Runner<A> + Clone + Send + 'static,
+    >(
+        cancel: CancellationToken,
+        actor: A,
+        runner: R,
+        n: usize,
+    ) -> Self {
+        let (client_ch, server_ch) = unbounded();
+        let mut tasks = JoinSet::new();
+        for _ in 0..n {
+            let mut task_runner = runner.clone();
+            let mut task_actor = actor.clone();
+            let task_cancel = cancel.child_token();
+            let task_server_ch = server_ch.clone();
+            tasks.spawn(async move {
+                task_runner
+                    .run(&mut task_actor, task_cancel, task_server_ch)
+                    .await
+            });
+        }
+        Self {
+            cancel,
+            client_ch,
+            tasks,
         }
     }
 
@@ -124,7 +154,12 @@ impl<Req: Send + Sync + 'static, Resp: Send + Sync + 'static> Operator<Req, Resp
     }
 
     pub async fn join(self) -> std::result::Result<Result<()>, JoinError> {
-        self.task.await
+        for res in self.tasks.join_all().await.into_iter() {
+            if let Err(e) = res {
+                return Ok(Err(e));
+            }
+        }
+        Ok(Ok(()))
     }
 }
 
@@ -137,6 +172,7 @@ pub trait Runner<A: Actor> {
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
+#[derive(Clone)]
 pub struct OneShot;
 
 impl<
@@ -156,6 +192,7 @@ impl<
     }
 }
 
+#[derive(Clone)]
 pub struct UntilCancelled;
 
 impl<
