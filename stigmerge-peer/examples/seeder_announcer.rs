@@ -1,9 +1,18 @@
 //! Example: announce and seed a file
-// Usage: cargo run --example seeder_announcer -- <FILE>
 
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use clap::Parser;
+
+/// Seeder announcer CLI arguments
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to the file to seed
+    #[arg(help = "Path to the file to seed")]
+    file: PathBuf,
+}
 
 use stigmerge_peer::seeder::{self, Seeder};
 use stigmerge_peer::types::{PieceState, ShareInfo};
@@ -26,8 +35,8 @@ use stigmerge_peer::{new_routing_context, piece_verifier, Node};
 async fn main() -> std::result::Result<(), Error> {
     tracing_subscriber::fmt::init();
 
-    let file = env::args().nth(1).expect("usage: <prog> <FILE>");
-    let file = PathBuf::from(file);
+    let args = Args::parse();
+    let file = args.file;
     let root = file
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))

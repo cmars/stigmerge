@@ -1,9 +1,26 @@
 //! Example: fetch a file
-//! Usage: cargo run --example fetcher_resolver -- <WANT_INDEX_DIGEST> <SHARE_KEY> [DOWNLOAD_DIR]
 
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use clap::Parser;
+
+/// Fetcher resolver CLI arguments
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// The index digest to fetch
+    #[arg(help = "The index digest to fetch")]
+    want_index_digest: String,
+
+    /// The share key to fetch from
+    #[arg(help = "The share key to fetch from")]
+    share_key: String,
+
+    /// Directory to download files to
+    #[arg(default_value = ".", help = "Directory to download files to")]
+    download_dir: PathBuf,
+}
 
 use stigmerge_peer::actor::UntilCancelled;
 use tokio::select;
@@ -29,14 +46,10 @@ async fn main() -> std::result::Result<(), Error> {
     tracing_subscriber::fmt::init();
 
     // Parse command line arguments
-    let want_index_digest = env::args()
-        .nth(1)
-        .expect("usage: <prog> <WANT_INDEX_DIGEST> <SHARE_KEY> [DOWNLOAD_DIR]");
-    let share_key = env::args()
-        .nth(2)
-        .expect("usage: <prog> <WANT_INDEX_DIGEST> <SHARE_KEY> [DOWNLOAD_DIR]");
-    let download_dir = env::args().nth(3).unwrap_or_else(|| ".".to_string());
-    let download_dir = PathBuf::from(download_dir);
+    let args = Args::parse();
+    let want_index_digest = args.want_index_digest;
+    let share_key = args.share_key;
+    let download_dir = args.download_dir;
 
     let state_dir = tempfile::tempdir()?;
 

@@ -1,9 +1,18 @@
 //! Example: announce a file
-// Usage: cargo run --example share_announce -- <FILE>
 
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use clap::Parser;
+
+/// Share announce CLI arguments
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to the file to announce
+    #[arg(help = "Path to the file to announce")]
+    file: PathBuf,
+}
 
 use tokio::select;
 use tokio::sync::Mutex;
@@ -21,8 +30,8 @@ use stigmerge_peer::Error;
 async fn main() -> std::result::Result<(), Error> {
     tracing_subscriber::fmt::init();
 
-    let file = env::args().nth(1).expect("usage: <prog> <FILE>");
-    let file = PathBuf::from(file);
+    let args = Args::parse();
+    let file = args.file;
     //let root = file
     //    .parent()
     //    .unwrap_or_else(|| std::path::Path::new("."))

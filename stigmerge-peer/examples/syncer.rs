@@ -9,11 +9,28 @@
 //! - Peer 1 seeds a file at share_key_1
 //! - Peer 2 fetches from share_key_1, publishing at share_key_2
 //! - Peer 3 fetches from share_key_2, etc...
-//! Usage: cargo run --example syncer -- <WANT_INDEX_DIGEST> <SHARE_KEY> [DOWNLOAD_DIR]
 
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use clap::Parser;
+
+/// Syncer CLI arguments
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// The index digest to fetch
+    #[arg(help = "The index digest to fetch")]
+    want_index_digest: String,
+
+    /// The share key to fetch from
+    #[arg(help = "The share key to fetch from")]
+    share_key: String,
+
+    /// Directory to download files to
+    #[arg(default_value = ".", help = "Directory to download files to")]
+    download_dir: PathBuf,
+}
 
 use stigmerge_peer::actor::UntilCancelled;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
@@ -41,14 +58,10 @@ async fn main() -> std::result::Result<(), Error> {
     tracing_subscriber::fmt::init();
 
     // Parse command line arguments
-    let want_index_digest = env::args()
-        .nth(1)
-        .expect("usage: <prog> <WANT_INDEX_DIGEST> <SHARE_KEY> [DOWNLOAD_DIR]");
-    let bootstrap_key = env::args()
-        .nth(2)
-        .expect("usage: <prog> <WANT_INDEX_DIGEST> <SHARE_KEY> [DOWNLOAD_DIR]");
-    let download_dir = env::args().nth(3).unwrap_or_else(|| ".".to_string());
-    let download_dir = PathBuf::from(download_dir);
+    let args = Args::parse();
+    let want_index_digest = args.want_index_digest;
+    let bootstrap_key = args.share_key;
+    let download_dir = args.download_dir;
 
     let state_dir = tempfile::tempdir()?;
 
