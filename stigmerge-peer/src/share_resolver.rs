@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use stigmerge_fileindex::Index;
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
@@ -88,7 +88,7 @@ impl Request {
 }
 
 /// Share resolver response messages.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Response {
     /// Remote share is not available at the given key, with error cause.
     NotAvailable { key: TypedKey, err_msg: String },
@@ -164,6 +164,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                         Ok(resp) => {
                             if let Some(valid_key) = resp.valid_key() {
                                 // Valid usable shares are watched.
+                                info!("watch: share key {valid_key}");
                                 self.node.watch(valid_key.clone(), ValueSubkeyRangeSet::single(0), TimestampDuration::new(60_000_000)).await?;
                             } else {
                                 // Invalid or unusable shares are unwatched.
@@ -203,7 +204,8 @@ impl<P: Node> Actor for ShareResolver<P> {
                 want_index_digest,
                 root,
             } => {
-                let (target, header, mut index) = self.node.resolve(key, root.as_path()).await?;
+                let (target, header, mut index) =
+                    self.node.resolve_route_index(key, root.as_path()).await?;
                 let peer_index_digest = index.digest()?;
                 if peer_index_digest.as_slice() == want_index_digest {
                     self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
@@ -224,7 +226,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                 ref key,
                 prior_target,
             } => {
-                let (target, header) = self.node.reresolve_route(key, *prior_target).await?;
+                let (target, header) = self.node.resolve_route(key, *prior_target).await?;
                 self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
                     warn!("no target subscribers: {}", e);
                     0
@@ -286,19 +288,20 @@ mod tests {
 
         let mut node = StubNode::new();
         let mock_index = index.clone();
-        node.resolve_result = Arc::new(Mutex::new(move |_key: &TypedKey, _root: &Path| {
-            let index_internal = mock_index.clone();
-            let index_bytes = index_internal.encode().expect("encode index");
-            Ok((
-                Target::PrivateRoute(CryptoKey::new([0u8; 32])),
-                Header::from_index(
-                    &index_internal,
-                    index_bytes.as_slice(),
-                    &[0xde, 0xad, 0xbe, 0xef],
-                ),
-                index_internal,
-            ))
-        }));
+        node.resolve_route_index_result =
+            Arc::new(Mutex::new(move |_key: &TypedKey, _root: &Path| {
+                let index_internal = mock_index.clone();
+                let index_bytes = index_internal.encode().expect("encode index");
+                Ok((
+                    Target::PrivateRoute(CryptoKey::new([0u8; 32])),
+                    Header::from_index(
+                        &index_internal,
+                        index_bytes.as_slice(),
+                        &[0xde, 0xad, 0xbe, 0xef],
+                    ),
+                    index_internal,
+                ))
+            }));
         node.watch_result = Arc::new(Mutex::new(
             move |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| Ok(()),
         ));
@@ -374,7 +377,7 @@ mod tests {
         let mock_index = index.clone();
         let mock_peer_map_key = fake_peer_map_key.clone();
         let mock_have_map_key = fake_have_map_key.clone();
-        node.reresolve_route_result = Arc::new(Mutex::new(
+        node.resolve_route_result = Arc::new(Mutex::new(
             move |_key: &TypedKey, _prior_route: Option<Target>| {
                 let index_internal = mock_index.clone();
                 let index_bytes = index_internal.encode().expect("encode index");

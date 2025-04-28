@@ -26,20 +26,19 @@ pub trait Node: Clone + Send {
         &mut self,
         index: &Index,
     ) -> impl std::future::Future<Output = Result<(TypedKey, Target, Header)>> + Send;
-    fn reannounce_route(
+    fn announce_route(
         &mut self,
         key: &TypedKey,
         prior_route: Option<Target>,
-        index: &Index,
         header: &Header,
     ) -> impl std::future::Future<Output = Result<(Target, Header)>> + Send;
 
-    fn resolve(
+    fn resolve_route_index(
         &mut self,
         key: &TypedKey,
         root: &Path,
     ) -> impl std::future::Future<Output = Result<(Target, Header, Index)>> + Send;
-    fn reresolve_route(
+    fn resolve_route(
         &mut self,
         key: &TypedKey,
         prior_route: Option<Target>,
@@ -80,24 +79,28 @@ pub trait Node: Clone + Send {
         have_map: &PieceMap,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
-    fn resolve_peer_info(
+    fn resolve_have_map(
         &mut self,
-        key: TypedKey,
-        subkey: u16,
-    ) -> impl std::future::Future<Output = Result<PeerInfo>> + Send;
+        peer_key: &TypedKey,
+    ) -> impl std::future::Future<Output = Result<PieceMap>> + Send;
 
     fn announce_peer(
         &mut self,
-        peer_map_key: TypedKey,
+        payload_digest: &[u8],
         peer_key: Option<TypedKey>,
         subkey: u16,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn reset_peers(
         &mut self,
-        peer_map_key: TypedKey,
+        payload_digest: &[u8],
         max_subkey: u16,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    fn resolve_peers(
+        &mut self,
+        peer_key: &TypedKey,
+    ) -> impl std::future::Future<Output = Result<Vec<PeerInfo>>> + Send;
 }
 
 mod veilid;
@@ -138,50 +141,4 @@ macro_rules! with_backoff_retry {
     }};
 }
 
-macro_rules! with_backoff_reset {
-    ($peer:expr, $op:expr) => {{
-        use backoff::backoff::Backoff as _;
-        let mut retry_backoff = crate::retry_backoff();
-        let mut reset_backoff = crate::reset_backoff();
-        let mut result = $op;
-        'retry: loop {
-            retry_backoff.reset();
-            'operation: loop {
-                match result {
-                    Ok(_) => break 'retry,
-                    Err(ref e) => {
-                        tracing::warn!(err = format!("{}", e));
-                        match retry_backoff.next_backoff() {
-                            Some(delay) => tokio::time::sleep(delay).await,
-                            None => {
-                                break 'operation;
-                            }
-                        };
-                        result = $op;
-                    }
-                }
-            }
-            reset_backoff.reset();
-            'reset: loop {
-                match $peer.reset().await {
-                    Ok(()) => break 'reset,
-                    Err(ref e) => {
-                        if !e.is_resetable() {
-                            break 'retry;
-                        }
-                        tracing::warn!(err = format!("{}", e));
-                        match reset_backoff.next_backoff() {
-                            Some(delay) => tokio::time::sleep(delay).await,
-                            None => {
-                                break 'retry;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        result
-    }};
-}
-
-pub(crate) use {with_backoff_reset, with_backoff_retry};
+pub(crate) use with_backoff_retry;

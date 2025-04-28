@@ -7,8 +7,11 @@ use stigmerge_fileindex::Index;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use veilid_core::{OperationId, Target, TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
-use crate::{error::Result, node::TypedKey, piece_map::PieceMap, proto::PeerInfo};
-use crate::{proto::Header, Node};
+use crate::{error::Result, node::TypedKey, piece_map::PieceMap};
+use crate::{
+    proto::{Header, PeerInfo},
+    Node,
+};
 
 #[derive(Clone)]
 pub struct StubNode {
@@ -18,16 +21,14 @@ pub struct StubNode {
     pub shutdown_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub announce_result:
         Arc<Mutex<dyn Fn(&Index) -> Result<(TypedKey, Target, Header)> + Send + 'static>>,
-    pub reannounce_route_result: Arc<
+    pub announce_route_result: Arc<
         Mutex<
-            dyn Fn(&TypedKey, Option<Target>, &Index, &Header) -> Result<(Target, Header)>
-                + Send
-                + 'static,
+            dyn Fn(&TypedKey, Option<Target>, &Header) -> Result<(Target, Header)> + Send + 'static,
         >,
     >,
-    pub resolve_result:
+    pub resolve_route_index_result:
         Arc<Mutex<dyn Fn(&TypedKey, &Path) -> Result<(Target, Header, Index)> + Send + 'static>>,
-    pub reresolve_route_result:
+    pub resolve_route_result:
         Arc<Mutex<dyn Fn(&TypedKey, Option<Target>) -> Result<(Target, Header)> + Send + 'static>>,
     pub request_block_result:
         Arc<Mutex<dyn Fn(Target, usize, usize) -> Result<Vec<u8>> + Send + 'static>>,
@@ -44,11 +45,12 @@ pub struct StubNode {
     >,
     pub announce_have_map_result:
         Arc<Mutex<dyn Fn(TypedKey, &PieceMap) -> Result<()> + Send + 'static>>,
-    pub resolve_peer_info_result:
-        Arc<Mutex<dyn Fn(TypedKey, u16) -> Result<PeerInfo> + Send + 'static>>,
+    pub resolve_have_map_result: Arc<Mutex<dyn Fn(&TypedKey) -> Result<PieceMap> + Send + 'static>>,
     pub announce_peer_result:
-        Arc<Mutex<dyn Fn(TypedKey, Option<TypedKey>, u16) -> Result<()> + Send + 'static>>,
-    pub reset_peers_result: Arc<Mutex<dyn Fn(TypedKey, u16) -> Result<()> + Send + 'static>>,
+        Arc<Mutex<dyn Fn(&[u8], Option<TypedKey>, u16) -> Result<()> + Send + 'static>>,
+    pub reset_peers_result: Arc<Mutex<dyn Fn(&[u8], u16) -> Result<()> + Send + 'static>>,
+    pub resolve_peers_result:
+        Arc<Mutex<dyn Fn(&TypedKey) -> Result<Vec<PeerInfo>> + Send + 'static>>,
 }
 
 impl StubNode {
@@ -61,20 +63,17 @@ impl StubNode {
             announce_result: Arc::new(Mutex::new(|_index: &Index| {
                 panic!("unexpected call to announce")
             })),
-            reannounce_route_result: Arc::new(Mutex::new(
-                |_key: &TypedKey,
-                 _prior_route: Option<Target>,
-                 _index: &Index,
-                 _header: &Header| {
-                    panic!("unexpected call to reannounce_route")
+            announce_route_result: Arc::new(Mutex::new(
+                |_key: &TypedKey, _prior_route: Option<Target>, _header: &Header| {
+                    panic!("unexpected call to announce_route")
                 },
             )),
-            resolve_result: Arc::new(Mutex::new(|_key: &TypedKey, _root: &Path| {
-                panic!("unexpected call to resolve")
+            resolve_route_index_result: Arc::new(Mutex::new(|_key: &TypedKey, _root: &Path| {
+                panic!("unexpected call to resolve_route_index")
             })),
-            reresolve_route_result: Arc::new(Mutex::new(
+            resolve_route_result: Arc::new(Mutex::new(
                 |_key: &TypedKey, _prior_route: Option<Target>| {
-                    panic!("unexpected call to reresolve_route")
+                    panic!("unexpected call to resolve_route")
                 },
             )),
             request_block_result: Arc::new(Mutex::new(
@@ -105,19 +104,20 @@ impl StubNode {
                     panic!("unexpected call to announce_have_map")
                 },
             )),
-            resolve_peer_info_result: Arc::new(Mutex::new(|_key: TypedKey, _subkey: u16| {
-                panic!("unexpected call to resolve_peer_info")
+            resolve_have_map_result: Arc::new(Mutex::new(|_peer_key: &TypedKey| {
+                panic!("unexpected call to resolve_have_map")
             })),
             announce_peer_result: Arc::new(Mutex::new(
-                |_peer_map_key: TypedKey, _peer_key: Option<TypedKey>, _subkey: u16| {
+                |_payload_digest: &[u8], _peer_key: Option<TypedKey>, _subkey: u16| {
                     panic!("unexpected call to announce_peer")
                 },
             )),
-            reset_peers_result: Arc::new(Mutex::new(
-                |_peer_map_key: TypedKey, _max_subkey: u16| {
-                    panic!("unexpected call to reset_peers")
-                },
-            )),
+            reset_peers_result: Arc::new(Mutex::new(|_payload_digest: &[u8], _max_subkey: u16| {
+                panic!("unexpected call to reset_peers")
+            })),
+            resolve_peers_result: Arc::new(Mutex::new(|_peer_key: &TypedKey| {
+                panic!("unexpected call to resolve_peers")
+            })),
         }
     }
 }
@@ -139,26 +139,29 @@ impl Node for StubNode {
         (*(self.announce_result.lock().unwrap()))(index)
     }
 
-    async fn reannounce_route(
+    async fn announce_route(
         &mut self,
         key: &TypedKey,
         prior_route: Option<Target>,
-        index: &Index,
         header: &Header,
     ) -> Result<(Target, Header)> {
-        (*(self.reannounce_route_result.lock().unwrap()))(key, prior_route, index, header)
+        (*(self.announce_route_result.lock().unwrap()))(key, prior_route, header)
     }
 
-    async fn resolve(&mut self, key: &TypedKey, root: &Path) -> Result<(Target, Header, Index)> {
-        (*(self.resolve_result.lock().unwrap()))(key, root)
+    async fn resolve_route_index(
+        &mut self,
+        key: &TypedKey,
+        root: &Path,
+    ) -> Result<(Target, Header, Index)> {
+        (*(self.resolve_route_index_result.lock().unwrap()))(key, root)
     }
 
-    async fn reresolve_route(
+    async fn resolve_route(
         &mut self,
         key: &TypedKey,
         prior_route: Option<Target>,
     ) -> Result<(Target, Header)> {
-        (*(self.reresolve_route_result.lock().unwrap()))(key, prior_route)
+        (*(self.resolve_route_result.lock().unwrap()))(key, prior_route)
     }
 
     async fn request_block(
@@ -200,20 +203,24 @@ impl Node for StubNode {
         (*(self.announce_have_map_result.lock().unwrap()))(key, have_map)
     }
 
-    async fn resolve_peer_info(&mut self, key: TypedKey, subkey: u16) -> Result<PeerInfo> {
-        (*(self.resolve_peer_info_result.lock().unwrap()))(key, subkey)
-    }
-
     async fn announce_peer(
         &mut self,
-        peer_map_key: TypedKey,
+        payload_digest: &[u8],
         peer_key: Option<TypedKey>,
         subkey: u16,
     ) -> Result<()> {
-        (*(self.announce_peer_result.lock().unwrap()))(peer_map_key, peer_key, subkey)
+        (*(self.announce_peer_result.lock().unwrap()))(payload_digest, peer_key, subkey)
     }
 
-    async fn reset_peers(&mut self, peer_map_key: TypedKey, max_subkey: u16) -> Result<()> {
-        (*(self.reset_peers_result.lock().unwrap()))(peer_map_key, max_subkey)
+    async fn reset_peers(&mut self, payload_digest: &[u8], max_subkey: u16) -> Result<()> {
+        (*(self.reset_peers_result.lock().unwrap()))(payload_digest, max_subkey)
+    }
+
+    async fn resolve_have_map(&mut self, peer_key: &TypedKey) -> Result<PieceMap> {
+        (*(self.resolve_have_map_result.lock().unwrap()))(peer_key)
+    }
+
+    async fn resolve_peers(&mut self, peer_key: &TypedKey) -> Result<Vec<PeerInfo>> {
+        (*(self.resolve_peers_result.lock().unwrap()))(peer_key)
     }
 }

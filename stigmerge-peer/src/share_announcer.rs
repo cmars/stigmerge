@@ -52,10 +52,8 @@ impl<N: Node> ShareAnnouncer<N> {
                 target,
                 header,
             }) => {
-                let (updated_target, updated_header) = self
-                    .node
-                    .reannounce_route(key, Some(*target), &self.index, header)
-                    .await?;
+                let (updated_target, updated_header) =
+                    self.node.announce_route(key, Some(*target), header).await?;
                 *target = updated_target;
                 *header = updated_header;
                 Ok(Response::Announce {
@@ -248,14 +246,9 @@ mod tests {
 
         // Set up the reannounce_route_result mock
         let mock_updated_target = updated_target.clone();
-        node.reannounce_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedKey,
-                  _prior_route: Option<Target>,
-                  index: &stigmerge_fileindex::Index,
-                  _header: &Header| {
-                let index_bytes = index.encode().expect("encode index");
-                let updated_header =
-                    Header::from_index(index, index_bytes.as_slice(), &[0xde, 0xca, 0xfb, 0xad]);
+        node.announce_route_result = Arc::new(Mutex::new(
+            move |_key: &TypedKey, _prior_route: Option<Target>, header: &Header| {
+                let updated_header = header.with_route_data(vec![0xde, 0xca, 0xfb, 0xad]);
                 Ok((mock_updated_target.clone(), updated_header))
             },
         ));

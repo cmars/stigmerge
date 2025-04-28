@@ -5,7 +5,7 @@ pub mod block_fetcher;
 pub mod content_addressable;
 mod error;
 pub mod have_announcer;
-mod have_resolver;
+pub mod have_resolver;
 pub mod node;
 pub mod peer_announcer;
 pub mod peer_resolver;

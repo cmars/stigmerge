@@ -81,46 +81,13 @@ impl Veilid {
     async fn open_or_create_have_map_record(
         &self,
         rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
-        header: &Header,
         index: &Index,
     ) -> Result<(DHTRecordDescriptor, u16)> {
         let api = rc.api();
         let ts = api.table_store()?;
         let db = ts.open("stigmerge_have_map_dht", 2).await?;
-        let digest_key = header.payload_digest();
-        let o_cnt = PieceMap::subkeys(index.payload().pieces().len());
-        let maybe_dht_key = db.load_json(0, digest_key.as_slice()).await?;
-        let maybe_dht_owner_keypair = db.load_json(1, digest_key.as_slice()).await?;
-        if let (Some(dht_key), Some(dht_owner_keypair)) = (maybe_dht_key, maybe_dht_owner_keypair) {
-            return Ok((rc.open_dht_record(dht_key, dht_owner_keypair).await?, o_cnt));
-        }
-
-        let dht_rec = rc
-            .create_dht_record(DHTSchema::dflt(o_cnt)?, None, None)
-            .await?;
-        let dht_owner = KeyPair::new(
-            dht_rec.owner().to_owned(),
-            dht_rec
-                .owner_secret()
-                .ok_or(Error::msg("expected dht owner secret"))?
-                .to_owned(),
-        );
-        db.store_json(0, digest_key.as_slice(), dht_rec.key())
-            .await?;
-        db.store_json(1, digest_key.as_slice(), &dht_owner).await?;
-        Ok((dht_rec, o_cnt))
-    }
-
-    async fn open_or_create_peer_map_record(
-        &self,
-        rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
-        index: &Index,
-    ) -> Result<(DHTRecordDescriptor, u16)> {
-        let api = rc.api();
-        let ts = api.table_store()?;
-        let db = ts.open("stigmerge_peer_map_dht", 2).await?;
         let digest_key = index.payload().digest();
-        let o_cnt = DEFAULT_MAX_PEERS;
+        let o_cnt = PieceMap::subkeys(index.payload().pieces().len());
         let maybe_dht_key = db.load_json(0, digest_key).await?;
         let maybe_dht_owner_keypair = db.load_json(1, digest_key).await?;
         if let (Some(dht_key), Some(dht_owner_keypair)) = (maybe_dht_key, maybe_dht_owner_keypair) {
@@ -139,6 +106,36 @@ impl Veilid {
         );
         db.store_json(0, digest_key, dht_rec.key()).await?;
         db.store_json(1, digest_key, &dht_owner).await?;
+        Ok((dht_rec, o_cnt))
+    }
+
+    async fn open_or_create_peer_map_record(
+        &self,
+        rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
+        payload_digest: &[u8],
+    ) -> Result<(DHTRecordDescriptor, u16)> {
+        let api = rc.api();
+        let ts = api.table_store()?;
+        let db = ts.open("stigmerge_peer_map_dht", 2).await?;
+        let o_cnt = DEFAULT_MAX_PEERS;
+        let maybe_dht_key = db.load_json(0, payload_digest).await?;
+        let maybe_dht_owner_keypair = db.load_json(1, payload_digest).await?;
+        if let (Some(dht_key), Some(dht_owner_keypair)) = (maybe_dht_key, maybe_dht_owner_keypair) {
+            return Ok((rc.open_dht_record(dht_key, dht_owner_keypair).await?, o_cnt));
+        }
+
+        let dht_rec = rc
+            .create_dht_record(DHTSchema::dflt(o_cnt)?, None, None)
+            .await?;
+        let dht_owner = KeyPair::new(
+            dht_rec.owner().to_owned(),
+            dht_rec
+                .owner_secret()
+                .ok_or(Error::msg("expected dht owner secret"))?
+                .to_owned(),
+        );
+        db.store_json(0, payload_digest, dht_rec.key()).await?;
+        db.store_json(1, payload_digest, &dht_owner).await?;
         Ok((dht_rec, o_cnt))
     }
 
@@ -283,16 +280,16 @@ impl Node for Veilid {
         let mut header = Header::from_index(index, index_bytes.as_slice(), route_data.as_slice());
         trace!(header = format!("{:?}", header));
 
-        let (have_map_key, have_map_subkeys) = self
-            .open_or_create_have_map_record(&rc, &header, index)
-            .await?;
+        let (have_map_key, have_map_subkeys) =
+            self.open_or_create_have_map_record(&rc, index).await?;
         header = header.with_have_map(HaveMapRef::new(
             have_map_key.key().to_owned(),
             have_map_subkeys,
         ));
 
-        let (peer_map_key, peer_map_subkeys) =
-            self.open_or_create_peer_map_record(&rc, index).await?;
+        let (peer_map_key, peer_map_subkeys) = self
+            .open_or_create_peer_map_record(&rc, index.payload().digest())
+            .await?;
         header = header.with_peer_map(PeerMapRef::new(
             peer_map_key.key().to_owned(),
             peer_map_subkeys,
@@ -307,11 +304,10 @@ impl Node for Veilid {
         Ok((dht_key, Target::PrivateRoute(announce_route), header))
     }
 
-    async fn reannounce_route(
+    async fn announce_route(
         &mut self,
         key: &TypedKey,
         prior_route: Option<Target>,
-        _index: &Index,
         header: &Header,
     ) -> Result<(Target, Header)> {
         let rc = self.routing_context.read().await;
@@ -322,7 +318,11 @@ impl Node for Veilid {
         Ok((Target::PrivateRoute(announce_route), header))
     }
 
-    async fn resolve(&mut self, key: &TypedKey, root: &Path) -> Result<(Target, Header, Index)> {
+    async fn resolve_route_index(
+        &mut self,
+        key: &TypedKey,
+        root: &Path,
+    ) -> Result<(Target, Header, Index)> {
         let rc = self.routing_context.read().await;
         let _ = rc.open_dht_record(key.to_owned(), None).await?;
         let header = self.read_header(&rc, key).await?;
@@ -333,12 +333,13 @@ impl Node for Veilid {
         Ok((Target::PrivateRoute(target), header, index))
     }
 
-    async fn reresolve_route(
+    async fn resolve_route(
         &mut self,
         key: &TypedKey,
         prior_route: Option<Target>,
     ) -> Result<(Target, Header)> {
         let rc = self.routing_context.read().await;
+        let _ = rc.open_dht_record(key.to_owned(), None).await?;
         self.release_prior_route(&rc, prior_route).await;
         let header = self.read_header(&rc, key).await?;
         let target = rc
@@ -470,43 +471,121 @@ impl Node for Veilid {
         Ok(())
     }
 
-    async fn resolve_peer_info(&mut self, key: TypedKey, subkey: u16) -> Result<PeerInfo> {
-        let rc = self.routing_context.read().await;
-        let data = rc
-            .get_dht_value(key, subkey.into(), true)
-            .await?
-            .ok_or(Error::msg("not found"))?;
-        let peer_info = PeerInfo::decode(data.data())?;
-        Ok(peer_info)
-    }
-
     async fn announce_peer(
         &mut self,
-        peer_map_key: TypedKey,
+        payload_digest: &[u8],
         peer_key: Option<TypedKey>,
         subkey: u16,
     ) -> Result<()> {
         let rc = self.routing_context.read().await;
+        let (peer_map_dht, _o_cnt) = self
+            .open_or_create_peer_map_record(&rc, payload_digest)
+            .await?;
         match peer_key {
             Some(peer_key) => {
                 let peer_info = PeerInfo::new(peer_key);
-                rc.set_dht_value(peer_map_key, subkey.into(), peer_info.encode()?, None)
-                    .await?;
+                rc.set_dht_value(
+                    peer_map_dht.key().to_owned(),
+                    subkey.into(),
+                    peer_info.encode()?,
+                    None,
+                )
+                .await?;
             }
             None => {
-                rc.set_dht_value(peer_map_key, subkey.into(), vec![], None)
+                rc.set_dht_value(peer_map_dht.key().to_owned(), subkey.into(), vec![], None)
                     .await?;
             }
         }
         Ok(())
     }
 
-    async fn reset_peers(&mut self, peer_map_key: TypedKey, max_subkey: u16) -> Result<()> {
+    async fn reset_peers(&mut self, payload_digest: &[u8], max_subkey: u16) -> Result<()> {
         let rc = self.routing_context.read().await;
+        let (peer_map_dht, _o_cnt) = self
+            .open_or_create_peer_map_record(&rc, payload_digest)
+            .await?;
         for subkey in 0..max_subkey {
-            rc.set_dht_value(peer_map_key, subkey.into(), vec![], None)
+            rc.set_dht_value(peer_map_dht.key().to_owned(), subkey.into(), vec![], None)
                 .await?;
         }
         Ok(())
+    }
+
+    async fn resolve_have_map(&mut self, peer_key: &TypedKey) -> Result<PieceMap> {
+        let (_, header) = self.resolve_route(peer_key, None).await?;
+        let have_map_ref = match header.have_map() {
+            Some(have_map_ref) => have_map_ref,
+            None => {
+                return Err(Error::msg(format!(
+                    "peer {peer_key} does not publish a have map"
+                )))
+            }
+        };
+
+        let rc = self.routing_context.read().await;
+        let dht_rec = rc
+            .open_dht_record(have_map_ref.key().to_owned(), None)
+            .await?;
+        let mut have_map = PieceMap::new();
+        for subkey in 0..have_map_ref.subkeys() {
+            match rc
+                .get_dht_value(dht_rec.key().to_owned(), subkey.into(), true)
+                .await?
+            {
+                Some(data) => {
+                    have_map.write_bytes(
+                        Into::<usize>::into(subkey) * ValueData::MAX_LEN,
+                        data.data(),
+                    );
+                }
+                None => {
+                    return Err(Error::msg(format!(
+                        "peer {peer_key} have map {} missing expected subkey value {subkey}",
+                        dht_rec.key()
+                    )))
+                }
+            };
+        }
+        Ok(have_map)
+    }
+
+    async fn resolve_peers(&mut self, peer_key: &TypedKey) -> Result<Vec<PeerInfo>> {
+        let (_, header) = self.resolve_route(peer_key, None).await?;
+        let peer_map_ref = match header.peer_map() {
+            Some(peer_map_ref) => peer_map_ref,
+            None => {
+                return Err(Error::msg(format!(
+                    "peer {peer_key} does not publish a peer map"
+                )))
+            }
+        };
+
+        let rc = self.routing_context.read().await;
+        let dht_rec = rc
+            .open_dht_record(peer_map_ref.key().to_owned(), None)
+            .await?;
+        let mut peers = vec![];
+        for subkey in 0..peer_map_ref.subkeys() {
+            match rc
+                .get_dht_value(dht_rec.key().to_owned(), subkey.into(), true)
+                .await?
+            {
+                Some(data) => {
+                    if data.data_size() > 0 {
+                        // revoked peers are blanked out
+                        let peer_info = PeerInfo::decode(data.data())?;
+                        peers.push(peer_info);
+                    }
+                }
+                None => {
+                    return Err(Error::msg(format!(
+                        "peer {peer_key} peer map {} missing expected subkey value {subkey}",
+                        dht_rec.key()
+                    )))
+                }
+            };
+        }
+        Ok(peers)
     }
 }

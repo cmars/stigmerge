@@ -50,7 +50,7 @@ use stigmerge_peer::seeder::{self, Seeder};
 use stigmerge_peer::share_resolver::{self, ShareResolver};
 use stigmerge_peer::types::ShareInfo;
 use stigmerge_peer::Error;
-use stigmerge_peer::{new_routing_context, peer_resolver};
+use stigmerge_peer::{new_routing_context, peer_announcer};
 use veilid_core::TypedKey;
 
 #[tokio::main]
@@ -130,42 +130,24 @@ async fn main() -> std::result::Result<(), Error> {
         None => todo!(),
     };
 
-    info!("announced: key={share_key}");
+    info!("announced share, key: {share_key}");
 
-    // TODO: get peer_announce actor working -- seems to be broken on misaligned subkeys
     // Announce our relationship to the bootstrap peer
-    //let mut peer_announce_op = Operator::new(
-    //    cancel.clone(),
-    //    peer_announcer::PeerAnnouncer::new(node.clone(), share_key),
-    //    WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
-    //);
-    //peer_announce_op
-    //    .send(peer_announcer::Request::Announce {
-    //        key: bootstrap_key.clone(),
-    //    })
-    //    .await?;
-    //let resp = peer_announce_op
-    //    .recv()
-    //    .await
-    //    .expect("peer_announcer response");
-    //info!("peer_announcer: {:?}", resp);
-
-    // Resolve new peers announced by the bootstrap
-    let mut peer_resolver_op = Operator::new(
+    let mut peer_announce_op = Operator::new(
         cancel.clone(),
-        peer_resolver::PeerResolver::new(node.clone()),
+        peer_announcer::PeerAnnouncer::new(node.clone(), &share_header.payload_digest()),
         WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
     );
-    peer_resolver_op
-        .send(peer_resolver::Request::Watch {
+    peer_announce_op
+        .send(peer_announcer::Request::Announce {
             key: bootstrap_key.clone(),
         })
         .await?;
-    let resp = peer_resolver_op
+    let resp = peer_announce_op
         .recv()
         .await
-        .expect("peer_resolver response");
-    info!("peer_resolver: {:?}", resp);
+        .expect("peer_announcer response");
+    info!("peer_announcer: {:?}", resp);
 
     // Set up fetcher dependencies
     let block_fetcher = Operator::new(
@@ -186,6 +168,7 @@ async fn main() -> std::result::Result<(), Error> {
     // Announce our own have-map as we fetch, at our announced share's have-map key
     let have_announcer = Operator::new(
         cancel.clone(),
+        // TODO: should use the share key publicly; hide this from the actor / op interface
         HaveAnnouncer::new(node.clone(), share_header.have_map().unwrap().key().clone()),
         WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
     );
@@ -234,11 +217,6 @@ async fn main() -> std::result::Result<(), Error> {
         join_res = fetcher_task => {
             join_res.expect("fetcher task").expect("fetcher done");
             info!("fetch complete, key={share_key}");
-        }
-        res = peer_resolver_op.recv() => {
-            if let Some(resp) = res {
-                info!("peer_resolver watch: {:?}", resp);
-            }
         }
     }
 

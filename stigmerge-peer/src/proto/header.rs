@@ -8,8 +8,7 @@ use veilid_core::ValueData;
 use crate::node::TypedKey;
 
 use super::{
-    stigmerge_capnp::{have_map, header, peer_map},
-    Decoder, Digest, Encoder, Error, PublicKey, Result, MAX_INDEX_BYTES,
+    stigmerge_capnp::header, Decoder, Digest, Encoder, Error, PublicKey, Result, MAX_INDEX_BYTES,
 };
 
 #[derive(Debug, PartialEq, Clone)]
@@ -115,10 +114,11 @@ impl Decoder for Header {
         );
 
         if header_reader.has_have_map() {
-            let have_map_ref_reader = reader.get_root::<have_map::Reader>()?;
+            let have_map_ref_reader = header_reader.get_have_map()?;
             if have_map_ref_reader.has_key() {
                 let typed_key_reader = have_map_ref_reader.get_key()?;
                 if typed_key_reader.has_key() {
+                    let kind = typed_key_reader.get_kind().into();
                     let key_reader = typed_key_reader.get_key()?;
                     let mut key = PublicKey::default();
                     key[0..8].clone_from_slice(&key_reader.get_p0().to_be_bytes()[..]);
@@ -126,7 +126,7 @@ impl Decoder for Header {
                     key[16..24].clone_from_slice(&key_reader.get_p2().to_be_bytes()[..]);
                     key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
                     header = header.with_have_map(HaveMapRef {
-                        key: TypedKey::new(typed_key_reader.get_kind().into(), key.into()),
+                        key: TypedKey::new(kind, key.into()),
                         subkeys: have_map_ref_reader.get_subkeys(),
                     });
                 }
@@ -134,7 +134,7 @@ impl Decoder for Header {
         }
 
         if header_reader.has_peer_map() {
-            let peer_map_ref_reader = reader.get_root::<peer_map::Reader>()?;
+            let peer_map_ref_reader = header_reader.get_peer_map()?;
             if peer_map_ref_reader.has_key() {
                 let typed_key_reader = peer_map_ref_reader.get_key()?;
                 if typed_key_reader.has_key() {
@@ -284,8 +284,10 @@ mod tests {
     use std::path::PathBuf;
 
     use stigmerge_fileindex::{Index, PayloadSpec};
+    use veilid_core::CRYPTO_KIND_VLD0;
 
-    use crate::proto::{Decoder, Encoder, Header};
+    use crate::node::TypedKey;
+    use crate::proto::{Decoder, Encoder, HaveMapRef, Header, PeerMapRef};
 
     #[test]
     fn round_trip_header() {
@@ -299,5 +301,49 @@ mod tests {
         let message = expect_header.encode().expect("encode header");
         let actual_header = Header::decode(message.as_slice()).expect("decode header");
         assert_eq!(expect_header, actual_header);
+    }
+
+    #[test]
+    fn round_trip_header_with_peer_and_have_map() {
+        // Create a basic header
+        let payload_digest = [0xa5u8; 32];
+        let payload_length = 42;
+        let subkeys = 5;
+        let route_data = vec![1u8, 2u8, 3u8, 4u8];
+
+        // Create TypedKeys for peer map and have map
+        let peer_key = TypedKey::new(CRYPTO_KIND_VLD0, [0xaa; 32].into());
+        let have_key = TypedKey::new(CRYPTO_KIND_VLD0, [0xbb; 32].into());
+
+        // Create the peer map ref and have map ref
+        let peer_map_ref = PeerMapRef::new(peer_key, 10);
+        let have_map_ref = HaveMapRef::new(have_key, 5);
+
+        // Create the header with both refs
+        let original_header = Header::new(
+            payload_digest,
+            payload_length,
+            subkeys,
+            &route_data,
+            Some(have_map_ref),
+            Some(peer_map_ref),
+        );
+
+        // Encode the header to bytes
+        let encoded = original_header.encode().expect("encode header");
+
+        // Decode the bytes back to a header
+        let decoded_header = Header::decode(&encoded).expect("decode header");
+
+        // Verify that the decoded header matches the original
+        assert_eq!(original_header, decoded_header);
+
+        // Verify that the peer map and have map refs are preserved
+        assert!(decoded_header.peer_map().is_some());
+        assert!(decoded_header.have_map().is_some());
+
+        // Verify that the peer map and have map refs match the originals
+        assert_eq!(original_header.peer_map(), decoded_header.peer_map());
+        assert_eq!(original_header.have_map(), decoded_header.have_map());
     }
 }

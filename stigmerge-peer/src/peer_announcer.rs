@@ -17,7 +17,7 @@ use crate::{
 #[derive(Clone)]
 pub struct PeerAnnouncer<N: Node> {
     node: N,
-    key: TypedKey,
+    payload_digest: Vec<u8>,
     peer_indexes: HashMap<TypedKey, usize>,
     peers: Vec<Option<TypedKey>>,
     max_peers: u16,
@@ -27,10 +27,10 @@ pub const DEFAULT_MAX_PEERS: u16 = 32;
 
 impl<N: Node> PeerAnnouncer<N> {
     /// Create a new peer_announcer service.
-    pub fn new(node: N, key: TypedKey) -> Self {
+    pub fn new(node: N, payload_digest: &[u8]) -> Self {
         Self {
             node,
-            key,
+            payload_digest: payload_digest.to_vec(),
             peer_indexes: HashMap::new(),
             peers: vec![],
             max_peers: DEFAULT_MAX_PEERS,
@@ -85,7 +85,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
         mut server_ch: ChanServer<Request, Response>,
     ) -> Result<()> {
         self.node
-            .reset_peers(self.key.to_owned(), self.max_peers)
+            .reset_peers(&self.payload_digest, self.max_peers)
             .await?;
         loop {
             select! {
@@ -113,7 +113,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 if !self.peer_indexes.contains_key(key) {
                     let index = self.assign_peer_index(*key);
                     self.node
-                        .announce_peer(self.key.to_owned(), Some(*key), index)
+                        .announce_peer(&self.payload_digest, Some(*key), index)
                         .await?;
                 }
                 Response::Ok
@@ -122,7 +122,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 if let Some(index) = self.peer_indexes.get(key) {
                     let subkey = TryInto::<u16>::try_into(*index).unwrap();
                     self.node
-                        .announce_peer(self.key.to_owned(), None, subkey)
+                        .announce_peer(&self.payload_digest, None, subkey)
                         .await?;
                     self.peers[*index] = None;
                     self.peer_indexes.remove(key);
@@ -131,7 +131,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
             }
             Request::Reset => {
                 self.node
-                    .reset_peers(self.key.to_owned(), self.max_peers)
+                    .reset_peers(&self.payload_digest, self.max_peers)
                     .await?;
                 self.peers.clear();
                 self.peer_indexes.clear();
@@ -161,40 +161,39 @@ mod tests {
     async fn test_peer_announcer_announces_peer() {
         // Create a stub peer with a recording announce_peer_result
         let mut node = StubNode::new();
-        let recorded_key = Arc::new(RwLock::new(None));
-        let recorded_peer_key = Arc::new(RwLock::new(None));
-        let recorded_index = Arc::new(RwLock::new(None));
+        let recorded_payload_digest = Arc::new(RwLock::new(None::<Vec<u8>>));
+        let recorded_peer_key = Arc::new(RwLock::new(None::<TypedKey>));
+        let recorded_index = Arc::new(RwLock::new(None::<u16>));
 
-        let recorded_key_clone = recorded_key.clone();
+        let recorded_payload_digest_clone = recorded_payload_digest.clone();
         let recorded_peer_key_clone = recorded_peer_key.clone();
         let recorded_index_clone = recorded_index.clone();
 
         let recorded_resets = Arc::new(RwLock::new(0u32));
         let recorded_resets_clone = recorded_resets.clone();
-        node.reset_peers_result = Arc::new(Mutex::new(move |_key, _subkeys| {
+        node.reset_peers_result = Arc::new(Mutex::new(move |_payload_digest: &[u8], _subkeys| {
             let mut count = recorded_resets_clone.write().unwrap();
             *count += 1;
             Ok(())
         }));
 
         node.announce_peer_result = Arc::new(Mutex::new(
-            move |key: TypedKey, peer_key: Option<TypedKey>, index: u16| {
-                *recorded_key_clone.write().unwrap() = Some(key);
+            move |payload_digest: &[u8], peer_key: Option<TypedKey>, index: u16| {
+                *recorded_payload_digest_clone.write().unwrap() = Some(payload_digest.to_vec());
                 *recorded_peer_key_clone.write().unwrap() = peer_key;
                 *recorded_index_clone.write().unwrap() = Some(index);
                 Ok(())
             },
         ));
 
-        // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        // Create test data
+        let payload_digest = vec![0xab; 32];
         let peer_key =
             TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(node.clone(), test_key.clone());
+        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest);
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send an Announce request
@@ -205,14 +204,17 @@ mod tests {
         assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
 
         // Verify the peer was announced correctly
-        let recorded_key = recorded_key.read().unwrap();
+        let recorded_payload_digest = recorded_payload_digest.read().unwrap();
         let recorded_peer_key = recorded_peer_key.read().unwrap();
         let recorded_index = recorded_index.read().unwrap();
 
-        assert!(recorded_key.is_some(), "Key was not recorded");
+        assert!(
+            recorded_payload_digest.is_some(),
+            "Payload digest was not recorded"
+        );
         assert!(recorded_peer_key.is_some(), "Peer key was not recorded");
         assert!(recorded_index.is_some(), "Index was not recorded");
-        assert_eq!(recorded_key.as_ref(), Some(&test_key));
+        assert_eq!(recorded_payload_digest.as_ref(), Some(&payload_digest));
         assert_eq!(recorded_peer_key.as_ref(), Some(&peer_key));
         assert_eq!(recorded_index.as_ref(), Some(&0));
 
@@ -227,40 +229,39 @@ mod tests {
     async fn test_peer_announcer_redacts_peer() {
         // Create a stub peer with recording announce_peer_result
         let mut node = StubNode::new();
-        let recorded_key = Arc::new(RwLock::new(None));
-        let recorded_peer_key = Arc::new(RwLock::new(None));
-        let recorded_index = Arc::new(RwLock::new(None));
+        let recorded_payload_digest = Arc::new(RwLock::new(None::<Vec<u8>>));
+        let recorded_peer_key = Arc::new(RwLock::new(None::<TypedKey>));
+        let recorded_index = Arc::new(RwLock::new(None::<u16>));
 
-        let recorded_key_clone = recorded_key.clone();
+        let recorded_payload_digest_clone = recorded_payload_digest.clone();
         let recorded_peer_key_clone = recorded_peer_key.clone();
         let recorded_index_clone = recorded_index.clone();
 
         let recorded_resets = Arc::new(RwLock::new(0u32));
         let recorded_resets_clone = recorded_resets.clone();
-        node.reset_peers_result = Arc::new(Mutex::new(move |_key, _subkeys| {
+        node.reset_peers_result = Arc::new(Mutex::new(move |_payload_digest: &[u8], _subkeys| {
             let mut count = recorded_resets_clone.write().unwrap();
             *count += 1;
             Ok(())
         }));
 
         node.announce_peer_result = Arc::new(Mutex::new(
-            move |key: TypedKey, peer_key: Option<TypedKey>, index: u16| {
-                *recorded_key_clone.write().unwrap() = Some(key);
+            move |payload_digest: &[u8], peer_key: Option<TypedKey>, index: u16| {
+                *recorded_payload_digest_clone.write().unwrap() = Some(payload_digest.to_vec());
                 *recorded_peer_key_clone.write().unwrap() = peer_key;
                 *recorded_index_clone.write().unwrap() = Some(index);
                 Ok(())
             },
         ));
 
-        // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        // Create test data
+        let payload_digest = vec![0xab; 32];
         let peer_key =
             TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(node.clone(), test_key.clone());
+        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest);
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // First announce a peer
@@ -278,14 +279,17 @@ mod tests {
         assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
 
         // Verify the peer was redacted correctly
-        let recorded_key = recorded_key.read().unwrap();
+        let recorded_payload_digest = recorded_payload_digest.read().unwrap();
         let recorded_peer_key = recorded_peer_key.read().unwrap();
         let recorded_index = recorded_index.read().unwrap();
 
-        assert!(recorded_key.is_some(), "Key was not recorded");
+        assert!(
+            recorded_payload_digest.is_some(),
+            "Payload digest was not recorded"
+        );
         assert!(recorded_peer_key.is_none(), "Peer key was not recorded");
         assert!(recorded_index.is_some(), "Index was not recorded");
-        assert_eq!(recorded_key.as_ref(), Some(&test_key));
+        assert_eq!(recorded_payload_digest.as_ref(), Some(&payload_digest));
         assert_eq!(recorded_peer_key.as_ref(), None); // Redacted peer has None
         assert_eq!(recorded_index.as_ref(), Some(&0));
 
@@ -300,25 +304,25 @@ mod tests {
     async fn test_peer_announcer_resets_peers() {
         // Create a stub peer with recording reset_peers_result
         let mut node = StubNode::new();
-        let recorded_key = Arc::new(RwLock::new(None));
-        let recorded_max_peers = Arc::new(RwLock::new(None));
+        let recorded_payload_digest = Arc::new(RwLock::new(None::<Vec<u8>>));
+        let recorded_max_peers = Arc::new(RwLock::new(None::<u16>));
 
-        let recorded_key_clone = recorded_key.clone();
+        let recorded_payload_digest_clone = recorded_payload_digest.clone();
         let recorded_max_peers_clone = recorded_max_peers.clone();
 
-        node.reset_peers_result = Arc::new(Mutex::new(move |key: TypedKey, max_peers: u16| {
-            *recorded_key_clone.write().unwrap() = Some(key);
-            *recorded_max_peers_clone.write().unwrap() = Some(max_peers);
-            Ok(())
-        }));
+        node.reset_peers_result =
+            Arc::new(Mutex::new(move |payload_digest: &[u8], max_peers: u16| {
+                *recorded_payload_digest_clone.write().unwrap() = Some(payload_digest.to_vec());
+                *recorded_max_peers_clone.write().unwrap() = Some(max_peers);
+                Ok(())
+            }));
 
-        // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        // Create test data
+        let payload_digest = vec![0xab; 32];
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(node.clone(), test_key.clone());
+        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest);
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send a Reset request
@@ -327,12 +331,15 @@ mod tests {
         assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
 
         // Verify the peers were reset correctly
-        let recorded_key = recorded_key.read().unwrap();
+        let recorded_payload_digest = recorded_payload_digest.read().unwrap();
         let recorded_max_peers = recorded_max_peers.read().unwrap();
 
-        assert!(recorded_key.is_some(), "Key was not recorded");
+        assert!(
+            recorded_payload_digest.is_some(),
+            "Payload digest was not recorded"
+        );
         assert!(recorded_max_peers.is_some(), "Max peers was not recorded");
-        assert_eq!(recorded_key.as_ref(), Some(&test_key));
+        assert_eq!(recorded_payload_digest.as_ref(), Some(&payload_digest));
         assert_eq!(recorded_max_peers.as_ref(), Some(&DEFAULT_MAX_PEERS));
 
         // Clean up

@@ -1,10 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
-use tokio::{
-    select,
-    sync::{broadcast, RwLock},
-};
+use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -21,8 +19,10 @@ use crate::{
 /// share DHT header (subkey 0) as haveMapRef.
 pub struct HaveResolver<N: Node> {
     node: N,
-    pieces_maps: HashMap<TypedKey, Arc<RwLock<PieceMap>>>,
     updates: broadcast::Receiver<VeilidUpdate>,
+
+    // Mapping from have-map key to share key, used in watches
+    have_to_share_map: HashMap<TypedKey, TypedKey>,
 }
 
 impl<P> HaveResolver<P>
@@ -34,43 +34,31 @@ where
         let updates = node.subscribe_veilid_update();
         Self {
             node,
-            pieces_maps: HashMap::new(),
             updates,
+            have_to_share_map: HashMap::new(),
         }
-    }
-
-    /// Get or create a local have-map tracking what the remote peer has.
-    ///
-    /// Updates are merged with this local copy as it's initially fetched and
-    /// then watched for updates.
-    fn assert_have_map(&mut self, key: &TypedKey) -> Arc<RwLock<PieceMap>> {
-        if let Some(value) = self.pieces_maps.get(key) {
-            return value.to_owned();
-        }
-        let value = Arc::new(RwLock::new(PieceMap::new()));
-        self.pieces_maps.insert(key.to_owned(), value.to_owned());
-        value
     }
 }
 
 /// Have-map resolver request messages.
 #[derive(Clone, Debug)]
 pub enum Request {
-    /// Resolve the have-map key to get a map of which pieces the remote peer has.
-    Resolve { key: TypedKey, subkeys: u16 },
+    /// Resolve the have-map for the specified share key, to get a map of which
+    /// pieces the remote peer has.
+    Resolve { key: TypedKey },
 
-    /// Watch the peer's have-map for changes.
+    /// Watch the have-map for the specified share key for changes.
     Watch { key: TypedKey },
 
-    /// Cancel the watch on the peer's have-map.
+    /// Cancel the watch on the have-map share.
     CancelWatch { key: TypedKey },
 }
 
 impl Request {
-    /// Get the have-map key specified in the request.
+    /// Get the share key specified in the request.
     fn key(&self) -> &TypedKey {
         match self {
-            Request::Resolve { key, subkeys: _ } => key,
+            Request::Resolve { key } => key,
             Request::Watch { key } => key,
             Request::CancelWatch { key } => key,
         }
@@ -84,12 +72,9 @@ pub enum Response {
     NotAvailable { key: TypedKey, err_msg: String },
 
     /// Have-map response.
-    Resolve {
-        key: TypedKey,
-        pieces: Arc<RwLock<PieceMap>>,
-    },
+    Resolve { key: TypedKey, pieces: PieceMap },
 
-    /// Acknowledge that the have-map at the remote peer key is being monitored
+    /// Acknowledge that the have-map at the remote share key is being monitored
     /// for changes, with an automatically-renewed watch.
     Watching { key: TypedKey },
 
@@ -130,12 +115,12 @@ impl<P: Node> Actor for HaveResolver<P> {
                     let update = res?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {
-                            let have_map_lock = self.assert_have_map(&ch.key);
-                            {
-                                let mut have_map = have_map_lock.write().await;
-                                self.node.merge_have_map(ch.key, ch.subkeys, &mut *have_map).await?;
-                            }
-                            server_ch.send(Response::Resolve{ key: ch.key, pieces: have_map_lock }).await?;
+                            let share_key = match self.have_to_share_map.get(&ch.key) {
+                                Some(key) => key,
+                                None => continue,
+                            };
+                            let have_map = self.node.resolve_have_map(share_key).await?;
+                            server_ch.send(Response::Resolve{ key: share_key.to_owned(), pieces: have_map}).await?;
                         }
                         VeilidUpdate::Shutdown => {
                             return Ok(());
@@ -149,37 +134,41 @@ impl<P: Node> Actor for HaveResolver<P> {
 
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
-            Request::Resolve { key, subkeys } => {
-                let have_map_lock = self.assert_have_map(key);
-                {
-                    let mut have_map = have_map_lock.write().await;
-                    self.node
-                        .merge_have_map(
-                            key.to_owned(),
-                            ValueSubkeyRangeSet::single_range(0, (*subkeys - 1).into()),
-                            &mut *have_map,
-                        )
-                        .await?;
-                }
+            Request::Resolve { key } => {
+                let have_map = self.node.resolve_have_map(key).await?;
                 Response::Resolve {
                     key: key.to_owned(),
-                    pieces: have_map_lock,
+                    pieces: have_map,
                 }
             }
             Request::Watch { key } => {
-                self.node
-                    .watch(
-                        key.to_owned(),
-                        ValueSubkeyRangeSet::full(),
-                        TimestampDuration::new_secs(60),
-                    )
-                    .await?;
-                Response::Watching {
-                    key: key.to_owned(),
+                let (_, header) = self.node.resolve_route(key, None).await?;
+                if let Some(have_map_ref) = header.have_map() {
+                    self.have_to_share_map
+                        .insert(have_map_ref.key().to_owned(), key.to_owned());
+                    info!("watch: have map key {}", have_map_ref.key());
+                    self.node
+                        .watch(
+                            have_map_ref.key().to_owned(),
+                            ValueSubkeyRangeSet::full(),
+                            TimestampDuration::new_secs(60),
+                        )
+                        .await?;
+                    Response::Watching {
+                        key: key.to_owned(),
+                    }
+                } else {
+                    Response::NotAvailable {
+                        key: key.to_owned(),
+                        err_msg: format!("peer {key} does not publish a have map"),
+                    }
                 }
             }
             Request::CancelWatch { key } => {
-                self.node.cancel_watch(key);
+                let (_, header) = self.node.resolve_route(key, None).await?;
+                if let Some(have_map_ref) = header.have_map() {
+                    self.node.cancel_watch(have_map_ref.key());
+                }
                 Response::WatchCancelled {
                     key: key.to_owned(),
                 }
@@ -192,8 +181,8 @@ impl<P: Node + 'static> Clone for HaveResolver<P> {
     fn clone(&self) -> Self {
         Self {
             node: self.node.clone(),
-            pieces_maps: self.pieces_maps.clone(),
             updates: self.updates.resubscribe(),
+            have_to_share_map: self.have_to_share_map.clone(),
         }
     }
 }
@@ -207,7 +196,7 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
     use veilid_core::{
-        CryptoKey, TimestampDuration, ValueData, ValueSubkeyRangeSet, VeilidUpdate,
+        CryptoKey, Target, TimestampDuration, ValueData, ValueSubkeyRangeSet, VeilidUpdate,
         VeilidValueChange, CRYPTO_KEY_LENGTH,
     };
 
@@ -215,7 +204,6 @@ mod tests {
         actor::{OneShot, Operator},
         have_resolver::{HaveResolver, Request, Response},
         node::TypedKey,
-        piece_map::PieceMap,
         tests::StubNode,
     };
 
@@ -224,18 +212,13 @@ mod tests {
         // Create a stub peer with a recording merge_have_map_result
         let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
-        let recorded_subkeys = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
-        let recorded_subkeys_clone = recorded_subkeys.clone();
 
-        node.merge_have_map_result = Arc::new(Mutex::new(
-            move |key: TypedKey, subkeys: ValueSubkeyRangeSet, _have_map: &mut PieceMap| {
-                *recorded_key_clone.write().unwrap() = Some(key);
-                *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
-                Ok(())
-            },
-        ));
+        node.resolve_have_map_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+            *recorded_key_clone.write().unwrap() = Some(key.to_owned());
+            Ok(vec![42].into())
+        }));
 
         // Create a test key and channel
         let test_key =
@@ -249,7 +232,6 @@ mod tests {
         // Send a Resolve request
         let req = Request::Resolve {
             key: test_key.clone(),
-            subkeys: 100,
         };
         operator.send(req).await.unwrap();
 
@@ -257,22 +239,16 @@ mod tests {
         match operator.recv().await.expect("recv") {
             Response::Resolve { key, pieces } => {
                 assert_eq!(key, test_key);
-                let _pieces = pieces.read().await; // Just verify we can access it
+                assert_eq!(Into::<Vec<u8>>::into(pieces), vec![42]);
             }
             other => panic!("Unexpected response: {:?}", other),
         }
 
         // Verify the merge was called correctly
         let recorded_key = recorded_key.read().unwrap();
-        let recorded_subkeys = recorded_subkeys.read().unwrap();
 
         assert!(recorded_key.is_some(), "Key was not recorded");
-        assert!(recorded_subkeys.is_some(), "Subkeys were not recorded");
-        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
-        assert_eq!(
-            recorded_subkeys.as_ref().unwrap(),
-            &ValueSubkeyRangeSet::single_range(0, 99)
-        );
+        assert_eq!(recorded_key.unwrap(), test_key);
 
         // Clean up
         cancel.cancel();
@@ -395,18 +371,40 @@ mod tests {
         // Create a stub peer with a recording merge_have_map_result
         let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
-        let recorded_subkeys = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
-        let recorded_subkeys_clone = recorded_subkeys.clone();
 
-        node.merge_have_map_result = Arc::new(Mutex::new(
-            move |key: TypedKey, subkeys: ValueSubkeyRangeSet, _have_map: &mut PieceMap| {
-                *recorded_key_clone.write().unwrap() = Some(key);
-                *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
+        // Mock resolve_route (called when setting up watch)
+        let have_map_key =
+            TypedKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let have_map_key_clone = have_map_key.clone();
+        node.resolve_route_result = Arc::new(Mutex::new(
+            move |_key: &TypedKey, _target: Option<Target>| {
+                let peer_map_ref = crate::proto::HaveMapRef::new(have_map_key_clone, 1);
+                let header = crate::proto::Header::new(
+                    [0u8; 32],          // payload_digest
+                    0,                  // payload_length
+                    0,                  // subkeys
+                    &[],                // route_data
+                    Some(peer_map_ref), // peer_map
+                    None,               // have_map
+                );
+                Ok((Target::PrivateRoute(CryptoKey::new([0u8; 32])), header))
+            },
+        ));
+
+        // Mock watch
+        node.watch_result = Arc::new(Mutex::new(
+            move |_key: TypedKey, _subkeys: ValueSubkeyRangeSet, _duration: TimestampDuration| {
                 Ok(())
             },
         ));
+
+        // Mock resolve_have_map (called when watch fires)
+        node.resolve_have_map_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+            *recorded_key_clone.write().unwrap() = Some(key.to_owned());
+            Ok(vec![42].into())
+        }));
 
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
@@ -419,9 +417,8 @@ mod tests {
         // running. That's important: if we're not in the run loop, the update
         // send may fail to broadcast.
         operator
-            .send(Request::Resolve {
+            .send(Request::Watch {
                 key: test_key.clone(),
-                subkeys: 100,
             })
             .await
             .unwrap();
@@ -429,7 +426,7 @@ mod tests {
 
         // Simulate a value change notification
         let change = VeilidValueChange {
-            key: test_key.clone(),
+            key: have_map_key,
             subkeys: ValueSubkeyRangeSet::single_range(0, 99),
             value: Some(
                 ValueData::new(b"foo".to_vec(), CryptoKey::new([0xbe; CRYPTO_KEY_LENGTH]))
@@ -445,22 +442,16 @@ mod tests {
         match operator.recv().await.expect("recv") {
             Response::Resolve { key, pieces } => {
                 assert_eq!(key, test_key);
-                let _pieces = pieces.read().await; // Just verify we can access it
+                assert_eq!(Into::<Vec<u8>>::into(pieces), vec![42]);
             }
             other => panic!("Unexpected response: {:?}", other),
-        }
+        };
 
         // Verify the merge was called correctly
         let recorded_key = recorded_key.read().unwrap();
-        let recorded_subkeys = recorded_subkeys.read().unwrap();
 
         assert!(recorded_key.is_some(), "Key was not recorded");
-        assert!(recorded_subkeys.is_some(), "Subkeys were not recorded");
         assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
-        assert_eq!(
-            recorded_subkeys.as_ref().unwrap(),
-            &ValueSubkeyRangeSet::single_range(0, 99)
-        );
 
         // Clean up
         cancel.cancel();

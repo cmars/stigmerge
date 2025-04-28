@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
@@ -31,25 +32,23 @@ where
 
 #[derive(Clone, Debug)]
 pub enum Request {
-    /// Resolve the peer information stored at the given peer map key. This will
-    /// result in a response containing the peer info, or a not available
-    /// indicator.
-    ///
-    /// The peer map key and subkeys come from the main share header (PeerMap).
-    Resolve { key: TypedKey, subkeys: u16 },
+    /// Resolve the known peers for the peer at the given share key. This will
+    /// result in a response containing the peer info, or a "not available"
+    /// response.
+    Resolve { key: TypedKey },
 
-    /// Watch for peer updates at the given peer map key. This will result in a
-    /// series of peer info responses being sent as the peers change.
+    /// Watch for changes in known peers at the given share key. This will
+    /// result in a series of resolve responses being sent as the peers change.
     Watch { key: TypedKey },
 
-    /// Cancel the watch on the peer map key.
+    /// Cancel the peer watch on the share key.
     CancelWatch { key: TypedKey },
 }
 
 impl Request {
     fn key(&self) -> &TypedKey {
         match self {
-            Request::Resolve { key, subkeys: _ } => key,
+            Request::Resolve { key } => key,
             Request::Watch { key } => key,
             Request::CancelWatch { key } => key,
         }
@@ -107,11 +106,13 @@ impl<P: Node> Actor for PeerResolver<P> {
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
                             if let Some(data) = ch.value {
-                                if let Ok(peer_info) = PeerInfo::decode(data.data()) {
-                                    server_ch.send(Response::Resolve{
-                                        key: ch.key,
-                                        peers: [(peer_info.key().to_owned(), peer_info)].into_iter().collect::<HashMap<_,_>>()
-                                    }).await?;
+                                if data.data_size() > 0 {
+                                    if let Ok(peer_info) = PeerInfo::decode(data.data()) {
+                                        server_ch.send(Response::Resolve{
+                                            key: ch.key,
+                                            peers: [(peer_info.key().to_owned(), peer_info)].into_iter().collect::<HashMap<_,_>>()
+                                        }).await?;
+                                    }
                                 }
                             }
                         }
@@ -128,33 +129,42 @@ impl<P: Node> Actor for PeerResolver<P> {
     /// Handle a peer_resolver request, provide a response.
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
-            Request::Resolve { key, subkeys } => {
-                let mut result = HashMap::new();
-                for subkey in 0u16..*subkeys {
-                    if let Ok(peer_info) = self.node.resolve_peer_info(key.to_owned(), subkey).await
-                    {
-                        result.insert(peer_info.key().clone(), peer_info);
-                    }
-                }
+            Request::Resolve { key } => {
+                let peers = self.node.resolve_peers(key).await?;
                 Response::Resolve {
                     key: key.to_owned(),
-                    peers: result,
+                    peers: peers
+                        .into_iter()
+                        .map(|peer| (peer.key().to_owned(), peer))
+                        .collect::<HashMap<TypedKey, PeerInfo>>(),
                 }
             }
             Request::Watch { key } => {
-                self.node
-                    .watch(
-                        key.to_owned(),
-                        ValueSubkeyRangeSet::full(),
-                        TimestampDuration::new_secs(60),
-                    )
-                    .await?;
-                Response::Watching {
-                    key: key.to_owned(),
+                let (_, header) = self.node.resolve_route(key, None).await?;
+                if let Some(peer_map_ref) = header.peer_map() {
+                    info!("watch: peer_map key {}", peer_map_ref.key());
+                    self.node
+                        .watch(
+                            peer_map_ref.key().to_owned(),
+                            ValueSubkeyRangeSet::full(),
+                            TimestampDuration::new_secs(60),
+                        )
+                        .await?;
+                    Response::Watching {
+                        key: key.to_owned(),
+                    }
+                } else {
+                    Response::NotAvailable {
+                        key: key.to_owned(),
+                        err_msg: format!("peer {key} does not publish peers"),
+                    }
                 }
             }
             Request::CancelWatch { key } => {
-                self.node.cancel_watch(key);
+                let (_, header) = self.node.resolve_route(key, None).await?;
+                if let Some(peer_map_ref) = header.peer_map() {
+                    self.node.cancel_watch(peer_map_ref.key());
+                }
                 Response::WatchCancelled {
                     key: key.to_owned(),
                 }
@@ -191,23 +201,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_resolver_resolves_peers() {
-        // Create a stub peer with a recording resolve_peer_info_result
+        // Create a stub peer with a recording resolve_peers_result
         let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
-        let recorded_subkey = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
-        let recorded_subkey_clone = recorded_subkey.clone();
 
         // Create a test peer key to return
         let test_peer_key =
             TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
         let test_peer_info = PeerInfo::new(test_peer_key.clone());
 
-        node.resolve_peer_info_result = Arc::new(Mutex::new(move |key: TypedKey, subkey: u16| {
-            *recorded_key_clone.write().unwrap() = Some(key);
-            *recorded_subkey_clone.write().unwrap() = Some(subkey);
-            Ok(test_peer_info.clone())
+        node.resolve_peers_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+            *recorded_key_clone.write().unwrap() = Some(key.to_owned());
+            Ok(vec![test_peer_info.clone()])
         }));
 
         // Create a test key and channel
@@ -222,7 +229,6 @@ mod tests {
         // Send a Resolve request
         let req = Request::Resolve {
             key: test_key.clone(),
-            subkeys: 1,
         };
         operator.send(req).await.unwrap();
 
@@ -240,12 +246,9 @@ mod tests {
 
         // Verify the resolve was called correctly
         let recorded_key = recorded_key.read().unwrap();
-        let recorded_subkey = recorded_subkey.read().unwrap();
 
         assert!(recorded_key.is_some(), "Key was not recorded");
-        assert!(recorded_subkey.is_some(), "Subkey was not recorded");
-        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
-        assert_eq!(recorded_subkey.as_ref().unwrap(), &0);
+        assert_eq!(recorded_key.unwrap(), test_key);
 
         // Clean up
         cancel.cancel();
@@ -263,6 +266,28 @@ mod tests {
         let recorded_key_clone = recorded_key.clone();
         let recorded_subkeys_clone = recorded_subkeys.clone();
         let recorded_duration_clone = recorded_duration.clone();
+
+        // Setup the resolve_route_result to return a header with a peer_map
+        let peer_map_key =
+            TypedKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let peer_map_ref = crate::proto::PeerMapRef::new(peer_map_key.clone(), 0);
+        let header = crate::proto::Header::new(
+            [0u8; 32],          // payload_digest
+            0,                  // payload_length
+            0,                  // subkeys
+            &[],                // route_data
+            None,               // have_map
+            Some(peer_map_ref), // peer_map
+        );
+
+        node.resolve_route_result = Arc::new(Mutex::new(
+            move |_key: &TypedKey, _prior_route: Option<veilid_core::Target>| {
+                Ok((
+                    veilid_core::Target::PrivateRoute(veilid_core::CryptoKey::new([0u8; 32])),
+                    header.clone(),
+                ))
+            },
+        ));
 
         node.watch_result = Arc::new(Mutex::new(
             move |key: TypedKey, subkeys: ValueSubkeyRangeSet, duration: TimestampDuration| {
@@ -304,7 +329,7 @@ mod tests {
         assert!(recorded_key.is_some(), "Key was not recorded");
         assert!(recorded_subkeys.is_some(), "Subkeys were not recorded");
         assert!(recorded_duration.is_some(), "Duration was not recorded");
-        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
+        assert_eq!(recorded_key.as_ref().unwrap(), &peer_map_key);
         assert_eq!(
             recorded_subkeys.as_ref().unwrap(),
             &ValueSubkeyRangeSet::full()
@@ -329,6 +354,28 @@ mod tests {
         node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
             *recorded_key_clone.write().unwrap() = Some(key.clone());
         }));
+
+        // Setup the resolve_route_result to return a header with a peer_map
+        let peer_map_key =
+            TypedKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let peer_map_ref = crate::proto::PeerMapRef::new(peer_map_key.clone(), 0);
+        let header = crate::proto::Header::new(
+            [0u8; 32],          // payload_digest
+            0,                  // payload_length
+            0,                  // subkeys
+            &[],                // route_data
+            None,               // have_map
+            Some(peer_map_ref), // peer_map
+        );
+
+        node.resolve_route_result = Arc::new(Mutex::new(
+            move |_key: &TypedKey, _prior_route: Option<veilid_core::Target>| {
+                Ok((
+                    veilid_core::Target::PrivateRoute(veilid_core::CryptoKey::new([0u8; 32])),
+                    header.clone(),
+                ))
+            },
+        ));
 
         // Create a test key and channel
         let test_key =
@@ -356,7 +403,7 @@ mod tests {
         // Verify the cancel was called correctly
         let recorded_key = recorded_key.read().unwrap();
         assert!(recorded_key.is_some(), "Key was not recorded");
-        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
+        assert_eq!(recorded_key.as_ref().unwrap(), &peer_map_key);
 
         // Clean up
         cancel.cancel();
@@ -374,15 +421,36 @@ mod tests {
         let peer_key =
             TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
 
-        let recorded_resolve_peer_info = Arc::new(RwLock::new(0u32));
-        let recorded_resolve_peer_info_clone = recorded_resolve_peer_info.clone();
+        let recorded_resolve_peers = Arc::new(RwLock::new(0u32));
+        let recorded_resolve_peers_clone = recorded_resolve_peers.clone();
         let stub_peer_key = peer_key.clone();
-        node.resolve_peer_info_result =
-            Arc::new(Mutex::new(move |_key: TypedKey, _subkey: u16| {
-                let mut count = recorded_resolve_peer_info_clone.write().unwrap();
-                *count += 1;
-                Ok(PeerInfo::new(stub_peer_key))
-            }));
+        node.resolve_peers_result = Arc::new(Mutex::new(move |_key: &TypedKey| {
+            let mut count = recorded_resolve_peers_clone.write().unwrap();
+            *count += 1;
+            Ok(vec![PeerInfo::new(stub_peer_key)])
+        }));
+
+        // Setup the resolve_route_result to return a header with a peer_map
+        let peer_map_key =
+            TypedKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let peer_map_ref = crate::proto::PeerMapRef::new(peer_map_key.clone(), 1);
+        let header = crate::proto::Header::new(
+            [0u8; 32],                 // payload_digest
+            42,                        // payload_length
+            1,                         // subkeys
+            &[0xde, 0xad, 0xbe, 0xef], // route_data
+            None,                      // have_map
+            Some(peer_map_ref),        // peer_map
+        );
+
+        node.resolve_route_result = Arc::new(Mutex::new(
+            move |_key: &TypedKey, _prior_route: Option<veilid_core::Target>| {
+                Ok((
+                    veilid_core::Target::PrivateRoute(veilid_core::CryptoKey::new([0u8; 32])),
+                    header.clone(),
+                ))
+            },
+        ));
 
         // Create peer resolver
         let update_tx = node.update_tx.clone();
@@ -395,7 +463,6 @@ mod tests {
         // send may fail to broadcast.
         let req = Request::Resolve {
             key: test_key.clone(),
-            subkeys: 1,
         };
         operator.send(req).await.unwrap();
         assert!(matches!(operator.recv().await, Some(_)));
@@ -432,7 +499,7 @@ mod tests {
             other => panic!("Unexpected response: {:?}", other),
         }
 
-        assert_eq!(*recorded_resolve_peer_info.read().unwrap(), 1u32);
+        assert_eq!(*recorded_resolve_peers.read().unwrap(), 1u32);
 
         // Clean up
         cancel.cancel();
