@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use stigmerge_fileindex::Index;
 use tokio::{select, sync::broadcast};
@@ -21,6 +21,7 @@ pub struct ShareResolver<N: Node> {
     node: N,
     target_tx: broadcast::Sender<Target>,
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
+    watching: HashSet<TypedKey>,
 }
 
 const TARGET_BROADCAST_CAPACITY: usize = 16;
@@ -33,6 +34,7 @@ impl<P: Node> ShareResolver<P> {
             node,
             target_tx: broadcast::channel(TARGET_BROADCAST_CAPACITY).0,
             updates,
+            watching: HashSet::new(),
         }
     }
 
@@ -165,9 +167,11 @@ impl<P: Node> Actor for ShareResolver<P> {
                             if let Some(valid_key) = resp.valid_key() {
                                 // Valid usable shares are watched.
                                 info!("watch: share key {valid_key}");
-                                self.node.watch(valid_key.clone(), ValueSubkeyRangeSet::single(0), TimestampDuration::new(60_000_000)).await?;
+                                self.watching.insert(*valid_key);
+                                self.node.watch(*valid_key, ValueSubkeyRangeSet::single(0), TimestampDuration::new(60_000_000)).await?;
                             } else {
                                 // Invalid or unusable shares are unwatched.
+                                self.watching.remove(req.key());
                                 self.node.cancel_watch(req.key());
                             }
                             server_ch.send(resp).await?;
@@ -181,6 +185,9 @@ impl<P: Node> Actor for ShareResolver<P> {
                     let update = res?;
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
+                            if !self.watching.contains(&ch.key) {
+                                continue;
+                            }
                             // FIXME: this may leak private routes.
                             // TODO: keep track of prior routes and pass them here?
                             let resp = self.handle(&Request::Header{ key: ch.key, prior_target: None }).await?;
@@ -251,6 +258,7 @@ impl<P: Node + Clone> Clone for ShareResolver<P> {
             node: self.node.clone(),
             target_tx: self.target_tx.clone(),
             updates: self.updates.resubscribe(),
+            watching: self.watching.clone(),
         }
     }
 }

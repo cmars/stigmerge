@@ -76,19 +76,19 @@ impl Decoder for PeerInfo {
 
 #[cfg(test)]
 mod tests {
-    use veilid_core::CRYPTO_KIND_VLD0;
+    use std::str::FromStr;
 
-    use crate::{
-        node::TypedKey,
-        proto::{Decoder, Encoder, PeerInfo},
-    };
+    use veilid_core::TypedKey;
+
+    use crate::proto::{Decoder, Encoder, PeerInfo};
 
     #[test]
     fn test_encode_decode() {
-        let key = TypedKey::new(CRYPTO_KIND_VLD0, [0x12; 32].into());
+        let key = TypedKey::from_str("VLD0:mluySonu8GKEd2AYTY0KB8y7upLHlXwm4movvucbfoQ").unwrap();
         let peer_info = PeerInfo::new(key);
         let encoded = peer_info.encode().unwrap();
         let decoded = PeerInfo::decode(&encoded).unwrap();
         assert_eq!(peer_info, decoded);
+        assert_eq!(key, decoded.key);
     }
 }

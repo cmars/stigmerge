@@ -167,6 +167,7 @@ impl<P: Node> Actor for HaveResolver<P> {
             Request::CancelWatch { key } => {
                 let (_, header) = self.node.resolve_route(key, None).await?;
                 if let Some(have_map_ref) = header.have_map() {
+                    self.have_to_share_map.remove(have_map_ref.key());
                     self.node.cancel_watch(have_map_ref.key());
                 }
                 Response::WatchCancelled {
@@ -197,13 +198,14 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use veilid_core::{
         CryptoKey, Target, TimestampDuration, ValueData, ValueSubkeyRangeSet, VeilidUpdate,
-        VeilidValueChange, CRYPTO_KEY_LENGTH,
+        VeilidValueChange, CRYPTO_KEY_LENGTH, CRYPTO_KIND_VLD0,
     };
 
     use crate::{
         actor::{OneShot, Operator},
         have_resolver::{HaveResolver, Request, Response},
         node::TypedKey,
+        proto::{HaveMapRef, Header},
         tests::StubNode,
     };
 
@@ -267,6 +269,24 @@ mod tests {
         let recorded_subkeys_clone = recorded_subkeys.clone();
         let recorded_duration_clone = recorded_duration.clone();
 
+        let have_map_key = TypedKey::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xa5; 32]));
+        let have_map_key_clone = have_map_key.clone();
+        node.resolve_route_result = Arc::new(Mutex::new(
+            move |_key: &TypedKey, _prior_route: Option<Target>| {
+                Ok((
+                    Target::PrivateRoute(CryptoKey::new([0xa5; 32])),
+                    Header::new(
+                        [0xab; 32],
+                        42,
+                        1,
+                        [0xcd; 99].as_slice(),
+                        Some(HaveMapRef::new(have_map_key_clone, 1)),
+                        None,
+                    ),
+                ))
+            },
+        ));
+
         node.watch_result = Arc::new(Mutex::new(
             move |key: TypedKey, subkeys: ValueSubkeyRangeSet, duration: TimestampDuration| {
                 *recorded_key_clone.write().unwrap() = Some(key);
@@ -307,7 +327,7 @@ mod tests {
         assert!(recorded_key.is_some(), "Key was not recorded");
         assert!(recorded_subkeys.is_some(), "Subkeys were not recorded");
         assert!(recorded_duration.is_some(), "Duration was not recorded");
-        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
+        assert_eq!(recorded_key.as_ref().unwrap(), &have_map_key);
         assert_eq!(
             recorded_subkeys.as_ref().unwrap(),
             &ValueSubkeyRangeSet::full()
@@ -328,10 +348,29 @@ mod tests {
         let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
 
+        let have_map_key = TypedKey::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xa5; 32]));
+
         let recorded_key_clone = recorded_key.clone();
         node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
             *recorded_key_clone.write().unwrap() = Some(key.clone());
         }));
+
+        let have_map_key_clone = have_map_key.clone();
+        node.resolve_route_result = Arc::new(Mutex::new(
+            move |_key: &TypedKey, _prior_route: Option<Target>| {
+                Ok((
+                    Target::PrivateRoute(CryptoKey::new([0xa5; 32])),
+                    Header::new(
+                        [0xab; 32],
+                        42,
+                        1,
+                        [0xcd; 99].as_slice(),
+                        Some(HaveMapRef::new(have_map_key_clone, 1)),
+                        None,
+                    ),
+                ))
+            },
+        ));
 
         // Create a test key and channel
         let test_key =
@@ -359,7 +398,7 @@ mod tests {
         // Verify the cancel was called correctly
         let recorded_key = recorded_key.read().unwrap();
         assert!(recorded_key.is_some(), "Key was not recorded");
-        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
+        assert_eq!(recorded_key.as_ref().unwrap(), &have_map_key);
 
         // Clean up
         cancel.cancel();

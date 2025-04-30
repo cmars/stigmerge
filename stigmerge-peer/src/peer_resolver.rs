@@ -17,6 +17,9 @@ use crate::{
 pub struct PeerResolver<N: Node> {
     node: N,
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
+
+    // Mapping from peer-map key to share key, used in watches
+    peer_to_share_map: HashMap<TypedKey, TypedKey>,
 }
 
 impl<P> PeerResolver<P>
@@ -26,7 +29,11 @@ where
     /// Create a new peer_resolver service.
     pub fn new(node: P) -> Self {
         let updates = node.subscribe_veilid_update();
-        Self { node, updates }
+        Self {
+            node,
+            updates,
+            peer_to_share_map: HashMap::new(),
+        }
     }
 }
 
@@ -106,10 +113,14 @@ impl<P: Node> Actor for PeerResolver<P> {
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
                             if let Some(data) = ch.value {
+                                let share_key = match self.peer_to_share_map.get(&ch.key) {
+                                    Some(key) => key,
+                                    None => continue,
+                                };
                                 if data.data_size() > 0 {
                                     if let Ok(peer_info) = PeerInfo::decode(data.data()) {
                                         server_ch.send(Response::Resolve{
-                                            key: ch.key,
+                                            key: *share_key,
                                             peers: [(peer_info.key().to_owned(), peer_info)].into_iter().collect::<HashMap<_,_>>()
                                         }).await?;
                                     }
@@ -143,6 +154,8 @@ impl<P: Node> Actor for PeerResolver<P> {
                 let (_, header) = self.node.resolve_route(key, None).await?;
                 if let Some(peer_map_ref) = header.peer_map() {
                     info!("watch: peer_map key {}", peer_map_ref.key());
+                    self.peer_to_share_map
+                        .insert(peer_map_ref.key().to_owned(), key.to_owned());
                     self.node
                         .watch(
                             peer_map_ref.key().to_owned(),
@@ -163,6 +176,7 @@ impl<P: Node> Actor for PeerResolver<P> {
             Request::CancelWatch { key } => {
                 let (_, header) = self.node.resolve_route(key, None).await?;
                 if let Some(peer_map_ref) = header.peer_map() {
+                    self.peer_to_share_map.remove(peer_map_ref.key());
                     self.node.cancel_watch(peer_map_ref.key());
                 }
                 Response::WatchCancelled {
@@ -178,6 +192,7 @@ impl<P: Node> Clone for PeerResolver<P> {
         Self {
             node: self.node.clone(),
             updates: self.updates.resubscribe(),
+            peer_to_share_map: self.peer_to_share_map.clone(),
         }
     }
 }
@@ -415,20 +430,17 @@ mod tests {
         // Create a stub peer
         let mut node = StubNode::new();
 
+        node.watch_result = Arc::new(Mutex::new(
+            move |_key: TypedKey, _subkeys: ValueSubkeyRangeSet, _duration: TimestampDuration| {
+                Ok(())
+            },
+        ));
+
         // Create a test key and channel
         let test_key =
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
         let peer_key =
             TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-
-        let recorded_resolve_peers = Arc::new(RwLock::new(0u32));
-        let recorded_resolve_peers_clone = recorded_resolve_peers.clone();
-        let stub_peer_key = peer_key.clone();
-        node.resolve_peers_result = Arc::new(Mutex::new(move |_key: &TypedKey| {
-            let mut count = recorded_resolve_peers_clone.write().unwrap();
-            *count += 1;
-            Ok(vec![PeerInfo::new(stub_peer_key)])
-        }));
 
         // Setup the resolve_route_result to return a header with a peer_map
         let peer_map_key =
@@ -461,11 +473,12 @@ mod tests {
         // Send a request and receive a response, to make sure the task is
         // running. That's important: if we're not in the run loop, the update
         // send may fail to broadcast.
-        let req = Request::Resolve {
+        let req = Request::Watch {
             key: test_key.clone(),
         };
         operator.send(req).await.unwrap();
-        assert!(matches!(operator.recv().await, Some(_)));
+        let resp = operator.recv().await;
+        assert!(matches!(resp, Some(_)), "{:?}", resp);
 
         // Create a PeerInfo object to include in the value change
         let peer_info = PeerInfo::new(peer_key.clone());
@@ -477,7 +490,7 @@ mod tests {
             veilid_core::ValueData::new(encoded_peer_info, crypto_key).expect("new value data");
 
         let change = veilid_core::VeilidValueChange {
-            key: test_key.clone(),
+            key: peer_map_key.clone(),
             subkeys: ValueSubkeyRangeSet::single_range(0, 0),
             value: Some(value_data),
             count: 1,
@@ -498,8 +511,6 @@ mod tests {
             }
             other => panic!("Unexpected response: {:?}", other),
         }
-
-        assert_eq!(*recorded_resolve_peers.read().unwrap(), 1u32);
 
         // Clean up
         cancel.cancel();

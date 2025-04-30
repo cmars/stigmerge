@@ -34,6 +34,7 @@ pub struct Veilid {
 }
 
 impl Veilid {
+    #[tracing::instrument(level = "debug", skip_all, err)]
     pub async fn new(
         routing_context: RoutingContext,
         update_tx: broadcast::Sender<VeilidUpdate>,
@@ -46,6 +47,7 @@ impl Veilid {
         })
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn open_or_create_dht_record(
         &self,
         rc: &RoutingContext,
@@ -78,6 +80,7 @@ impl Veilid {
         Ok(dht_rec)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn open_or_create_have_map_record(
         &self,
         rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
@@ -109,6 +112,7 @@ impl Veilid {
         Ok((dht_rec, o_cnt))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn open_or_create_peer_map_record(
         &self,
         rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
@@ -139,6 +143,7 @@ impl Veilid {
         Ok((dht_rec, o_cnt))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn write_header(
         &self,
         rc: &RoutingContext,
@@ -147,13 +152,20 @@ impl Veilid {
     ) -> Result<()> {
         // Encode the header
         let header_bytes = header.encode()?;
-        debug!(header_length = header_bytes.len(), "writing header");
+        debug!(
+            header_length = header_bytes.len(),
+            key = key.to_string(),
+            have_map_key = header.have_map().map(|hmr| hmr.key().to_string()),
+            peer_map_key = header.peer_map().map(|pmr| pmr.key().to_string()),
+            "writing header"
+        );
 
         rc.set_dht_value(key.to_owned(), 0, header_bytes, None)
             .await?;
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn write_index_bytes(
         &self,
         rc: &RoutingContext,
@@ -180,7 +192,9 @@ impl Veilid {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn read_header(&self, rc: &RoutingContext, key: &TypedKey) -> Result<Header> {
+        debug!(key = key.to_string());
         let subkey_value = match rc.get_dht_value(key.to_owned(), 0, true).await? {
             Some(value) => value,
             None => {
@@ -190,9 +204,17 @@ impl Veilid {
                 .into())
             }
         };
-        Ok(Header::decode(subkey_value.data())?)
+        let header = Header::decode(subkey_value.data())?;
+        debug!(
+            header_length = subkey_value.data_size(),
+            key = key.to_string(),
+            have_map_key = header.have_map().map(|hmr| hmr.key().to_string()),
+            peer_map_key = header.peer_map().map(|pmr| pmr.key().to_string()),
+        );
+        Ok(header)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn read_index(
         &self,
         rc: &RoutingContext,
@@ -229,6 +251,7 @@ impl Veilid {
         ))
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn release_prior_route(&self, rc: &RoutingContext, prior_route: Option<Target>) {
         match prior_route {
             Some(Target::PrivateRoute(target)) => {
@@ -256,6 +279,7 @@ impl Node for Veilid {
         self.update_tx.subscribe()
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn reset(&mut self) -> Result<()> {
         let rc = self.routing_context.write().await;
         if let Err(e) = rc.api().detach().await {
@@ -265,6 +289,7 @@ impl Node for Veilid {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn shutdown(mut self) -> Result<()> {
         self.watchers.shutdown().await;
         let rc = self.routing_context.write().await;
@@ -272,6 +297,7 @@ impl Node for Veilid {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn announce_index(&mut self, index: &Index) -> Result<(TypedKey, Target, Header)> {
         let rc = self.routing_context.read().await;
         // Serialize index to index_bytes
@@ -299,17 +325,18 @@ impl Node for Veilid {
         let dht_key = dht_rec.key().to_owned();
         self.write_index_bytes(&rc, &dht_key, index_bytes.as_slice())
             .await?;
-
         self.write_header(&rc, &dht_key, &header).await?;
         Ok((dht_key, Target::PrivateRoute(announce_route), header))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn announce_route(
         &mut self,
         key: &TypedKey,
         prior_route: Option<Target>,
         header: &Header,
     ) -> Result<(Target, Header)> {
+        debug!(key = key.to_string());
         let rc = self.routing_context.read().await;
         self.release_prior_route(&rc, prior_route).await;
         let (announce_route, route_data) = rc.api().new_private_route().await?;
@@ -318,6 +345,7 @@ impl Node for Veilid {
         Ok((Target::PrivateRoute(announce_route), header))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn resolve_route_index(
         &mut self,
         key: &TypedKey,
@@ -333,11 +361,13 @@ impl Node for Veilid {
         Ok((Target::PrivateRoute(target), header, index))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn resolve_route(
         &mut self,
         key: &TypedKey,
         prior_route: Option<Target>,
     ) -> Result<(Target, Header)> {
+        debug!(key = key.to_string());
         let rc = self.routing_context.read().await;
         let _ = rc.open_dht_record(key.to_owned(), None).await?;
         self.release_prior_route(&rc, prior_route).await;
@@ -348,6 +378,7 @@ impl Node for Veilid {
         Ok((Target::PrivateRoute(target), header))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn request_block(
         &mut self,
         target: Target,
@@ -364,24 +395,35 @@ impl Node for Veilid {
         Ok(resp_bytes)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn reply_block_contents(&mut self, call_id: OperationId, contents: &[u8]) -> Result<()> {
         let rc = self.routing_context.read().await;
         rc.api().app_call_reply(call_id, contents.to_vec()).await?;
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn watch(
         &mut self,
         key: TypedKey,
         values: ValueSubkeyRangeSet,
         period: TimestampDuration,
     ) -> Result<()> {
-        let rc = self.routing_context.clone();
+        {
+            // Ensure DHT record is open on this node
+            let _ = self
+                .routing_context
+                .read()
+                .await
+                .open_dht_record(key.to_owned(), None)
+                .await?;
+        }
         let watch_cancel = CancellationToken::new();
         if let Some(prior) = self.watch_cancels.insert(key.clone(), watch_cancel.clone()) {
             // Replace prior watch with this one
             prior.cancel();
         }
+        let rc = self.routing_context.clone();
         self.watchers.spawn(async move {
             loop {
                 let routing_context = rc.read().await;
@@ -421,12 +463,14 @@ impl Node for Veilid {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     fn cancel_watch(&mut self, key: &TypedKey) {
         if let Some(prior) = self.watch_cancels.remove(key) {
             prior.cancel();
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn merge_have_map(
         &mut self,
         key: TypedKey,
@@ -448,6 +492,7 @@ impl Node for Veilid {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn announce_have_map(&mut self, key: TypedKey, have_map: &PieceMap) -> Result<()> {
         let rc = self.routing_context.read().await;
         let data = have_map.as_ref();
@@ -471,6 +516,7 @@ impl Node for Veilid {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn announce_peer(
         &mut self,
         payload_digest: &[u8],
@@ -500,6 +546,7 @@ impl Node for Veilid {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn reset_peers(&mut self, payload_digest: &[u8], max_subkey: u16) -> Result<()> {
         let rc = self.routing_context.read().await;
         let (peer_map_dht, _o_cnt) = self
@@ -512,6 +559,7 @@ impl Node for Veilid {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn resolve_have_map(&mut self, peer_key: &TypedKey) -> Result<PieceMap> {
         let (_, header) = self.resolve_route(peer_key, None).await?;
         let have_map_ref = match header.have_map() {
@@ -522,6 +570,11 @@ impl Node for Veilid {
                 )))
             }
         };
+
+        debug!(
+            peer_share_key = peer_key.to_string(),
+            have_map_key = have_map_ref.key().to_string()
+        );
 
         let rc = self.routing_context.read().await;
         let dht_rec = rc
@@ -550,6 +603,7 @@ impl Node for Veilid {
         Ok(have_map)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err)]
     async fn resolve_peers(&mut self, peer_key: &TypedKey) -> Result<Vec<PeerInfo>> {
         let (_, header) = self.resolve_route(peer_key, None).await?;
         let peer_map_ref = match header.peer_map() {
@@ -560,6 +614,11 @@ impl Node for Veilid {
                 )))
             }
         };
+
+        debug!(
+            peer_share_key = peer_key.to_string(),
+            peer_map_key = peer_map_ref.key().to_string()
+        );
 
         let rc = self.routing_context.read().await;
         let dht_rec = rc

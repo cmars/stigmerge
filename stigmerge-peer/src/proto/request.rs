@@ -11,7 +11,7 @@ use super::{
 #[derive(Debug, PartialEq, Clone)]
 pub enum Request {
     BlockRequest(BlockRequest),
-    AnnouncePeer(AnnouncePeerRequest),
+    AdvertisePeer(AdvertisePeerRequest),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -21,7 +21,7 @@ pub struct BlockRequest {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct AnnouncePeerRequest {
+pub struct AdvertisePeerRequest {
     pub key: TypedKey,
 }
 
@@ -36,22 +36,24 @@ impl Encoder for Request {
                 block_req_builder.set_piece(block_req.piece);
                 block_req_builder.set_block(block_req.block);
             }
-            Request::AnnouncePeer(announce_req) => {
-                let mut announce_builder = message_builder.init_announce_peer();
+            Request::AdvertisePeer(advertise_req) => {
+                let mut advertise_builder = message_builder.init_advertise_peer();
 
-                let mut typed_key_builder = announce_builder.reborrow().init_key();
-                typed_key_builder.set_kind(announce_req.key.kind.into());
+                let mut typed_key_builder = advertise_builder.reborrow().init_key();
+                typed_key_builder.set_kind(advertise_req.key.kind.into());
 
                 let mut key_builder = typed_key_builder.reborrow().init_key();
-                key_builder.set_p0(u64::from_be_bytes(announce_req.key.value[0..8].try_into()?));
+                key_builder.set_p0(u64::from_be_bytes(
+                    advertise_req.key.value[0..8].try_into()?,
+                ));
                 key_builder.set_p1(u64::from_be_bytes(
-                    announce_req.key.value[8..16].try_into()?,
+                    advertise_req.key.value[8..16].try_into()?,
                 ));
                 key_builder.set_p2(u64::from_be_bytes(
-                    announce_req.key.value[16..24].try_into()?,
+                    advertise_req.key.value[16..24].try_into()?,
                 ));
                 key_builder.set_p3(u64::from_be_bytes(
-                    announce_req.key.value[24..32].try_into()?,
+                    advertise_req.key.value[24..32].try_into()?,
                 ));
             }
         }
@@ -77,9 +79,9 @@ impl Decoder for Request {
                     block: block_req.get_block(),
                 }))
             }
-            Ok(request::Which::AnnouncePeer(announce_req)) => {
-                let announce_req = announce_req?;
-                let typed_key_reader = announce_req.get_key()?;
+            Ok(request::Which::AdvertisePeer(advertise_req)) => {
+                let advertise_req = advertise_req?;
+                let typed_key_reader = advertise_req.get_key()?;
 
                 let mut key = PublicKey::default();
                 if typed_key_reader.has_key() {
@@ -90,7 +92,7 @@ impl Decoder for Request {
                     key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
                 }
 
-                Ok(Request::AnnouncePeer(AnnouncePeerRequest {
+                Ok(Request::AdvertisePeer(AdvertisePeerRequest {
                     key: TypedKey::new(typed_key_reader.get_kind().into(), key.into()),
                 }))
             }
@@ -116,9 +118,9 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_decode_announce_peer() {
+    fn test_encode_decode_advertise_peer() {
         let key = TypedKey::new(CRYPTO_KIND_VLD0, [0xaa; 32].into());
-        let message = Request::AnnouncePeer(AnnouncePeerRequest { key });
+        let message = Request::AdvertisePeer(AdvertisePeerRequest { key });
         let encoded = message.encode().unwrap();
         let decoded = Request::decode(&encoded).unwrap();
         assert_eq!(message, decoded);

@@ -13,7 +13,7 @@ use veilid_core::ValueData;
 
 pub use header::{HaveMapRef, Header, PeerMapRef};
 pub use peerinfo::PeerInfo;
-pub use request::{AnnouncePeerRequest, BlockRequest, Request};
+pub use request::{AdvertisePeerRequest, BlockRequest, Request};
 
 const MAX_RECORD_DATA_SIZE: usize = 1_048_576;
 const MAX_INDEX_BYTES: usize = MAX_RECORD_DATA_SIZE - ValueData::MAX_LEN;

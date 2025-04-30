@@ -2865,7 +2865,7 @@ pub mod peer_info {
 }
 
 pub mod request {
-  pub use self::Which::{BlockRequest,AnnouncePeer};
+  pub use self::Which::{BlockRequest,AdvertisePeer};
 
   #[derive(Copy, Clone)]
   pub struct Owned(());
@@ -2933,7 +2933,7 @@ pub mod request {
       !self.reader.get_pointer_field(0).is_null()
     }
     #[inline]
-    pub fn has_announce_peer(&self) -> bool {
+    pub fn has_advertise_peer(&self) -> bool {
       if self.reader.get_data_field::<u16>(0) != 1 { return false; }
       !self.reader.get_pointer_field(0).is_null()
     }
@@ -2946,7 +2946,7 @@ pub mod request {
           ))
         }
         1 => {
-          ::core::result::Result::Ok(AnnouncePeer(
+          ::core::result::Result::Ok(AdvertisePeer(
             ::capnp::traits::FromPointerReader::get_from_pointer(&self.reader.get_pointer_field(0), ::core::option::Option::None)
           ))
         }
@@ -3023,17 +3023,17 @@ pub mod request {
       !self.builder.is_pointer_field_null(0)
     }
     #[inline]
-    pub fn set_announce_peer(&mut self, value: crate::proto::stigmerge_capnp::announce_peer_request::Reader<'_>) -> ::capnp::Result<()> {
+    pub fn set_advertise_peer(&mut self, value: crate::proto::stigmerge_capnp::advertise_peer_request::Reader<'_>) -> ::capnp::Result<()> {
       self.builder.set_data_field::<u16>(0, 1);
       ::capnp::traits::SetterInput::set_pointer_builder(self.builder.reborrow().get_pointer_field(0), value, false)
     }
     #[inline]
-    pub fn init_announce_peer(self, ) -> crate::proto::stigmerge_capnp::announce_peer_request::Builder<'a> {
+    pub fn init_advertise_peer(self, ) -> crate::proto::stigmerge_capnp::advertise_peer_request::Builder<'a> {
       self.builder.set_data_field::<u16>(0, 1);
       ::capnp::traits::FromPointerBuilder::init_pointer(self.builder.get_pointer_field(0), 0)
     }
     #[inline]
-    pub fn has_announce_peer(&self) -> bool {
+    pub fn has_advertise_peer(&self) -> bool {
       if self.builder.get_data_field::<u16>(0) != 1 { return false; }
       !self.builder.is_pointer_field_null(0)
     }
@@ -3046,7 +3046,7 @@ pub mod request {
           ))
         }
         1 => {
-          ::core::result::Result::Ok(AnnouncePeer(
+          ::core::result::Result::Ok(AdvertisePeer(
             ::capnp::traits::FromPointerBuilder::get_from_pointer(self.builder.get_pointer_field(0), ::core::option::Option::None)
           ))
         }
@@ -3093,7 +3093,7 @@ pub mod request {
       ::capnp::word(1, 0, 254, 255, 0, 0, 0, 0),
       ::capnp::word(0, 0, 1, 0, 1, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-      ::capnp::word(49, 0, 0, 0, 106, 0, 0, 0),
+      ::capnp::word(49, 0, 0, 0, 114, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(48, 0, 0, 0, 3, 0, 1, 0),
       ::capnp::word(60, 0, 0, 0, 2, 0, 1, 0),
@@ -3106,8 +3106,8 @@ pub mod request {
       ::capnp::word(16, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-      ::capnp::word(97, 110, 110, 111, 117, 110, 99, 101),
-      ::capnp::word(80, 101, 101, 114, 0, 0, 0, 0),
+      ::capnp::word(97, 100, 118, 101, 114, 116, 105, 115),
+      ::capnp::word(101, 80, 101, 101, 114, 0, 0, 0),
       ::capnp::word(16, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(74, 248, 71, 33, 133, 244, 193, 159),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -3119,7 +3119,7 @@ pub mod request {
     pub fn get_field_types(index: u16) -> ::capnp::introspect::Type {
       match index {
         0 => <crate::proto::stigmerge_capnp::block_request::Owned as ::capnp::introspect::Introspect>::introspect(),
-        1 => <crate::proto::stigmerge_capnp::announce_peer_request::Owned as ::capnp::introspect::Introspect>::introspect(),
+        1 => <crate::proto::stigmerge_capnp::advertise_peer_request::Owned as ::capnp::introspect::Introspect>::introspect(),
         _ => panic!("invalid field index {}", index),
       }
     }
@@ -3139,10 +3139,10 @@ pub mod request {
   }
   pub enum Which<A0,A1> {
     BlockRequest(A0),
-    AnnouncePeer(A1),
+    AdvertisePeer(A1),
   }
-  pub type WhichReader<'a,> = Which<::capnp::Result<crate::proto::stigmerge_capnp::block_request::Reader<'a>>,::capnp::Result<crate::proto::stigmerge_capnp::announce_peer_request::Reader<'a>>>;
-  pub type WhichBuilder<'a,> = Which<::capnp::Result<crate::proto::stigmerge_capnp::block_request::Builder<'a>>,::capnp::Result<crate::proto::stigmerge_capnp::announce_peer_request::Builder<'a>>>;
+  pub type WhichReader<'a,> = Which<::capnp::Result<crate::proto::stigmerge_capnp::block_request::Reader<'a>>,::capnp::Result<crate::proto::stigmerge_capnp::advertise_peer_request::Reader<'a>>>;
+  pub type WhichBuilder<'a,> = Which<::capnp::Result<crate::proto::stigmerge_capnp::block_request::Builder<'a>>,::capnp::Result<crate::proto::stigmerge_capnp::advertise_peer_request::Builder<'a>>>;
 }
 
 pub mod block_request {
@@ -3427,7 +3427,7 @@ pub mod block_request {
   }
 }
 
-pub mod announce_peer_request {
+pub mod advertise_peer_request {
   #[derive(Copy, Clone)]
   pub struct Owned(());
   impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
@@ -3587,7 +3587,7 @@ pub mod announce_peer_request {
       ::capnp::word(24, 246, 157, 183, 194, 151, 111, 196),
       ::capnp::word(1, 0, 7, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
-      ::capnp::word(21, 0, 0, 0, 82, 1, 0, 0),
+      ::capnp::word(21, 0, 0, 0, 90, 1, 0, 0),
       ::capnp::word(41, 0, 0, 0, 7, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(37, 0, 0, 0, 63, 0, 0, 0),
@@ -3595,10 +3595,10 @@ pub mod announce_peer_request {
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
       ::capnp::word(112, 114, 111, 116, 111, 47, 115, 116),
       ::capnp::word(105, 103, 109, 101, 114, 103, 101, 46),
-      ::capnp::word(99, 97, 112, 110, 112, 58, 65, 110),
-      ::capnp::word(110, 111, 117, 110, 99, 101, 80, 101),
-      ::capnp::word(101, 114, 82, 101, 113, 117, 101, 115),
-      ::capnp::word(116, 0, 0, 0, 0, 0, 0, 0),
+      ::capnp::word(99, 97, 112, 110, 112, 58, 65, 100),
+      ::capnp::word(118, 101, 114, 116, 105, 115, 101, 80),
+      ::capnp::word(101, 101, 114, 82, 101, 113, 117, 101),
+      ::capnp::word(115, 116, 0, 0, 0, 0, 0, 0),
       ::capnp::word(0, 0, 0, 0, 1, 0, 1, 0),
       ::capnp::word(4, 0, 0, 0, 3, 0, 4, 0),
       ::capnp::word(0, 0, 0, 0, 0, 0, 0, 0),
@@ -3639,4 +3639,4 @@ pub mod announce_peer_request {
   }
 }
 
-//BUILDHASH:2f0045249e9dd525f2e6d429ffa4a7b574019fb4c79e96a428d7fd20de0a29e6
+//BUILDHASH:72695b6137791727ff3f0e302c46f3ed4cdc8b6b39fec02c536a1962ede23b1b

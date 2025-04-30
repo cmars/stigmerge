@@ -125,7 +125,7 @@ struct Request @0xc449e193a68b1a0b {
 
   union {
     blockRequest @0 :BlockRequest;
-    announcePeer @1 :AnnouncePeerRequest;
+    advertisePeer @1 :AdvertisePeerRequest;
   }
 }
 
@@ -142,8 +142,8 @@ struct BlockRequest @0x9523dee608a48b54 {
   blockExt2 @3 :UInt16 = 0;  # Overflow of block number, if it doesn't fit in UInt16.
 }
 
-struct AnnouncePeerRequest @0x9fc1f4852147f84a {
-  # Announce a peer
+struct AdvertisePeerRequest @0x9fc1f4852147f84a {
+  # Advertise a peer
   #
   # The key is the main share DHT key hosted by the calling peer.
   # The receiving peer will add the caller's key to its peer map,
