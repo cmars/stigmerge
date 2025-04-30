@@ -18,7 +18,10 @@ use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
 use crate::{
     peer_announcer::DEFAULT_MAX_PEERS,
     piece_map::PieceMap,
-    proto::{BlockRequest, Decoder, Encoder, HaveMapRef, Header, PeerInfo, PeerMapRef, Request},
+    proto::{
+        AdvertisePeerRequest, BlockRequest, Decoder, Encoder, HaveMapRef, Header, PeerInfo,
+        PeerMapRef, Request,
+    },
     Error, Result,
 };
 
@@ -399,6 +402,15 @@ impl Node for Veilid {
     async fn reply_block_contents(&mut self, call_id: OperationId, contents: &[u8]) -> Result<()> {
         let rc = self.routing_context.read().await;
         rc.api().app_call_reply(call_id, contents.to_vec()).await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all, err)]
+    async fn request_advertise_peer(&mut self, target: &Target, key: &TypedKey) -> Result<()> {
+        let rc = self.routing_context.read().await;
+        let req = Request::AdvertisePeer(AdvertisePeerRequest { key: *key });
+        let req_bytes = req.encode()?;
+        rc.app_message(*target, req_bytes).await?;
         Ok(())
     }
 

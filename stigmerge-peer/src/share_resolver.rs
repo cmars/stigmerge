@@ -4,7 +4,7 @@ use stigmerge_fileindex::Index;
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet};
+use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, ChanServer},
@@ -184,7 +184,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                 res = updates.recv() => {
                     let update = res?;
                     match update {
-                        veilid_core::VeilidUpdate::ValueChange(ch) => {
+                        VeilidUpdate::ValueChange(ch) => {
                             if !self.watching.contains(&ch.key) {
                                 continue;
                             }
@@ -193,7 +193,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                             let resp = self.handle(&Request::Header{ key: ch.key, prior_target: None }).await?;
                             server_ch.send(resp).await?;
                         }
-                        veilid_core::VeilidUpdate::Shutdown => {
+                        VeilidUpdate::Shutdown => {
                             return Ok(());
                         }
                         _ => {}

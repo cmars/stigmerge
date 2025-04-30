@@ -34,6 +34,8 @@ pub struct StubNode {
         Arc<Mutex<dyn Fn(Target, usize, usize) -> Result<Vec<u8>> + Send + 'static>>,
     pub reply_block_contents_result:
         Arc<Mutex<dyn Fn(OperationId, &[u8]) -> Result<()> + Send + 'static>>,
+    pub request_advertise_peer_result:
+        Arc<Mutex<dyn Fn(&Target, &TypedKey) -> Result<()> + Send + 'static>>,
     pub watch_result: Arc<
         Mutex<
             dyn Fn(TypedKey, ValueSubkeyRangeSet, TimestampDuration) -> Result<()> + Send + 'static,
@@ -84,6 +86,11 @@ impl StubNode {
             reply_block_contents_result: Arc::new(Mutex::new(
                 |_call_id: OperationId, _contents: &[u8]| {
                     panic!("unexpected call to reply_block_contents")
+                },
+            )),
+            request_advertise_peer_result: Arc::new(Mutex::new(
+                |_target: &Target, _key: &TypedKey| {
+                    panic!("unexpected call to request_advertised_peers")
                 },
             )),
             watch_result: Arc::new(Mutex::new(
@@ -222,5 +229,9 @@ impl Node for StubNode {
 
     async fn resolve_peers(&mut self, peer_key: &TypedKey) -> Result<Vec<PeerInfo>> {
         (*(self.resolve_peers_result.lock().unwrap()))(peer_key)
+    }
+
+    async fn request_advertise_peer(&mut self, target: &Target, key: &TypedKey) -> Result<()> {
+        (*(self.request_advertise_peer_result.lock().unwrap()))(target, key)
     }
 }

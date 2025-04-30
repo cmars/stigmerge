@@ -57,6 +57,12 @@ pub trait Node: Clone + Send {
         contents: &[u8],
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
+    fn request_advertise_peer(
+        &mut self,
+        target: &Target,
+        key: &TypedKey,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+
     fn watch(
         &mut self,
         key: TypedKey,

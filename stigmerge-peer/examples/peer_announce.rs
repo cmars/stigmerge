@@ -18,20 +18,22 @@ struct Args {
     peer_keys: Vec<String>,
 }
 
+use stigmerge_peer::content_addressable::ContentAddressable;
+use stigmerge_peer::proto::{AdvertisePeerRequest, Decoder};
 use stigmerge_peer::share_resolver::{self, ShareResolver};
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use veilid_core::TypedKey;
+use veilid_core::{TypedKey, VeilidUpdate};
 
 use stigmerge_fileindex::Indexer;
 use stigmerge_peer::actor::{ConnectionState, Operator, UntilCancelled, WithVeilidConnection};
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::peer_announcer::{self, PeerAnnouncer};
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
-use stigmerge_peer::Error;
 use stigmerge_peer::{new_routing_context, peer_resolver};
+use stigmerge_peer::{proto, Error, Node};
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {
@@ -42,14 +44,15 @@ async fn main() -> std::result::Result<(), Error> {
 
     // Index the file
     let indexer = Indexer::from_file(file.clone()).await?;
-    let index = indexer.index().await?;
+    let mut index = indexer.index().await?;
+    let want_index_digest = index.digest()?;
 
     let state_dir = tempfile::tempdir()?;
 
     // Set up Veilid peer
     let (routing_context, update_tx, _) =
         new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let node = Veilid::new(routing_context, update_tx).await?;
+    let mut node = Veilid::new(routing_context, update_tx).await?;
 
     let cancel = CancellationToken::new();
     let conn_state = std::sync::Arc::new(Mutex::new(ConnectionState::new()));
@@ -134,6 +137,11 @@ async fn main() -> std::result::Result<(), Error> {
             .await?;
     }
 
+    let mut update_rx = node.subscribe_veilid_update();
+
+    let (advertise_tx, advertise_rx) = flume::unbounded();
+    const MAX_ADVERTISE_ATTEMPTS: u8 = 3;
+
     loop {
         select! {
                 _ = cancel.cancelled() => {
@@ -141,7 +149,7 @@ async fn main() -> std::result::Result<(), Error> {
                 }
                 res = share_resolver_op.recv() => {
                     match res {
-                        Some(share_resolver::Response::Header{ key, header: _, target: _ }) => {
+                        Some(share_resolver::Response::Header{ key, header: _, target }) => {
                             peer_announcer_op.send(peer_announcer::Request::Announce { key: key.clone() }).await?;
                             match peer_announcer_op.recv().await {
                                 Some(peer_announcer::Response::Ok) => {
@@ -152,11 +160,37 @@ async fn main() -> std::result::Result<(), Error> {
                                 }
                                 None => todo!(),
                             }
+                            advertise_tx.send_async((target, key, 0)).await?;
+                        }
+                        Some(share_resolver::Response::Index{ key, header: _, index: _, target }) => {
+                            peer_announcer_op.send(peer_announcer::Request::Announce { key: key.clone() }).await?;
+                            match peer_announcer_op.recv().await {
+                                Some(peer_announcer::Response::Ok) => {
+                                    info!("announce peer: {key}: ok");
+                                }
+                                Some(peer_announcer::Response::Err {err_msg}) => {
+                                    warn!("announce peer: {key}: {err_msg}");
+                                }
+                                None => todo!(),
+                            }
+                            advertise_tx.send_async((target, key, 0)).await?;
                         }
                         other => {
                             warn!("share_resolver: {:?}", other);
                         }
                     }
+                }
+                res = advertise_rx.recv_async() => {
+                    let (target, key, attempt) = res?;
+                    match node.request_advertise_peer(&target, &share_key).await {
+                        Ok(()) => info!("advertised our share {share_key} to {key}"),
+                        Err(e) => {
+                            warn!("failed to advertise to {key}: {} (attempt {attempt})", e.to_string());
+                            if attempt < MAX_ADVERTISE_ATTEMPTS {
+                                advertise_tx.send_async((target, key, attempt+1)).await?;
+                            }
+                        }
+                    };
                 }
                 res = peer_resolver_op.recv() => {
                     match res {
@@ -178,6 +212,28 @@ async fn main() -> std::result::Result<(), Error> {
                         other => {
                             warn!("peer_resolver: {:?}", other);
                         }
+                    }
+                }
+                res = update_rx.recv() => {
+                    let update = res?;
+                    match update {
+                        VeilidUpdate::AppMessage(app_msg) => {
+                            let req = proto::Request::decode(app_msg.message())?;
+                            match req {
+                                proto::Request::AdvertisePeer(AdvertisePeerRequest{ key }) => {
+                                    info!("received advertise request from {key}");
+                                    share_resolver_op.send(share_resolver::Request::Index {
+                                        key, want_index_digest, root: index.root().to_path_buf(),
+                                    }).await?;
+                                }
+                                _ => {}  // Ignore other request types
+                            }
+
+                        }
+                        VeilidUpdate::Shutdown => {
+                            cancel.cancel();
+                        }
+                        _ => {}
                     }
                 }
             _ = tokio::signal::ctrl_c() => {
