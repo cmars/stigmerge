@@ -104,7 +104,7 @@ impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Op
         }
     }
 
-    pub fn new_pool<
+    pub fn new_clone_pool<
         A: Actor<Request = Req, Response = Resp> + Clone + Send + 'static,
         R: Runner<A> + Clone + Send + 'static,
     >(

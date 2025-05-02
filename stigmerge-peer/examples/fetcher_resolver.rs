@@ -100,7 +100,7 @@ async fn main() -> std::result::Result<(), Error> {
 
     // Set up fetcher dependencies
     let want_index = Arc::new(RwLock::new(index.clone()));
-    let block_fetcher = Operator::new_pool(
+    let block_fetcher = Operator::new_clone_pool(
         cancel.clone(),
         BlockFetcher::new(
             node.clone(),
