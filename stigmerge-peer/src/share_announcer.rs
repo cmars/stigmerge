@@ -310,10 +310,10 @@ mod tests {
         let index = indexer.index().await.expect("index");
 
         // Create a stub peer with mock behavior
-        let peer = StubNode::new();
+        let node = StubNode::new();
 
         // Create the service and operator with no share announced yet
-        let mut announcer = ShareAnnouncer::new(peer, index);
+        let mut announcer = ShareAnnouncer::new(node, index);
 
         // Test the handle method directly with no share set
         let response = announcer

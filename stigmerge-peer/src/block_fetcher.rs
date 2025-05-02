@@ -398,10 +398,10 @@ mod tests {
         drop(tf);
 
         // Set up BlockFetcher
-        let peer = StubNode::new();
+        let node = StubNode::new();
         let (_target_tx, target_rx) = broadcast::channel(1);
         let cancel = CancellationToken::new();
-        let fetcher = BlockFetcher::new(peer, Arc::new(RwLock::new(index)), tf_path, target_rx);
+        let fetcher = BlockFetcher::new(node, Arc::new(RwLock::new(index)), tf_path, target_rx);
         let mut operator = Operator::new(cancel.clone(), fetcher, OneShot);
 
         // Request a block without sending target update first
