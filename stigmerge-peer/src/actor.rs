@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::{
     select,
-    sync::{broadcast, Mutex, MutexGuard},
+    sync::{broadcast, watch, Mutex, MutexGuard},
     task::{self, JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
@@ -229,12 +229,17 @@ pub struct WithVeilidConnection<T, N> {
 }
 
 pub struct ConnectionState {
-    connected: bool,
+    connected: watch::Sender<bool>,
 }
 
 impl ConnectionState {
     pub fn new() -> ConnectionState {
-        ConnectionState { connected: false }
+        let (tx, _) = watch::channel(false);
+        ConnectionState { connected: tx }
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
+        self.connected.subscribe()
     }
 }
 
@@ -252,7 +257,7 @@ impl<T, N: Node> WithVeilidConnection<T, N> {
     async fn disconnected<'a>(
         &mut self,
         cancel: CancellationToken,
-        mut state: MutexGuard<'a, ConnectionState>,
+        state: MutexGuard<'a, ConnectionState>,
     ) -> Result<()> {
         loop {
             select! {
@@ -265,7 +270,7 @@ impl<T, N: Node> WithVeilidConnection<T, N> {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
                             if veilid_state_attachment.public_internet_ready {
                                 info!("connected: {:?}", veilid_state_attachment);
-                                state.connected = true;
+                                state.connected.send_if_modified(|val| if !*val { *val = true; true } else { false });
                                 return Ok(())
                             }
                             info!("disconnected: {:?}", veilid_state_attachment);
@@ -302,7 +307,7 @@ impl<
         loop {
             {
                 let st = state.lock().await;
-                if !st.connected {
+                if !*st.connected.borrow() {
                     self.disconnected(cancel.clone(), st).await?;
                     continue;
                 }
@@ -325,9 +330,9 @@ impl<
                                 return Err(e);
                             }
                             {
-                                if let Ok(mut st) = state.try_lock() {
+                                if let Ok(st) = state.try_lock() {
                                     info!("marking disconnected");
-                                    st.connected = false;
+                                    st.connected.send_if_modified(|val| if *val { *val = false; true } else { false });
                                 }
                             }
                         }

@@ -12,7 +12,7 @@ use stigmerge_peer::{
     actor::{ConnectionState, Operator, UntilCancelled, WithVeilidConnection},
     block_fetcher::BlockFetcher,
     content_addressable::ContentAddressable,
-    fetcher::{self, Clients as FetcherClients, Fetcher, Status as FetcherStatus},
+    fetcher::{Clients as FetcherClients, Fetcher, Status as FetcherStatus},
     have_announcer::HaveAnnouncer,
     is_cancelled, new_routing_context,
     node::{Node, Veilid},
@@ -22,7 +22,6 @@ use stigmerge_peer::{
     share_announcer::{self, ShareAnnouncer},
     share_resolver::{self, ShareResolver},
     types::{PieceState, ShareInfo},
-    Error as StigmergeError,
 };
 use tracing::info;
 
@@ -73,9 +72,11 @@ impl App {
 
         // Set up cancellation token
         let cancel = CancellationToken::new();
+        let conn_state_inner = ConnectionState::new();
+        let mut conn_state_rx = conn_state_inner.subscribe();
 
         // Set up connection state
-        let conn_state = Arc::new(tokio::sync::Mutex::new(ConnectionState::new()));
+        let conn_state = Arc::new(tokio::sync::Mutex::new(conn_state_inner));
 
         // Set up connection status progress bar
         let conn_progress_bar = m.add(ProgressBar::new(0u64));
@@ -85,31 +86,31 @@ impl App {
         conn_progress_bar.enable_steady_tick(Duration::from_millis(100));
 
         // Monitor connection state
-        //let conn_state_clone = conn_state.clone();
-        //let conn_cancel = cancel.clone();
-        //let conn_msg_style = self.msg_style.clone();
-        // TODO: add a status sender to ConnectionState, subscribe and update spinner here
-        //spawn(async move {
-        //    loop {
-        //        select! {
-        //            _ = conn_cancel.cancelled() => {
-        //                return Ok::<(), Error>(());
-        //            }
-        //            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-        //                let state = conn_state_clone.lock().await;
-        //                // Check if connected - we'll just wait a bit and assume connection
-        //                // since we can't directly access the private field
-        //                if state.is_connected() {
-        //                    conn_progress_bar.set_style(conn_msg_style.clone());
-        //                    conn_progress_bar.set_prefix("🟢");
-        //                    conn_progress_bar.disable_steady_tick();
-        //                    conn_progress_bar.finish_with_message("Connected to Veilid network");
-        //                    return Ok(());
-        //                }
-        //            }
-        //        }
-        //    }
-        //});
+        let conn_cancel = cancel.clone();
+        let conn_msg_style = self.msg_style.clone();
+        spawn(async move {
+            loop {
+                select! {
+                    _ = conn_cancel.cancelled() => {
+                        return Ok::<(), Error>(());
+                    }
+                    res = conn_state_rx.changed() => {
+                        res?;
+                        if *conn_state_rx.borrow() {
+                            conn_progress_bar.set_style(conn_msg_style.clone());
+                            conn_progress_bar.set_prefix("🟢");
+                            conn_progress_bar.disable_steady_tick();
+                            conn_progress_bar.set_message("Connected to Veilid network");
+                        } else {
+                            conn_progress_bar.set_style(conn_msg_style.clone());
+                            conn_progress_bar.set_prefix("X");
+                            conn_progress_bar.enable_steady_tick(Duration::from_millis(100));
+                            conn_progress_bar.set_message("Connected to Veilid network");
+                        }
+                    }
+                }
+            }
+        });
 
         // Set up ctrl-c handler
         let ctrl_c_cancel = cancel.clone();

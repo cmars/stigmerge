@@ -137,7 +137,7 @@ async fn main() -> std::result::Result<(), Error> {
     };
 
     // Create and run fetcher
-    let mut fetcher = Fetcher::new(share, clients);
+    let fetcher = Fetcher::new(share, clients);
 
     info!("Starting fetch...");
 
