@@ -52,6 +52,10 @@ impl Fetcher {
         }
     }
 
+    pub fn subscribe_fetcher_status(&self) -> broadcast::Receiver<Status> {
+        self.status_tx.subscribe()
+    }
+
     #[tracing::instrument(skip_all, err)]
     pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         loop {

@@ -31,6 +31,13 @@ struct Args {
 
     #[arg(long = "peer", short = 'p', help = "Remote share key to fetch from")]
     share_keys: Vec<String>,
+
+    #[arg(
+        default_value = "50",
+        long = "fetchers",
+        help = "Number of concurrent fetchers"
+    )]
+    fetchers: usize,
 }
 
 use path_absolutize::Absolutize;
@@ -182,7 +189,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     info!("announced share, key: {share_key}");
 
     // Set up fetcher dependencies
-    let block_fetcher = Operator::new(
+    let block_fetcher = Operator::new_clone_pool(
         cancel.clone(),
         BlockFetcher::new(
             node.clone(),
@@ -191,6 +198,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             target_rx,
         ),
         WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        args.fetchers,
     );
 
     let piece_verifier = PieceVerifier::new(Arc::new(RwLock::new(index.clone())));

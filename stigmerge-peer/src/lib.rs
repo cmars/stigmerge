@@ -26,7 +26,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use veilid_core::{RoutingContext, VeilidUpdate};
 
-pub use error::{Error, Result};
+pub use error::{is_cancelled, is_hangup, Error, Result};
 pub use node::{Node, Veilid};
 
 #[cfg(test)]
