@@ -132,7 +132,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             share_resolve_op
                 .send(share_resolver::Request::Index {
                     key: share_key.clone(),
-                    want_index_digest,
+                    want_index_digest: Some(want_index_digest),
                     root: root.clone(),
                 })
                 .await?;

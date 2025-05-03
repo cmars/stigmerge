@@ -223,7 +223,7 @@ async fn main() -> std::result::Result<(), Error> {
                                 proto::Request::AdvertisePeer(AdvertisePeerRequest{ key }) => {
                                     info!("received advertise request from {key}");
                                     share_resolver_op.send(share_resolver::Request::Index {
-                                        key, want_index_digest, root: index.root().to_path_buf(),
+                                        key, want_index_digest: Some(want_index_digest), root: index.root().to_path_buf(),
                                     }).await?;
                                 }
                                 _ => {}  // Ignore other request types

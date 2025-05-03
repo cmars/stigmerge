@@ -81,7 +81,7 @@ async fn main() -> std::result::Result<(), Error> {
     resolve_op
         .send(share_resolver::Request::Index {
             key: key.clone(),
-            want_index_digest,
+            want_index_digest: Some(want_index_digest),
             root: download_dir.clone(),
         })
         .await?;

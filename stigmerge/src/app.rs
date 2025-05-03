@@ -182,40 +182,17 @@ impl App {
         // Parse share key
         let share_key: TypedKey = share_key.parse()?;
 
-        // Resolve the share
-        share_resolve_op
-            .send(share_resolver::Request::Header {
-                key: share_key.clone(),
-                prior_target: None,
-            })
-            .await?;
-
-        let (header, want_index_digest) = match share_resolve_op.recv().await {
-            Some(share_resolver::Response::Header { header, .. }) => {
-                let digest: Digest = header.payload_digest().into();
-                (header, digest)
-            }
-            Some(share_resolver::Response::NotAvailable { err_msg, .. }) => {
-                return Err(Error::msg(format!("Failed to resolve share: {}", err_msg)));
-            }
-            _ => return Err(Error::msg("Unexpected response from share resolver")),
-        };
-
         // Resolve the index
-        let want_index_digest: Digest = want_index_digest
-            .try_into()
-            .map_err(|_| Error::msg("Invalid digest length"))?;
-
         share_resolve_op
             .send(share_resolver::Request::Index {
                 key: share_key.clone(),
-                want_index_digest,
+                want_index_digest: None,
                 root: PathBuf::from(root),
             })
             .await?;
 
-        let want_index = match share_resolve_op.recv().await {
-            Some(share_resolver::Response::Index { index, .. }) => index,
+        let (want_index, header) = match share_resolve_op.recv().await {
+            Some(share_resolver::Response::Index { index, header, .. }) => (index, header),
             Some(share_resolver::Response::BadIndex { .. }) => {
                 return Err(Error::msg("Bad index"));
             }

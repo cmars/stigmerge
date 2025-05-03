@@ -53,7 +53,7 @@ pub enum Request {
     /// continual, automatically-renewed watch for this share key.
     Index {
         key: TypedKey,
-        want_index_digest: Digest,
+        want_index_digest: Option<Digest>,
         root: PathBuf,
     },
 
@@ -214,7 +214,15 @@ impl<P: Node> Actor for ShareResolver<P> {
                 let (target, header, mut index) =
                     self.node.resolve_route_index(key, root.as_path()).await?;
                 let peer_index_digest = index.digest()?;
-                if peer_index_digest.as_slice() == want_index_digest {
+
+                // If want_index_digest is None, skip verification
+                // Otherwise, verify the digest matches
+                let digest_matches = match want_index_digest {
+                    None => true, // Skip verification if None
+                    Some(digest) => peer_index_digest.as_slice() == digest,
+                };
+
+                if digest_matches {
                     self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
                         warn!("no target subscribers: {}", e);
                         0
@@ -322,10 +330,11 @@ mod tests {
             TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
 
         // Send a bad "want index digest"
+        let bad_digest: crate::proto::Digest = [0u8; 32];
         operator
             .send(share_resolver::Request::Index {
                 key: fake_key,
-                want_index_digest: [0u8; 32],
+                want_index_digest: Some(bad_digest),
                 root: index.root().to_path_buf(),
             })
             .await
@@ -337,10 +346,11 @@ mod tests {
         ));
 
         // Send a "want index digest" that matches the mock resolved index
+        let digest_array: crate::proto::Digest = index_digest_bytes.into();
         operator
             .send(share_resolver::Request::Index {
                 key: fake_key,
-                want_index_digest: index_digest_bytes.into(),
+                want_index_digest: Some(digest_array),
                 root: index.root().to_path_buf(),
             })
             .await
