@@ -3583,6 +3583,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "veilid-core",
 ]
 
 [[package]]
