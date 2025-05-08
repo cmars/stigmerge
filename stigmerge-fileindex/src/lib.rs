@@ -1,6 +1,7 @@
 use std::{
     cmp::min,
     collections::HashMap,
+    convert::TryInto,
     io,
     path::{Path, PathBuf},
 };
@@ -282,7 +283,7 @@ impl Indexer {
         }
 
         let file_path = want.root.join(want.files[0].path());
-        let file_len = want.files[0].contents().length() as u64;
+        let file_len = TryInto::<u64>::try_into(want.files[0].contents().length()).unwrap();
         if let Ok(_) = async {
             // Truncate an existing file to the wanted file length
             let fh = OpenOptions::new()
@@ -359,8 +360,9 @@ impl Indexer {
         let (result_tx, result_rx) = unbounded::<ScanResult>();
         let mut scanners = JoinSet::new();
 
-        let n_tasks = file_meta.len() as usize / INDEX_BUFFER_SIZE
-            + if file_meta.len() as usize % INDEX_BUFFER_SIZE > 0 {
+        let file_len = TryInto::<usize>::try_into(file_meta.len()).unwrap();
+        let n_tasks = file_len / INDEX_BUFFER_SIZE
+            + if file_len % INDEX_BUFFER_SIZE > 0 {
                 1
             } else {
                 0
@@ -399,7 +401,7 @@ impl Indexer {
 
                     digest_progress_tx.send_modify(|p| {
                         p.length = file_len;
-                        p.position += rd as u64;
+                        p.position += TryInto::<u64>::try_into(rd).unwrap();
                     });
                 }
                 if total_rd == 0 {
@@ -416,8 +418,8 @@ impl Indexer {
                 recv_result = result_rx.recv_async() => {
                     let scan_result = recv_result?;
                     self.index_progress_tx.send_modify(|p| {
-                        p.length = file_meta.len() as u64;
-                        p.position += scan_result.piece.length as u64;
+                        p.length = TryInto::<u64>::try_into(file_meta.len()).unwrap();
+                        p.position += TryInto::<u64>::try_into(scan_result.piece.length).unwrap();
                     });
                     scan_results.push(scan_result);
                 }
