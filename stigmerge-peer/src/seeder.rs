@@ -386,7 +386,7 @@ mod tests {
     // Helper function to create a test index
     async fn create_test_index(file_path: &PathBuf) -> Index {
         // Create index from the file using Indexer
-        let indexer = stigmerge_fileindex::Indexer::from_file(file_path.clone())
+        let indexer = stigmerge_fileindex::Indexer::from_file(file_path.as_path())
             .await
             .expect("create indexer");
         indexer.index().await.expect("create index")

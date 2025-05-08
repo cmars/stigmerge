@@ -1,6 +1,8 @@
+use std::ops::Deref;
+
 use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
 use tokio::select;
-use tokio::sync::broadcast;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -15,7 +17,8 @@ pub struct Fetcher {
     have_index: Index,
 
     state: State,
-    status_tx: broadcast::Sender<Status>,
+    status_tx: watch::Sender<Status>,
+    status_rx: watch::Receiver<Status>,
 }
 
 pub struct Clients {
@@ -34,26 +37,42 @@ pub enum State {
 
 #[derive(Clone, Debug)]
 pub enum Status {
+    NotStarted,
     IndexProgress { position: u64, length: u64 },
     DigestProgress { position: u64, length: u64 },
-    FetchProgress { count: i64, length: u64 },
+    FetchProgress { position: u64, length: u64 },
     VerifyProgress { position: u64, length: u64 },
     Done,
 }
 
+impl Status {
+    fn position(&self) -> Option<u64> {
+        match self {
+            Status::NotStarted => None,
+            Status::IndexProgress { position, .. } => Some(*position),
+            Status::DigestProgress { position, .. } => Some(*position),
+            Status::FetchProgress { position, .. } => Some(*position),
+            Status::VerifyProgress { position, .. } => Some(*position),
+            Status::Done => None,
+        }
+    }
+}
+
 impl Fetcher {
     pub fn new(share: ShareInfo, clients: Clients) -> Fetcher {
+        let (status_tx, status_rx) = watch::channel(Status::NotStarted);
         Fetcher {
             clients,
             have_index: share.want_index.empty(),
             want_index: share.want_index,
             state: State::Indexing,
-            status_tx: broadcast::channel(16).0,
+            status_tx,
+            status_rx,
         }
     }
 
-    pub fn subscribe_fetcher_status(&self) -> broadcast::Receiver<Status> {
-        self.status_tx.subscribe()
+    pub fn subscribe_fetcher_status(&self) -> watch::Receiver<Status> {
+        self.status_rx.clone()
     }
 
     #[tracing::instrument(skip_all, err)]
@@ -87,20 +106,20 @@ impl Fetcher {
                     res = index_progress.changed() => {
                         res?;
                         let progress = index_progress.borrow_and_update();
-                        status_tx.send(
+                        status_tx.send_replace(
                             Status::IndexProgress{
                                 position: progress.position,
                                 length: progress.length,
-                            }).unwrap_or_else(|_|{ warn!("no status subscribers"); 0});
+                            });
                     }
                     res = digest_progress.changed() => {
                         res?;
                         let progress = digest_progress.borrow_and_update();
-                        status_tx.send(
+                        status_tx.send_replace(
                             Status::DigestProgress{
                                 position: progress.position,
                                 length: progress.length,
-                            }).unwrap_or_else(|_|{ warn!("no status subscribers"); 0});
+                            });
                     }
                 }
             }
@@ -160,16 +179,12 @@ impl Fetcher {
                 }
             }
         }
-        self.status_tx
-            .send(Status::FetchProgress {
-                count: have_length.try_into().unwrap(),
-                length: total_length.try_into().unwrap(),
-            })
-            .unwrap_or_else(|_| {
-                warn!("no status subscribers");
-                0
-            });
+        self.status_tx.send_replace(Status::FetchProgress {
+            position: have_length.try_into().unwrap(),
+            length: total_length.try_into().unwrap(),
+        });
         Ok(if want_length == 0 {
+            self.status_tx.send_replace(Status::Done);
             State::Done
         } else {
             State::Fetching
@@ -179,6 +194,7 @@ impl Fetcher {
     #[tracing::instrument(skip_all, err, ret)]
     async fn fetch(&mut self, cancel: CancellationToken) -> Result<State> {
         let mut verified_pieces = 0u64;
+        let mut fetched_bytes = self.status_tx.borrow().deref().position().unwrap_or(0);
         let total_pieces = self.want_index.payload().pieces().len().try_into().unwrap();
         let total_length = self.want_index.payload().length();
         loop {
@@ -193,12 +209,14 @@ impl Fetcher {
                         // these might fail to validate.
                         None => continue,
                         Some(block_fetcher::Response::Fetched { block, length }) => {
+                            fetched_bytes += TryInto::<u64>::try_into(length).unwrap();
+
                             // Send progress to subscribers
-                            self.status_tx.send(
+                            self.status_tx.send_replace(
                                 Status::FetchProgress{
-                                    count: length.try_into().unwrap(),
+                                    position: fetched_bytes.try_into().unwrap(),
                                     length: total_length.try_into().unwrap(),
-                                }).unwrap_or_else(|_| { warn!("no status subscribers"); 0 });
+                                });
 
                             // Update verifier
                             self.clients.piece_verifier.send(piece_verifier::Request::Piece(PieceState::new(
@@ -225,11 +243,11 @@ impl Fetcher {
                             verified_pieces += 1u64;
 
                             // Update verify progress
-                            self.status_tx.send(
+                            self.status_tx.send_replace(
                                 Status::VerifyProgress{
                                     length: total_pieces,
                                     position: verified_pieces
-                                }).unwrap_or_else(|_| { warn!("no status subscribers"); 0 });
+                                });
 
                             // Update have map
                             self.clients.have_announcer.send(
@@ -238,6 +256,7 @@ impl Fetcher {
                                 }).await?;
 
                             if index_complete {
+                                self.status_tx.send_replace(Status::Done);
                                 return Ok(State::Done);
                             }
                         }
@@ -245,12 +264,14 @@ impl Fetcher {
                             let piece_length = self.want_index.payload().pieces()[piece_index].length();
                             warn!(file_index, piece_index, piece_length, "invalid piece");
 
+                            fetched_bytes -= TryInto::<u64>::try_into(piece_length).unwrap();
+
                             // Rewind the fetch progress status by the piece length
-                            self.status_tx.send(
+                            self.status_tx.send_replace(
                                 Status::FetchProgress{
                                     length: total_length.try_into().unwrap(),
-                                    count: 0-TryInto::<i64>::try_into(piece_length).unwrap(),
-                                }).unwrap_or_else(|_| { warn!("no status subscribers"); 0 });
+                                    position: fetched_bytes,
+                                });
 
                             // Re-fetch all the blocks in the failed piece
                             let piece_blocks = piece_length / BLOCK_SIZE_BYTES + if piece_length % BLOCK_SIZE_BYTES > 0 { 1 } else { 0 };

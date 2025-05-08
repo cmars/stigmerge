@@ -119,7 +119,6 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
 
     // Resolve bootstrap share keys and want_index_digest
     let mut want_index = None;
-    let mut resolved_header = None;
     if let Some(ref want_index_digest) = args.want_index_digest {
         for share_key_str in args.share_keys.iter() {
             let share_key: TypedKey = share_key_str.parse()?;
@@ -136,20 +135,14 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
                     root: root.clone(),
                 })
                 .await?;
-            let (header, index) = match share_resolve_op.recv().await {
-                Some(share_resolver::Response::Index {
-                    header,
-                    index,
-                    target: _,
-                    ..
-                }) => (header, index),
+            let index = match share_resolve_op.recv().await {
+                Some(share_resolver::Response::Index { index, .. }) => index,
                 Some(share_resolver::Response::BadIndex { .. }) => anyhow::bail!("Bad index"),
                 Some(share_resolver::Response::NotAvailable { err_msg, .. }) => {
                     anyhow::bail!(err_msg)
                 }
                 _ => anyhow::bail!("Unexpected response"),
             };
-            resolved_header.get_or_insert(header);
             want_index.get_or_insert(index);
         }
     }
@@ -159,8 +152,12 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             // If an index wasn't resolved, and we didn't bail on an error,
             // then assume a want_index_digest and share_keys weren't provided.
             // So we're a lone seeder, starting a new share.
-            let indexer =
-                Indexer::from_file(args.seed_path.ok_or(Error::msg("expected seed path"))?).await?;
+            let indexer = Indexer::from_file(
+                args.seed_path
+                    .ok_or(Error::msg("expected seed path"))?
+                    .as_path(),
+            )
+            .await?;
             let mut index = indexer.index().await?;
             info!(index_digest = hex::encode(index.digest()?));
             index

@@ -115,9 +115,7 @@ mod tests {
     #[tokio::test]
     async fn round_trip_index() {
         let tempf = temp_file(b'@', 4194304);
-        let indexer = Indexer::from_file(tempf.path().to_owned())
-            .await
-            .expect("indexer");
+        let indexer = Indexer::from_file(tempf.path()).await.expect("indexer");
         let idx = indexer.index().await.expect("index");
         let header = Header::new(
             idx.payload().digest().try_into().expect("digest fits"),

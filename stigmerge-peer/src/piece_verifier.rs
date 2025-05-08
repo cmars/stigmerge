@@ -211,9 +211,7 @@ mod tests {
         let tf = temp_file(0xa5u8, PIECE_SIZE_BYTES * NUM_PIECES); // 3 pieces
 
         // Create index from the file
-        let indexer = Indexer::from_file(tf.path().to_path_buf())
-            .await
-            .expect("indexer");
+        let indexer = Indexer::from_file(tf.path()).await.expect("indexer");
 
         // Set up verifier
         let cancel = CancellationToken::new();
@@ -273,9 +271,7 @@ mod tests {
         let mut tf = temp_file(0xa5u8, PIECE_SIZE_BYTES * 2); // 2 pieces
 
         // Create index from the file
-        let indexer = Indexer::from_file(tf.path().to_path_buf())
-            .await
-            .expect("indexer");
+        let indexer = Indexer::from_file(tf.path()).await.expect("indexer");
 
         // Set up verifier
         let cancel = CancellationToken::new();
@@ -384,7 +380,7 @@ mod tests {
         let test_path = std::env::temp_dir().join(tf.path());
 
         // Create index from the file
-        let indexer = Indexer::from_file(test_path.clone())
+        let indexer = Indexer::from_file(test_path.as_path())
             .await
             .expect("indexer");
 

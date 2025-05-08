@@ -38,7 +38,7 @@ async fn main() -> std::result::Result<(), Error> {
     //    .to_path_buf();
 
     // Index the file
-    let indexer = Indexer::from_file(file.clone()).await?;
+    let indexer = Indexer::from_file(file.as_path()).await?;
     let index = indexer.index().await?;
 
     let state_dir = tempfile::tempdir()?;

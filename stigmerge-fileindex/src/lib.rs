@@ -246,7 +246,7 @@ impl Default for Indexer {
 
 impl Indexer {
     /// Index a complete local file on disk.
-    pub async fn from_file(file: PathBuf) -> Result<Indexer> {
+    pub async fn from_file(file: &Path) -> Result<Indexer> {
         match file.try_exists() {
             Ok(true) => {}
             Ok(false) => return Err(io::Error::from(io::ErrorKind::NotFound).into()),
@@ -297,7 +297,7 @@ impl Indexer {
         }
         .await
         {
-            Indexer::from_file(file_path).await
+            Indexer::from_file(&file_path).await
         } else {
             Ok(Indexer::default())
         }

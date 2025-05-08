@@ -45,6 +45,7 @@ impl<N: Node> BlockFetcher<N> {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn fetch_block(&mut self, block: &FileBlockFetch, flush: bool) -> Result<usize> {
         // Request block from peer with retry logic
         let result = self
@@ -229,7 +230,9 @@ mod tests {
         let tf_path = tf.path().to_path_buf();
 
         // Create index from the file
-        let indexer = Indexer::from_file(tf_path.clone()).await.expect("indexer");
+        let indexer = Indexer::from_file(tf_path.as_path())
+            .await
+            .expect("indexer");
         let index = indexer.index().await.expect("index");
 
         // Delete the temp file - we'll verify BlockFetcher recreates it
@@ -318,7 +321,9 @@ mod tests {
         let tf_path = tf.path().to_path_buf();
 
         // Create index from the file
-        let indexer = Indexer::from_file(tf_path.clone()).await.expect("indexer");
+        let indexer = Indexer::from_file(tf_path.as_path())
+            .await
+            .expect("indexer");
         let index = indexer.index().await.expect("index");
 
         // Delete the temp file
@@ -391,7 +396,9 @@ mod tests {
         let tf_path = tf.path().to_path_buf();
 
         // Create index from the file
-        let indexer = Indexer::from_file(tf_path.clone()).await.expect("indexer");
+        let indexer = Indexer::from_file(tf_path.as_path())
+            .await
+            .expect("indexer");
         let index = indexer.index().await.expect("index");
 
         // Delete the temp file - we'll verify BlockFetcher recreates it

@@ -172,7 +172,7 @@ mod tests {
     async fn test_announce() {
         // Create a test file and index
         let tf = temp_file(0xa5u8, 65536);
-        let indexer = Indexer::from_file(std::env::temp_dir().join(tf.path()).into())
+        let indexer = Indexer::from_file(std::env::temp_dir().join(tf.path()).as_path())
             .await
             .expect("indexer");
         let index = indexer.index().await.expect("index");
@@ -222,7 +222,7 @@ mod tests {
     async fn test_reannounce() {
         // Create a test file and index
         let tf = temp_file(0xa5u8, 65536);
-        let indexer = Indexer::from_file(std::env::temp_dir().join(tf.path()).into())
+        let indexer = Indexer::from_file(std::env::temp_dir().join(tf.path()).as_path())
             .await
             .expect("indexer");
         let index = indexer.index().await.expect("index");
@@ -304,7 +304,7 @@ mod tests {
     async fn test_not_available_response() {
         // Create a test file and index
         let tf = temp_file(0xa5u8, 65536);
-        let indexer = Indexer::from_file(std::env::temp_dir().join(tf.path()).into())
+        let indexer = Indexer::from_file(std::env::temp_dir().join(tf.path()).as_path())
             .await
             .expect("indexer");
         let index = indexer.index().await.expect("index");

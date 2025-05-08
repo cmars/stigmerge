@@ -43,7 +43,7 @@ async fn main() -> std::result::Result<(), Error> {
     let file = args.file;
 
     // Index the file
-    let indexer = Indexer::from_file(file.clone()).await?;
+    let indexer = Indexer::from_file(file.as_path()).await?;
     let mut index = indexer.index().await?;
     let want_index_digest = index.digest()?;
 

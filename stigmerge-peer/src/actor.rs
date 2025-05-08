@@ -288,6 +288,8 @@ impl<T, N: Node> WithVeilidConnection<T, N> {
     }
 }
 
+const MAX_TRANSIENT_ERRORS: u8 = 5;
+
 impl<
         T: Runner<A> + Send + Sync + 'static,
         A: Actor<Request: Clone + Send + Sync + 'static, Response: Clone + Send + Sync + 'static>
@@ -304,10 +306,12 @@ impl<
         server_ch: ChanServer<<A as Actor>::Request, <A as Actor>::Response>,
     ) -> Result<()> {
         let state = self.state.clone();
+        let mut err_cnt = 0; // Transient error count, used to reconnect if we encounter too many.
         loop {
             {
                 let st = state.lock().await;
                 if !*st.connected.borrow() {
+                    err_cnt = 0;
                     self.disconnected(cancel.clone(), st).await?;
                     continue;
                 }
@@ -322,8 +326,10 @@ impl<
                         Err(e) => {
                             error!("{:?}", e);
                             if e.is_transient() {
-                                // TODO: backoff retry? circuit breaker?
-                                continue;
+                                err_cnt+=1;
+                                if err_cnt < MAX_TRANSIENT_ERRORS {
+                                    continue;
+                                }
                             }
                             if e.is_permanent() {
                                 cancel.cancel();

@@ -86,13 +86,8 @@ async fn main() -> std::result::Result<(), Error> {
         })
         .await?;
 
-    let (header, index, target) = match resolve_op.recv().await {
-        Some(share_resolver::Response::Index {
-            header,
-            index,
-            target,
-            ..
-        }) => (header, index, target),
+    let (header, index) = match resolve_op.recv().await {
+        Some(share_resolver::Response::Index { header, index, .. }) => (header, index),
         Some(share_resolver::Response::BadIndex { .. }) => anyhow::bail!("Bad index"),
         Some(share_resolver::Response::NotAvailable { err_msg, .. }) => anyhow::bail!(err_msg),
         _ => anyhow::bail!("Unexpected response"),
