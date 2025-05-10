@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{bail, Error, Result};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
 use tokio::{
@@ -28,7 +28,7 @@ use stigmerge_peer::{
 };
 use tracing::{debug, error, info};
 
-use crate::{cli::Commands, initialize_stderr_logging, initialize_ui_logging, Cli};
+use crate::{cli::Commands, initialize_stdout_logging, initialize_ui_logging, Cli};
 
 pub struct App {
     cli: Cli,
@@ -37,9 +37,14 @@ pub struct App {
 
 impl App {
     pub fn new(cli: Cli) -> Result<App> {
+        let no_ui = cli.no_ui();
         Ok(App {
             cli,
-            multi_progress: MultiProgress::new(),
+            multi_progress: MultiProgress::with_draw_target(if no_ui {
+                ProgressDrawTarget::hidden()
+            } else {
+                ProgressDrawTarget::stderr()
+            }),
         })
     }
 
@@ -53,7 +58,7 @@ impl App {
         }
 
         if self.cli.no_ui() {
-            initialize_stderr_logging()
+            initialize_stdout_logging()
         } else {
             initialize_ui_logging(self.multi_progress.clone());
         }

@@ -9,7 +9,7 @@ pub mod cli;
 pub use app::App;
 pub use cli::Cli;
 
-pub fn initialize_stderr_logging() {
+pub fn initialize_stdout_logging() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()

@@ -19,7 +19,7 @@ function run_seed {
 }
 
 function get_seed_key {
-    awk '/seeding share_key=/' ${seed_dir}/seed.log | sed 's/.*share_key="//;s/".*//g;'
+    awk '/announced share, key: /' ${seed_dir}/seed.log | sed 's/.* announced share, key: //;'
 }
 
 run_seed &
@@ -42,7 +42,18 @@ else
     echo "got seed key ${seed_key}"
 fi
 
-(cd ${fetch_dir}; ${stigmerge} --no-ui fetch ${seed_key})
-fetch_digest=$(sha256sum ${fetch_dir}/testfile | cut -d' ' -f1)
+(cd ${fetch_dir}; ${stigmerge} --no-ui fetch ${seed_key}) &
+fetch_pid=$!
+trap "kill ${seed_pid} ${fetch_pid}; rm -rf ${seed_dir} ${fetch_dir}" EXIT
+
+for i in {1..20}; do
+    if [ -e ${fetch_dir}/testfile ]; then
+        fetch_digest=$(sha256sum ${fetch_dir}/testfile | cut -d' ' -f1)
+        if [ "${digest}" = "${fetch_digest}" ]; then
+            break
+        fi
+    fi
+    sleep ${i}
+done
 
 [ "${digest}" = "${fetch_digest}" ]
