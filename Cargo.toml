@@ -4,7 +4,6 @@ members = [
     "stigmerge-fileindex",
     "stigmerge-peer",
     "stigmerge",
-    "discovery-test",
 ]
 
 [workspace.package]

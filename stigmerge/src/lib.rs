@@ -9,10 +9,12 @@ pub mod cli;
 pub use app::App;
 pub use cli::Cli;
 
-pub fn initialize_stderr_logging() {
+pub fn initialize_stdout_logging() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_level(true)
                 .with_ansi(false)
                 .with_writer(std::io::stdout),
         )
@@ -27,10 +29,17 @@ pub fn initialize_stderr_logging() {
 pub fn initialize_ui_logging(multi_progress: MultiProgress) {
     let writer = ChannelWriter::new(multi_progress);
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(move || writer.clone()))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(true)
+                .with_level(true)
+                .with_target(true)
+                .with_writer(move || writer.clone()),
+        )
         .with(
             EnvFilter::builder()
                 .with_default_directive("stigmerge=debug".parse().unwrap())
+                .with_default_directive("stigmerge_peer=debug".parse().unwrap())
                 .from_env_lossy(),
         )
         .init();

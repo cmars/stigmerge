@@ -1,137 +1,134 @@
-use std::{path::PathBuf, time::Duration};
+use std::{sync::Arc, time::Duration};
 
-use anyhow::{Error, Result};
-use backoff::{backoff::Backoff, ExponentialBackoff};
-use color_eyre::owo_colors::OwoColorize;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use anyhow::{bail, Error, Result};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
-use tokio::{select, spawn, time::sleep};
+use tokio::{
+    select,
+    sync::{watch, RwLock},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
+use veilid_core::TypedKey;
 
-use stigmerge_peer::{new_routing_context, Fetcher, Observable, Peer, PeerState, Seeder, Veilid};
-use tracing::error;
+use stigmerge_peer::{
+    actor::{ConnectionState, Operator, UntilCancelled, WithVeilidConnection},
+    block_fetcher::BlockFetcher,
+    content_addressable::ContentAddressable,
+    fetcher::{self, Clients as FetcherClients, Fetcher},
+    have_announcer::HaveAnnouncer,
+    new_routing_context,
+    node::{Node, Veilid},
+    piece_verifier::PieceVerifier,
+    seeder::{self, Seeder},
+    share_announcer::{self, ShareAnnouncer},
+    share_resolver::{self, ShareResolver},
+    types::ShareInfo,
+};
+use tracing::{debug, error, info};
 
-use crate::{cli::Commands, initialize_stderr_logging, initialize_ui_logging, Cli};
+use crate::{cli::Commands, initialize_stdout_logging, initialize_ui_logging, Cli};
 
 pub struct App {
     cli: Cli,
-    spinner_style: ProgressStyle,
-    bar_style: ProgressStyle,
-    bytes_style: ProgressStyle,
-    msg_style: ProgressStyle,
+    multi_progress: MultiProgress,
 }
-
-type AppPeer = Observable<Veilid>;
 
 impl App {
     pub fn new(cli: Cli) -> Result<App> {
+        let no_ui = cli.no_ui();
         Ok(App {
             cli,
-            spinner_style: ProgressStyle::with_template("{prefix:.bold.dim} {spinner} {wide_msg}")?
-                .tick_chars("⣾⣷⣯⣟⡿⢿⣻⣽"),
-            bar_style: ProgressStyle::with_template(
-                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-            )?,
-            bytes_style: ProgressStyle::with_template(
-                "[{elapsed_precise}] {wide_bar:.cyan/blue} {bytes}/{total_bytes} {msg}",
-            )?,
-            msg_style: ProgressStyle::with_template("{prefix:.bold} {msg}")?,
+            multi_progress: MultiProgress::with_draw_target(if no_ui {
+                ProgressDrawTarget::hidden()
+            } else {
+                ProgressDrawTarget::stderr()
+            }),
         })
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn run(&mut self) -> Result<()> {
-        let m = MultiProgress::new();
-        let _ = m.println(format!("🦇 stigmerge {}", env!("CARGO_PKG_VERSION")));
+        self.multi_progress
+            .println(format!("🐝 stigmerge {}", env!("CARGO_PKG_VERSION")))?;
 
         if self.cli.version() {
             return Ok(());
         }
 
         if self.cli.no_ui() {
-            initialize_stderr_logging()
+            initialize_stdout_logging()
         } else {
-            initialize_ui_logging(m.clone());
+            initialize_ui_logging(self.multi_progress.clone());
         }
 
-        let mut peer = self.new_peer().await?;
+        // Set up Veilid node
+        let state_dir = self.cli.state_dir()?;
+        let (routing_context, update_tx, _) = new_routing_context(&state_dir, None).await?;
+        let node = Veilid::new(routing_context, update_tx).await?;
+
+        let res = self.run_with_node(node.clone()).await;
+        let _ = node.shutdown().await;
+        if let Err(e) = res {
+            error!(err = e.to_string());
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, err)]
+    async fn run_with_node<T: Node + Sync + Send + 'static>(&self, node: T) -> Result<()> {
+        let mut tasks = JoinSet::new();
+
+        // Set up cancellation token
         let cancel = CancellationToken::new();
 
-        let mut peer_progress_rx = peer.subscribe_peer_progress();
-        let peer_progress_bar = m.add(ProgressBar::new(0u64));
-        peer_progress_bar.set_style(self.spinner_style.clone());
-        peer_progress_bar.set_prefix("🟥");
-        peer_progress_bar.enable_steady_tick(Duration::from_millis(100));
-        let peer_progress_cancel = cancel.clone();
-        let (peer_spinner_style, peer_msg_style) =
-            (self.spinner_style.clone(), self.msg_style.clone());
-        spawn(async move {
+        // Set up connection state
+        let conn_state_inner = ConnectionState::new();
+        let mut conn_state_rx = conn_state_inner.subscribe();
+        let conn_state = Arc::new(tokio::sync::Mutex::new(conn_state_inner));
+
+        // Set up connection status progress bar
+        let conn_progress_bar = self.multi_progress.add(ProgressBar::new_spinner());
+        conn_progress_bar.set_message("Connecting to Veilid network");
+        conn_progress_bar.set_prefix("📶");
+        conn_progress_bar.enable_steady_tick(Duration::from_millis(100));
+
+        // Monitor connection state
+        let conn_cancel = cancel.clone();
+        tasks.spawn(async move {
             loop {
                 select! {
-                    _ = peer_progress_cancel.cancelled() => {
+                    _ = conn_cancel.cancelled() => {
                         return Ok::<(), Error>(());
                     }
-                    peer_result = peer_progress_rx.changed() => {
-                        peer_result?;
-                        let peer_progress = peer_progress_rx.borrow_and_update();
-                        if let PeerState::Connected = peer_progress.state {
-                            peer_progress_bar.set_style(peer_msg_style.clone());
-                            peer_progress_bar.set_prefix("🟢");
-                            peer_progress_bar.disable_steady_tick();
-                            peer_progress_bar.finish_with_message("Connected to Veilid network");
-                            continue;
-                        } else if peer_progress_bar.is_finished() {
-                            peer_progress_bar.reset();
-                            peer_progress_bar.set_style(peer_spinner_style.clone());
-                            peer_progress_bar.enable_steady_tick(Duration::from_millis(100));
-                            peer_progress_bar.set_prefix("🟥");
+                    res = conn_state_rx.changed() => {
+                        res?;
+                        if *conn_state_rx.borrow() {
+                            conn_progress_bar.disable_steady_tick();
+                            conn_progress_bar.set_style(ProgressStyle::with_template("{prefix} {msg}")?);
+                            conn_progress_bar.set_message("Connected to Veilid network");
+                        } else {
+                            conn_progress_bar.enable_steady_tick(Duration::from_millis(100));
+                            conn_progress_bar.set_style(ProgressStyle::with_template("{spinner} {msg}")?);
+                            conn_progress_bar.set_message("Disconnected from Veilid network");
                         }
-                        let (prefix, message) = match peer_progress.state {
-                            PeerState::Starting => ("🟥","Starting peer"),
-                            PeerState::Connecting => ("🔴","Connecting to Veilid network"),
-                            PeerState::Announcing => ("🟡","Announcing share"),
-                            PeerState::Resolving => ("🟡","Resolving share"),
-                            _ => continue,
-                        };
-                        peer_progress_bar.set_prefix(prefix);
-                        peer_progress_bar.set_message(message);
-                        peer_progress_bar.update(|pb| {
-                            pb.set_len(peer_progress.length);
-                            pb.set_pos(peer_progress.position);
-                        });
                     }
                 }
             }
         });
 
-        let mut backoff = ExponentialBackoff::default();
-        loop {
-            let result = peer.reset().await;
-            if let Err(e) = result {
-                if !e.is_resetable() {
-                    error!(err = format!("{}", e), "not resetable");
-                    cancel.cancel();
-                    return Err(e.into());
-                }
-                match backoff.next_backoff() {
-                    Some(delay) => sleep(delay).await,
-                    None => {
-                        cancel.cancel();
-                        return Err(Error::msg("peer reset retries exceeded"));
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-
+        // Set up ctrl-c handler
         let ctrl_c_cancel = cancel.clone();
-        let canceller = tokio::spawn(async move {
+        tasks.spawn(async move {
             loop {
                 tokio::select! {
                     _ = ctrl_c_cancel.cancelled() => {
                         return Ok::<(), Error>(())
                     }
                     _ = tokio::signal::ctrl_c() => {
+                        info!("Received ctrl-c, shutting down...");
                         ctrl_c_cancel.cancel();
                         return Ok(())
                     }
@@ -139,210 +136,305 @@ impl App {
             }
         });
 
-        let result = match self.cli.commands {
+        let root = match self.cli.commands {
             Commands::Fetch {
-                dht_key: ref share_key,
-                ref root,
-            } => self.do_fetch(m, peer, cancel, share_key, root).await,
-            Commands::Seed { ref file } => self.do_seed(m, peer, cancel, file).await,
-            _ => {
-                cancel.cancel();
-                Err(Error::msg("invalid command"))
-            }
+                ref output_path, ..
+            } => output_path.into(),
+            Commands::Seed { ref path } => path
+                .absolutize()?
+                .parent()
+                .ok_or(Error::msg("expected parent directory"))?
+                .to_path_buf(),
+            _ => bail!("unexpected subcommand"),
         };
-        let _ = canceller.await?;
-        Ok(result?)
-    }
 
-    async fn new_peer(&self) -> Result<AppPeer> {
-        let (routing_context, update_tx, _) =
-            new_routing_context(&self.cli.state_dir()?, None).await?;
-        let peer = Observable::new(Veilid::new(routing_context, update_tx).await?);
-        Ok(peer)
-    }
+        debug!("root: {}", root.to_string_lossy());
 
-    async fn do_fetch(
-        &self,
-        m: MultiProgress,
-        peer: AppPeer,
-        cancel: CancellationToken,
-        share_key: &str,
-        root: &str,
-    ) -> Result<()> {
-        let mut fetcher = Fetcher::from_dht(peer.clone(), share_key, root).await?;
-
-        // Index an existing partial fetch.
-        let indexer = Indexer::from_wanted(fetcher.want_index()).await?;
-        self.add_index_progress_bars(&indexer, &m, cancel.clone());
-
-        // Resume a prior fetch
-        fetcher.set_have_index(indexer.index().await?);
-
-        let fetch_progress = m.add(
-            ProgressBar::new(0u64)
-                .with_style(self.spinner_style.clone())
-                .with_prefix("📥"),
+        // Set up share resolver
+        let share_resolver = ShareResolver::new(node.clone());
+        let target_rx = share_resolver.subscribe_target();
+        let mut share_resolve_op = Operator::new(
+            cancel.clone(),
+            share_resolver,
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
-        fetch_progress.set_message(format!(
-            "Fetching {} into {}",
-            fetcher.file().bold().bright_cyan(),
-            PathBuf::from(root).canonicalize()?.to_string_lossy()
-        ));
-        let fetch_progress_spinner = fetch_progress.clone();
 
-        let progress_cancel = cancel.clone();
-        let mut fetch_progress_rx = fetcher.subscribe_fetch_progress();
-        let mut verify_progress_rx = fetcher.subscribe_verify_progress();
-        let fetch_progress_bar = m.add(ProgressBar::new(0u64));
-        fetch_progress_bar.set_style(self.bytes_style.clone());
-        fetch_progress_bar.set_message("Fetching blocks");
-        let verify_progress_bar = m.add(ProgressBar::new(0u64));
-        verify_progress_bar.set_style(self.bar_style.clone());
-        verify_progress_bar.set_message("Verifying blocks");
-        spawn(async move {
-            loop {
-                select! {
-                    _ = progress_cancel.cancelled() => {
-                        return Ok::<(), Error>(())
-                    }
-                    fetch_result = fetch_progress_rx.changed() => {
-                        fetch_result?;
-                        let fetch_progress = fetch_progress_rx.borrow_and_update();
-                        fetch_progress_spinner.update(|pb| {
-                            pb.set_len(fetch_progress.length);
-                            pb.set_pos(fetch_progress.position);
-                        });
-                        fetch_progress_bar.update(|pb| {
-                            pb.set_len(fetch_progress.length);
-                            pb.set_pos(fetch_progress.position);
-                        });
-                        if fetch_progress.position == fetch_progress.length {
-                            fetch_progress_bar.finish_with_message("Fetch complete");
+        // Resolve bootstrap share keys and want_index_digest
+        let mut want_index = None;
+        match &self.cli.commands {
+            Commands::Fetch {
+                share_keys,
+                index_digest,
+                ..
+            } => {
+                for share_key_str in share_keys.iter() {
+                    debug!("resolving share key: {share_key_str}");
+                    let share_key: TypedKey = share_key_str.parse()?;
+                    let want_index_digest = match index_digest {
+                        Some(digest_string) => {
+                            let digest = hex::decode(digest_string)?;
+                            Some(
+                                digest
+                                    .try_into()
+                                    .map_err(|_| Error::msg("Invalid digest length"))?,
+                            )
                         }
-                    }
-                    verify_result = verify_progress_rx.changed() => {
-                        verify_result?;
-                        let verify_progress = verify_progress_rx.borrow_and_update();
-                        verify_progress_bar.update(|pb| {
-                            pb.set_len(verify_progress.length);
-                            pb.set_pos(verify_progress.position);
-                        });
-                        if verify_progress.position == verify_progress.length {
-                            verify_progress_bar.finish_with_message("Verified");
+                        None => None,
+                    };
+
+                    // Resolve the index from the bootstrap peer
+                    share_resolve_op
+                        .send(share_resolver::Request::Index {
+                            key: share_key.clone(),
+                            want_index_digest,
+                            root: root.clone(),
+                        })
+                        .await?;
+                    let index = match share_resolve_op.recv().await {
+                        Some(share_resolver::Response::Index { index, .. }) => index,
+                        Some(share_resolver::Response::BadIndex { .. }) => {
+                            anyhow::bail!("Bad index")
                         }
-                    }
+                        Some(share_resolver::Response::NotAvailable { err_msg, .. }) => {
+                            anyhow::bail!(err_msg)
+                        }
+                        _ => anyhow::bail!("Unexpected response"),
+                    };
+                    want_index.get_or_insert(index);
                 }
             }
-        });
-
-        let fetch_result = fetcher.fetch(cancel.clone()).await;
-        let msg = match fetch_result {
-            Ok(()) => "✅ Fetch complete",
-            Err(stigmerge_peer::Error::Fault(stigmerge_peer::Unexpected::Cancelled)) => {
-                "❌ Fetch cancelled"
+            Commands::Seed { path } => {
+                let indexer = Indexer::from_file(path).await?;
+                self.add_seed_indexer_progress(
+                    &cancel,
+                    &mut tasks,
+                    indexer.subscribe_index_progress(),
+                    indexer.subscribe_digest_progress(),
+                )?;
+                let mut index = indexer.index().await?;
+                info!(index_digest = hex::encode(index.digest()?));
+                want_index.get_or_insert(index);
             }
-            Err(_) => "❌ Fetch failed",
+            c => bail!("unexpected subcommand: {:?}", c),
         };
-        fetch_progress.finish_with_message(msg);
+        let index = want_index.ok_or(Error::msg("failed to resolve index"))?;
+        debug!("resolved index");
 
-        cancel.cancel();
-        peer.shutdown().await?;
-
-        let _ = m.println(msg);
-        Ok(())
-    }
-
-    async fn do_seed(
-        &self,
-        m: MultiProgress,
-        peer: AppPeer,
-        cancel: CancellationToken,
-        file: &str,
-    ) -> Result<()> {
-        let indexer = Indexer::from_file(file.into()).await?;
-
-        self.add_index_progress_bars(&indexer, &m, cancel.clone());
-
-        let seeder = Seeder::new(peer.clone(), indexer.index().await?).await?;
-        let share_key = seeder.share_key();
-        let seed_progress = m.add(
-            ProgressBar::new(0u64)
-                .with_style(self.msg_style.clone())
-                .with_prefix("🌱"),
+        // Announce our own share of the index
+        let mut share_announce_op = Operator::new(
+            cancel.clone(),
+            ShareAnnouncer::new(node.clone(), index.clone()),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
+        share_announce_op
+            .send(share_announcer::Request::Announce)
+            .await?;
+        let (share_key, share_header) = match share_announce_op.recv().await {
+            Some(share_announcer::Response::Announce { key, header, .. }) => (key, header),
+            Some(share_announcer::Response::NotAvailable) => {
+                anyhow::bail!("failed to announce share")
+            }
+            None => todo!(),
+        };
+
+        info!("announced share, key: {share_key}");
+
+        let piece_verifier = PieceVerifier::new(Arc::new(RwLock::new(index.clone())));
+        let verified_rx = piece_verifier.subscribe_verified();
+        let piece_verifier_op = Operator::new(cancel.clone(), piece_verifier, UntilCancelled);
+
+        // Announce our own have-map as we fetch, at our announced share's have-map key
+        let have_announcer = Operator::new(
+            cancel.clone(),
+            // TODO: should use the share key publicly; hide this from the actor / op interface
+            HaveAnnouncer::new(node.clone(), share_header.have_map().unwrap().key().clone()),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        );
+
+        let share = ShareInfo {
+            want_index: index.clone(),
+            root,
+            header: share_header.clone(),
+        };
+
+        // Set up fetcher dependencies
+        let block_fetcher = Operator::new_clone_pool(
+            cancel.clone(),
+            BlockFetcher::new(
+                node.clone(),
+                Arc::new(RwLock::new(index.clone())),
+                index.root().to_path_buf(),
+                target_rx,
+            ),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+            self.cli.fetchers,
+        );
+
+        let fetcher_clients = FetcherClients {
+            block_fetcher,
+            piece_verifier: piece_verifier_op,
+            have_announcer,
+        };
+
+        // Create and run fetcher
+        info!("Starting fetch...");
+
+        let fetcher = Fetcher::new(share.clone(), fetcher_clients);
+        self.add_fetch_progress(&cancel, &mut tasks, fetcher.subscribe_fetcher_status())?;
+        tasks.spawn(fetcher.run(cancel.clone()));
+
+        // Set up seeder
+        let seeder_clients = seeder::Clients {
+            update_rx: node.subscribe_veilid_update(),
+            verified_rx,
+        };
+
+        let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
+        let seeder_op = Operator::new(
+            cancel.clone(),
+            seeder,
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        );
+        tasks.spawn(async move { seeder_op.join().await? });
+
+        info!("Seeding until ctrl-c...");
+        let seed_progress = self.multi_progress.add(ProgressBar::new_spinner());
+        seed_progress.set_style(ProgressStyle::with_template("{prefix} {msg}")?);
+        seed_progress.set_prefix("🌱");
         seed_progress.set_message(format!(
-            "Seeding {} to {}",
-            file.bold().bright_cyan(),
-            share_key.clone().bold().bright_cyan()
+            "Seeding {}{} to {}",
+            index
+                .files()
+                .first()
+                .map(|f| f.path().to_string_lossy())
+                .unwrap(),
+            if index.files().len() > 1 { "..." } else { "" },
+            share_key.to_string()
         ));
-        let info_progress = m.add(
-            ProgressBar::new(0u64)
-                .with_style(self.msg_style.clone())
-                .with_prefix("🎁"),
-        );
-        info_progress.set_message(format!(
-            "Anyone may download with {}",
-            format!("stigmerge fetch {}", share_key)
-                .bold()
-                .bright_magenta()
-        ));
-        seeder.seed(cancel.clone()).await?;
-        seed_progress.finish();
 
-        cancel.cancel();
-        peer.shutdown().await?;
+        // Keep seeding until ctrl-c
+        select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received ctrl-c, shutting down...");
+                cancel.cancel();
+            }
+            _ = tasks.join_all() => {
+                info!("tasks complete");
+            }
+        }
 
         Ok(())
     }
 
-    fn add_index_progress_bars(
+    fn add_fetch_progress(
         &self,
-        indexer: &Indexer,
-        m: &MultiProgress,
-        cancel: CancellationToken,
-    ) {
+        cancel: &CancellationToken,
+        tasks: &mut JoinSet<Result<()>>,
+        mut subscribe_fetcher_status: watch::Receiver<fetcher::Status>,
+    ) -> Result<()> {
+        let fetch_progress = self.multi_progress.add(ProgressBar::new_spinner());
+        fetch_progress.set_style(ProgressStyle::with_template(
+            "{msg} {wide_bar} {binary_bytes}/{binary_total_bytes}",
+        )?);
         let progress_cancel = cancel.clone();
-        let mut index_progress_rx = indexer.subscribe_index_progress();
-        let mut digest_progress_rx = indexer.subscribe_digest_progress();
-        let index_progress_bar = m.add(ProgressBar::new(0u64));
-        index_progress_bar.set_style(self.bytes_style.clone());
-        index_progress_bar.set_message("Indexing share");
-        let digest_progress_bar = m.add(ProgressBar::new(0u64));
-        digest_progress_bar.set_style(self.bytes_style.clone());
-        digest_progress_bar.set_message("Calculating content digest");
-        let index_multi_bar = m.clone();
-        spawn(async move {
+        tasks.spawn(async move {
             loop {
                 select! {
                     _ = progress_cancel.cancelled() => {
-                        return Ok::<(), Error>(())
+                        return Ok(())
                     }
-                    index_result = index_progress_rx.changed() => {
-                        index_result?;
-                        let index_progress = index_progress_rx.borrow_and_update();
-                        index_progress_bar.update(|pb| {
-                            pb.set_len(index_progress.length);
-                            pb.set_pos(index_progress.position);
-                        });
-                        if index_progress.position == index_progress.length {
-                            index_progress_bar.finish_with_message("Indexed");
-                            index_multi_bar.remove(&index_progress_bar);
-                        }
-                    }
-                    digest_result = digest_progress_rx.changed() => {
-                        digest_result?;
-                        let digest_progress = digest_progress_rx.borrow_and_update();
-                        digest_progress_bar.update(|pb| {
-                            pb.set_len(digest_progress.length);
-                            pb.set_pos(digest_progress.position);
-                        });
-                        if digest_progress.position == digest_progress.length {
-                            digest_progress_bar.finish_with_message("Digest complete");
-                            index_multi_bar.remove(&digest_progress_bar);
+                    res = subscribe_fetcher_status.changed() => {
+                        res?;
+                        match *subscribe_fetcher_status.borrow_and_update() {
+                            fetcher::Status::IndexProgress { position, length } => {
+                                fetch_progress.set_message("Indexing");
+                                fetch_progress.set_position(position);
+                                fetch_progress.set_length(length);
+                            }
+                            fetcher::Status::DigestProgress { position, length } => {
+                                fetch_progress.set_message("Comparing");
+                                fetch_progress.set_position(position);
+                                fetch_progress.set_length(length);
+                            }
+                            fetcher::Status::FetchProgress { position, length } => {
+                                fetch_progress.set_message("Fetching");
+                                fetch_progress.set_position(position);
+                                fetch_progress.set_length(length);
+                            }
+                            fetcher::Status::VerifyProgress { position, length } => {
+                                fetch_progress.set_message("Comparing");
+                                fetch_progress.set_position(position);
+                                fetch_progress.set_length(length);
+                            }
+                            fetcher::Status::Done => {
+                                fetch_progress.finish_with_message("Fetch complete");
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
         });
+        Ok(())
+    }
+
+    fn add_seed_indexer_progress(
+        &self,
+        cancel: &CancellationToken,
+        tasks: &mut JoinSet<Result<()>>,
+        mut subscribe_index_progress: watch::Receiver<stigmerge_fileindex::Progress>,
+        mut subscribe_digest_progress: watch::Receiver<stigmerge_fileindex::Progress>,
+    ) -> Result<()> {
+        let indexer_progress = self.multi_progress.add(ProgressBar::new_spinner());
+        indexer_progress.set_style(ProgressStyle::with_template(
+            "{wide_bar} {binary_bytes}/{binary_total_bytes}",
+        )?);
+        let verifier_progress = self.multi_progress.add(ProgressBar::new_spinner());
+        verifier_progress.set_style(ProgressStyle::with_template(
+            "{wide_bar} {binary_bytes}/{binary_total_bytes}",
+        )?);
+        let indexer_cancel = cancel.clone();
+        tasks.spawn(async move {
+            loop {
+                select! {
+                    _ = indexer_cancel.cancelled() => {
+                        return Ok(())
+                    }
+                    res = subscribe_index_progress.changed() => {
+                        res?;
+                        let progress = subscribe_index_progress.borrow_and_update();
+                        if progress.length == progress.position {
+                            indexer_progress.finish_and_clear();
+                            return Ok(());
+                        }
+                        indexer_progress.set_message("Indexing");
+                        indexer_progress.set_length(progress.length);
+                        indexer_progress.set_position(progress.position);
+                    }
+                }
+            }
+        });
+        let verifier_cancel = cancel.clone();
+        tasks.spawn(async move {
+            loop {
+                select! {
+                    _ = verifier_cancel.cancelled() => {
+                        return Ok(());
+                    }
+                    res = subscribe_digest_progress.changed() => {
+                        res?;
+                        let progress = subscribe_digest_progress.borrow_and_update();
+                        if progress.length == progress.position {
+                            verifier_progress.finish_and_clear();
+                            return Ok(());
+                        }
+                        verifier_progress.set_message("Verifying");
+                        verifier_progress.set_length(progress.length);
+                        verifier_progress.set_position(progress.position);
+                    }
+                }
+            }
+        });
+        Ok(())
     }
 }

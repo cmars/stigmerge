@@ -76,6 +76,7 @@ async fn main() -> Result<()> {
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn tokio_main() -> Result<()> {
     let cli = Cli::parse();
     let mut app = App::new(cli)?;

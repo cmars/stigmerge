@@ -2,9 +2,9 @@ use std::io::Write;
 
 use tempfile::NamedTempFile;
 
-mod stub_peer;
+mod stub_node;
 
-pub use stub_peer::StubPeer;
+pub use stub_node::StubNode;
 
 pub fn temp_file(pattern: u8, count: usize) -> NamedTempFile {
     let mut tempf = NamedTempFile::new().expect("temp file");

@@ -1,4 +1,4 @@
-use std::io::IsTerminal;
+use std::{io::IsTerminal, path::PathBuf};
 
 use anyhow::{Error, Result};
 use clap::{arg, Parser, Subcommand};
@@ -15,6 +15,9 @@ pub struct Cli {
     #[arg(long, env)]
     pub state_dir: Option<String>,
 
+    #[arg(long = "fetchers", short = 'n', default_value = "50")]
+    pub fetchers: usize,
+
     #[command(subcommand)]
     pub commands: Commands,
 }
@@ -30,10 +33,27 @@ impl Cli {
         }
         match self.commands {
             Commands::Fetch {
-                ref dht_key,
-                ref root,
-            } => self.state_dir_for(format!("get:{}:{}", dht_key, root)),
-            Commands::Seed { ref file } => self.state_dir_for(format!("seed:{}", file.to_owned())),
+                ref share_keys,
+                ref index_digest,
+                ref output_path,
+                ..
+            } => {
+                if share_keys.len() == 0 {
+                    return Err(Error::msg("at least one share key must be provided"));
+                }
+                let key_match = match index_digest {
+                    Some(digest) => digest,
+                    None => &share_keys[0],
+                };
+                self.state_dir_for(format!(
+                    "get:{}:{}",
+                    key_match,
+                    output_path.to_string_lossy()
+                ))
+            }
+            Commands::Seed { ref path } => {
+                self.state_dir_for(format!("seed:{}", path.to_string_lossy()))
+            }
             _ => Err(Error::msg("invalid command")),
         }
     }
@@ -67,12 +87,16 @@ impl Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     Fetch {
-        dht_key: String,
-        #[arg(default_value = ".")]
-        root: String,
+        share_keys: Vec<String>,
+
+        #[arg(long = "index-digest", short = 'i')]
+        index_digest: Option<String>,
+
+        #[arg(long = "output-path", short = 'o', default_value = ".")]
+        output_path: PathBuf,
     },
     Seed {
-        file: String,
+        path: PathBuf,
     },
     Version,
 }

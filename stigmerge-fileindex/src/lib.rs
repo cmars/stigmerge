@@ -1,6 +1,7 @@
 use std::{
     cmp::min,
     collections::HashMap,
+    convert::TryInto,
     io,
     path::{Path, PathBuf},
 };
@@ -80,6 +81,12 @@ impl Index {
             },
             files: vec![],
         }
+    }
+
+    /// Canonicalize the index, by sorting items into a deterministic and
+    /// reproducible order.
+    pub fn canonicalize(&mut self) {
+        self.files.sort_by(|a, b| a.path.cmp(&b.path));
     }
 
     /// Reconcile an index calculated over actual filesystem state with desired
@@ -240,7 +247,7 @@ impl Default for Indexer {
 
 impl Indexer {
     /// Index a complete local file on disk.
-    pub async fn from_file(file: PathBuf) -> Result<Indexer> {
+    pub async fn from_file(file: &Path) -> Result<Indexer> {
         match file.try_exists() {
             Ok(true) => {}
             Ok(false) => return Err(io::Error::from(io::ErrorKind::NotFound).into()),
@@ -276,7 +283,7 @@ impl Indexer {
         }
 
         let file_path = want.root.join(want.files[0].path());
-        let file_len = want.files[0].contents().length() as u64;
+        let file_len = TryInto::<u64>::try_into(want.files[0].contents().length()).unwrap();
         if let Ok(_) = async {
             // Truncate an existing file to the wanted file length
             let fh = OpenOptions::new()
@@ -291,7 +298,7 @@ impl Indexer {
         }
         .await
         {
-            Indexer::from_file(file_path).await
+            Indexer::from_file(&file_path).await
         } else {
             Ok(Indexer::default())
         }
@@ -353,8 +360,9 @@ impl Indexer {
         let (result_tx, result_rx) = unbounded::<ScanResult>();
         let mut scanners = JoinSet::new();
 
-        let n_tasks = file_meta.len() as usize / INDEX_BUFFER_SIZE
-            + if file_meta.len() as usize % INDEX_BUFFER_SIZE > 0 {
+        let file_len = TryInto::<usize>::try_into(file_meta.len()).unwrap();
+        let n_tasks = file_len / INDEX_BUFFER_SIZE
+            + if file_len % INDEX_BUFFER_SIZE > 0 {
                 1
             } else {
                 0
@@ -393,7 +401,7 @@ impl Indexer {
 
                     digest_progress_tx.send_modify(|p| {
                         p.length = file_len;
-                        p.position += rd as u64;
+                        p.position += TryInto::<u64>::try_into(rd).unwrap();
                     });
                 }
                 if total_rd == 0 {
@@ -410,8 +418,8 @@ impl Indexer {
                 recv_result = result_rx.recv_async() => {
                     let scan_result = recv_result?;
                     self.index_progress_tx.send_modify(|p| {
-                        p.length = file_meta.len() as u64;
-                        p.position += scan_result.piece.length as u64;
+                        p.length = TryInto::<u64>::try_into(file_meta.len()).unwrap();
+                        p.position += TryInto::<u64>::try_into(scan_result.piece.length).unwrap();
                     });
                     scan_results.push(scan_result);
                 }
@@ -663,267 +671,10 @@ impl PayloadPiece {
 }
 
 #[cfg(test)]
-mod from_file_tests {
-    use std::io::Write;
-
-    use hex_literal::hex;
-    use tempfile::NamedTempFile;
-
-    use super::*;
-
-    pub fn temp_file(pattern: u8, count: usize) -> NamedTempFile {
-        let mut tempf = NamedTempFile::new().expect("temp file");
-        let contents = vec![pattern; count];
-        tempf.write(contents.as_slice()).expect("write temp file");
-        tempf
-    }
-
-    #[tokio::test]
-    async fn single_file_index() {
-        let tempf = temp_file(b'.', 1049600);
-
-        let indexer = Indexer::from_file(tempf.path().into())
-            .await
-            .expect("Index::from_file");
-        let index = indexer.index().await.expect("index");
-
-        assert_eq!(
-            index.root().to_owned(),
-            tempf.path().parent().unwrap().to_owned()
-        );
-
-        // Index files
-        assert_eq!(index.files().len(), 1);
-        assert_eq!(
-            index.files()[0].path().to_owned(),
-            tempf.path().file_name().unwrap().to_owned()
-        );
-        assert_eq!(
-            index.files()[0].contents(),
-            PayloadSlice {
-                piece_offset: 0,
-                starting_piece: 0,
-                length: 1049600,
-            }
-        );
-
-        // Index payload
-        assert_eq!(
-            index.payload().digest(),
-            hex!("529df3a7e7acab0e3b53e7cd930faa22e62cd07a948005b1c3f7f481f32a7297")
-        );
-        assert_eq!(index.payload().length(), 1049600);
-        assert_eq!(index.payload().pieces().len(), 2);
-        assert_eq!(index.payload().pieces()[0].length(), 1048576);
-        assert_eq!(
-            index.payload().pieces()[0].digest(),
-            hex!("153faf1f2a007097d33120bbee6944a41cb8be7643c1222f6bc6bc69ec31688f")
-        );
-        assert_eq!(index.payload().pieces()[1].length(), 1024);
-        assert_eq!(
-            index.payload().pieces()[1].digest(),
-            hex!("ca33403cfcb21bae20f21507475a3525c7f4bd36bb2a7074891e3307c5fd47d5")
-        );
-    }
-
-    #[tokio::test]
-    async fn empty_file_index() {
-        let tempf = temp_file(b'.', 0);
-
-        let indexer = Indexer::from_file(tempf.path().into())
-            .await
-            .expect("Index::from_file");
-        let index = indexer.index().await.expect("index");
-
-        assert_eq!(
-            index.root().to_owned(),
-            tempf.path().parent().unwrap().to_owned()
-        );
-
-        // Index files
-        assert_eq!(index.files().len(), 1);
-        assert_eq!(
-            index.files()[0].path().to_owned(),
-            tempf.path().file_name().unwrap().to_owned()
-        );
-        assert_eq!(
-            index.files()[0].contents(),
-            PayloadSlice {
-                piece_offset: 0,
-                starting_piece: 0,
-                length: 0,
-            }
-        );
-        assert_eq!(index.payload().pieces().len(), 0);
-        assert_eq!(
-            index.payload().digest(),
-            hex!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-        );
-    }
-
-    #[tokio::test]
-    async fn large_file_index() {
-        let tempf = temp_file(b'.', 134217728);
-
-        let indexer = Indexer::from_file(tempf.path().into())
-            .await
-            .expect("Index::from_file");
-        let index = indexer.index().await.expect("index");
-
-        assert_eq!(
-            index.root().to_owned(),
-            tempf.path().parent().unwrap().to_owned()
-        );
-
-        // Index files
-        assert_eq!(index.files().len(), 1);
-        assert_eq!(
-            index.files()[0].path().to_owned(),
-            tempf.path().file_name().unwrap().to_owned()
-        );
-        assert_eq!(index.payload().pieces().len(), 128);
-        assert_eq!(
-            index.files()[0].contents(),
-            PayloadSlice {
-                piece_offset: 0,
-                starting_piece: 0,
-                length: 134217728,
-            }
-        );
-    }
-}
+mod from_file_tests;
 
 #[cfg(test)]
-mod want_have_tests {
-    use super::*;
-    use std::path::PathBuf;
+mod want_have_tests;
 
-    // Helper function to create an Index with a single file
-    fn create_index(root: PathBuf, file_path: PathBuf, piece_digests: Vec<[u8; 32]>) -> Index {
-        let pieces: Vec<PayloadPiece> = piece_digests
-            .into_iter()
-            .map(|digest| PayloadPiece {
-                digest,
-                length: PIECE_SIZE_BYTES,
-            })
-            .collect();
-        let payload = PayloadSpec {
-            digest: [0; 32], // Placeholder, not used in this test
-            length: pieces.len() * PIECE_SIZE_BYTES,
-            pieces,
-        };
-        let file_spec = FileSpec {
-            path: file_path,
-            contents: PayloadSlice {
-                starting_piece: 0,
-                piece_offset: 0,
-                length: payload.length,
-            },
-        };
-        Index {
-            root,
-            payload,
-            files: vec![file_spec],
-        }
-    }
-
-    fn create_index_partial_block(
-        root: PathBuf,
-        file_path: PathBuf,
-        piece_digests: Vec<[u8; 32]>,
-    ) -> Index {
-        let pieces: Vec<PayloadPiece> = piece_digests
-            .into_iter()
-            .map(|digest| PayloadPiece {
-                digest,
-                length: PIECE_SIZE_BYTES,
-            })
-            .collect();
-        assert!(!pieces.is_empty());
-        let payload = PayloadSpec {
-            digest: [0; 32], // Placeholder, not used in this test
-            // Same number of pieces, but the last block is short a byte.
-            length: ((pieces.len() - 1) * PIECE_SIZE_BYTES) + PIECE_SIZE_BYTES - 1,
-            pieces,
-        };
-        let file_spec = FileSpec {
-            path: file_path,
-            contents: PayloadSlice {
-                starting_piece: 0,
-                piece_offset: 0,
-                length: payload.length,
-            },
-        };
-        Index {
-            root,
-            payload,
-            files: vec![file_spec],
-        }
-    }
-
-    #[test]
-    fn test_identical_files() {
-        let root = PathBuf::from("/root");
-        let file_path = PathBuf::from("file.txt");
-        let piece_digests = vec![[1; 32], [2; 32]];
-
-        let want_index = create_index(root.clone(), file_path.clone(), piece_digests.clone());
-        let have_index = create_index(root, file_path, piece_digests);
-
-        let diff = want_index.diff(&have_index);
-        assert_eq!(diff.want.len(), 0);
-        assert_eq!(diff.have.len(), 2 * PIECE_SIZE_BLOCKS);
-    }
-
-    #[test]
-    fn test_identical_files_partial_block() {
-        let root = PathBuf::from("/root");
-        let file_path = PathBuf::from("file.txt");
-        let piece_digests = vec![[1; 32], [2; 32]];
-
-        let want_index =
-            create_index_partial_block(root.clone(), file_path.clone(), piece_digests.clone());
-        let have_index = create_index_partial_block(root, file_path, piece_digests);
-
-        let diff = want_index.diff(&have_index);
-        assert_eq!(diff.want.len(), 0);
-        assert_eq!(diff.have.len(), 2 * PIECE_SIZE_BLOCKS);
-    }
-
-    #[test]
-    fn test_have_index_empty() {
-        let root = PathBuf::from("/root");
-        let file_path = PathBuf::from("file.txt");
-        let piece_digests = vec![[1; 32], [2; 32]];
-
-        let want_index = create_index(root.clone(), file_path.clone(), piece_digests.clone());
-        let have_index: Index = Index {
-            root,
-            payload: PayloadSpec {
-                digest: [0; 32],
-                length: 0,
-                pieces: vec![],
-            },
-            files: vec![],
-        };
-
-        let diff = want_index.diff(&have_index);
-        assert_eq!(diff.want.len(), 2 * PIECE_SIZE_BLOCKS); // Two pieces worth of blocks should be missing
-        assert_eq!(diff.have.len(), 0)
-    }
-
-    #[test]
-    fn test_have_index_partial_contents() {
-        let root = PathBuf::from("/root");
-        let file_path = PathBuf::from("file.txt");
-        let want_piece_digests = vec![[1; 32], [2; 32], [3; 32]];
-        let have_piece_digests = vec![[1; 32], [2; 32]];
-
-        let want_index = create_index(root.clone(), file_path.clone(), want_piece_digests);
-        let have_index = create_index(root, file_path, have_piece_digests);
-
-        let diff = want_index.diff(&have_index);
-        assert_eq!(diff.want.len(), 1 * PIECE_SIZE_BLOCKS); // One piece worth of blocks should be missing
-        assert_eq!(diff.have.len(), 2 * PIECE_SIZE_BLOCKS);
-    }
-}
+#[cfg(test)]
+mod tests;
