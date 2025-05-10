@@ -16,6 +16,7 @@ use veilid_core::Target;
 use crate::actor::{Actor, ChanServer};
 use crate::error::Result;
 use crate::node::Node;
+use crate::Error;
 
 use super::types::FileBlockFetch;
 
@@ -119,7 +120,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -151,9 +152,17 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                     match req {
                         None => return Ok(()),
                         Some(req) => {
-                            // TODO: perform this in a background task
                             let resp = self.handle(&req).await?;
+                            let res = if let Response::FetchFailed { ref error_msg, .. } = resp {
+                                // TODO: is it a problem we're losing the original error type here?
+                                Err(Error::msg(error_msg.to_owned()))
+                            } else {
+                                Ok(())
+                            };
+                            // Whether the fetch was successful or not, respond back to the caller.
                             server_ch.send(resp).await?;
+                            // Exit on a fetch failure to allow runner supervision (circuit breakers, etc)
+                            res?;
                         }
                     }
                 }
@@ -161,7 +170,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         if self.target.is_none() {
             return Ok(Response::FetchFailed {

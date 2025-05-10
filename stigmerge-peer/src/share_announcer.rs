@@ -88,7 +88,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -131,7 +131,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         match req {
             Request::Announce => {

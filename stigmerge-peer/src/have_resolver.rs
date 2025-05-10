@@ -86,7 +86,7 @@ impl<P: Node> Actor for HaveResolver<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -132,7 +132,7 @@ impl<P: Node> Actor for HaveResolver<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Resolve { key } => {

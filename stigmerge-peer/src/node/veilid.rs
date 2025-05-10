@@ -37,7 +37,7 @@ pub struct Veilid {
 }
 
 impl Veilid {
-    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     pub async fn new(
         routing_context: RoutingContext,
         update_tx: broadcast::Sender<VeilidUpdate>,
@@ -50,7 +50,7 @@ impl Veilid {
         })
     }
 
-    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn open_or_create_dht_record(
         &self,
         rc: &RoutingContext,
@@ -83,7 +83,7 @@ impl Veilid {
         Ok(dht_rec)
     }
 
-    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn open_or_create_have_map_record(
         &self,
         rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
@@ -115,7 +115,7 @@ impl Veilid {
         Ok((dht_rec, o_cnt))
     }
 
-    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn open_or_create_peer_map_record(
         &self,
         rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
@@ -146,7 +146,7 @@ impl Veilid {
         Ok((dht_rec, o_cnt))
     }
 
-    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn write_header(
         &self,
         rc: &RoutingContext,
@@ -168,7 +168,7 @@ impl Veilid {
         Ok(())
     }
 
-    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn write_index_bytes(
         &self,
         rc: &RoutingContext,
@@ -195,7 +195,7 @@ impl Veilid {
         }
     }
 
-    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn read_header(&self, rc: &RoutingContext, key: &TypedKey) -> Result<Header> {
         debug!(key = key.to_string());
         let subkey_value = match rc.get_dht_value(key.to_owned(), 0, true).await? {
@@ -218,7 +218,7 @@ impl Veilid {
         Ok(header)
     }
 
-    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn read_index(
         &self,
         rc: &RoutingContext,

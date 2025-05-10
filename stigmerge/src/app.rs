@@ -329,7 +329,7 @@ impl App {
     ) -> Result<()> {
         let fetch_progress = self.multi_progress.add(ProgressBar::new_spinner());
         fetch_progress.set_style(ProgressStyle::with_template(
-            "{wide_bar} {binary_bytes}/{binary_total_bytes}",
+            "{msg} {wide_bar} {binary_bytes}/{binary_total_bytes}",
         )?);
         let progress_cancel = cancel.clone();
         let multi_progress = self.multi_progress.clone();
@@ -363,7 +363,8 @@ impl App {
                                 fetch_progress.set_length(length);
                             }
                             fetcher::Status::Done => {
-                                multi_progress.remove(&fetch_progress);
+                                fetch_progress.set_message("Done");
+                                fetch_progress.set_style(ProgressStyle::with_template("{msg}")?);
                                 return Ok(());
                             }
                             _ => {}

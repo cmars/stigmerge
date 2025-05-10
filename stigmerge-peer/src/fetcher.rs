@@ -77,7 +77,7 @@ impl Fetcher {
         self.status_rx.clone()
     }
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         loop {
             self.state = match self.state {
