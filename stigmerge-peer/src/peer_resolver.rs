@@ -138,6 +138,7 @@ impl<P: Node> Actor for PeerResolver<P> {
     }
 
     /// Handle a peer_resolver request, provide a response.
+    #[tracing::instrument(skip_all, err)]
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Resolve { key } => {

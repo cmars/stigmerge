@@ -27,6 +27,7 @@ pub const DEFAULT_MAX_PEERS: u16 = 32;
 
 impl<N: Node> PeerAnnouncer<N> {
     /// Create a new peer_announcer service.
+    #[tracing::instrument(skip_all)]
     pub fn new(node: N, payload_digest: &[u8]) -> Self {
         Self {
             node,
@@ -37,6 +38,7 @@ impl<N: Node> PeerAnnouncer<N> {
         }
     }
 
+    #[tracing::instrument(skip_all, ret)]
     fn assign_peer_index(&mut self, key: TypedKey) -> u16 {
         for (i, maybe_key) in self.peers.iter_mut().enumerate() {
             if let None = maybe_key {
@@ -107,6 +109,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         Ok(match req {
             Request::Announce { key } => {

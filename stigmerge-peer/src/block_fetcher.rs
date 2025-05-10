@@ -8,7 +8,7 @@ use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::select;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{watch, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use veilid_core::Target;
@@ -23,17 +23,18 @@ pub struct BlockFetcher<N: Node> {
     node: N,
     want_index: Arc<RwLock<Index>>,
     root: PathBuf,
-    target_update_rx: broadcast::Receiver<Target>,
+    target_update_rx: watch::Receiver<Option<Target>>,
     target: Option<Target>,
     files: HashMap<usize, File>,
 }
 
 impl<N: Node> BlockFetcher<N> {
+    /// Creates a new block fetcher service.
     pub fn new(
         node: N,
         want_index: Arc<RwLock<Index>>,
         root: PathBuf,
-        target_update_rx: broadcast::Receiver<Target>,
+        target_update_rx: watch::Receiver<Option<Target>>,
     ) -> Self {
         Self {
             node,
@@ -131,8 +132,9 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                      _ = cancel.cancelled() => {
                          return Ok(())
                      }
-                     res = self.target_update_rx.recv() => {
-                         self.target = Some(res?);
+                     res = self.target_update_rx.changed() => {
+                         res?;
+                         self.target = *self.target_update_rx.borrow_and_update();
                      }
                 }
             }
@@ -141,8 +143,9 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                 _ = cancel.cancelled() => {
                     return Ok(())
                 }
-                res = self.target_update_rx.recv() => {
-                    self.target = Some(res?);
+                res = self.target_update_rx.changed() => {
+                    res?;
+                    self.target = *self.target_update_rx.borrow_and_update();
                 }
                 req = server_ch.recv() => {
                     match req {
@@ -158,6 +161,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         if self.target.is_none() {
             return Ok(Response::FetchFailed {
@@ -197,7 +201,7 @@ impl<P: Node> Clone for BlockFetcher<P> {
             node: self.node.clone(),
             want_index: self.want_index.clone(),
             root: self.root.clone(),
-            target_update_rx: self.target_update_rx.resubscribe(),
+            target_update_rx: self.target_update_rx.clone(),
             target: self.target,
             files: HashMap::new(),
         }
@@ -210,7 +214,6 @@ mod tests {
 
     use stigmerge_fileindex::Indexer;
     use tokio::io::AsyncReadExt;
-    use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
     use veilid_core::CryptoKey;
 
@@ -245,7 +248,7 @@ mod tests {
             Ok(vec![BLOCK_DATA; BLOCK_SIZE_BYTES])
         }));
 
-        let (target_tx, target_rx) = broadcast::channel(16);
+        let (target_tx, target_rx) = watch::channel(None);
         let fetcher_root = tf_path.parent().unwrap().to_path_buf();
 
         // Start BlockFetcher
@@ -257,9 +260,7 @@ mod tests {
         );
 
         // Send target update
-        target_tx
-            .send(Target::PrivateRoute(CryptoKey::new([0xbe; 32])))
-            .expect("send target");
+        target_tx.send_replace(Some(Target::PrivateRoute(CryptoKey::new([0xbe; 32]))));
 
         // Request first block
         let block = FileBlockFetch {
@@ -337,7 +338,7 @@ mod tests {
                 Err(Error::msg("mock block fetch error"))
             }));
 
-        let (target_tx, target_rx) = broadcast::channel(16);
+        let (target_tx, target_rx) = watch::channel(None);
         let fetcher_root = tf_path.parent().unwrap().to_path_buf();
 
         let cancel = CancellationToken::new();
@@ -348,9 +349,7 @@ mod tests {
         );
 
         // Send target update
-        target_tx
-            .send(Target::PrivateRoute(CryptoKey::new([0xbe; 32])))
-            .expect("send target");
+        target_tx.send_replace(Some(Target::PrivateRoute(CryptoKey::new([0xbe; 32]))));
 
         // Request first block
         let block = FileBlockFetch {
@@ -406,7 +405,7 @@ mod tests {
 
         // Set up BlockFetcher
         let node = StubNode::new();
-        let (_target_tx, target_rx) = broadcast::channel(1);
+        let (_, target_rx) = watch::channel(None);
         let cancel = CancellationToken::new();
         let fetcher = BlockFetcher::new(node, Arc::new(RwLock::new(index)), tf_path, target_rx);
         let mut operator = Operator::new(cancel.clone(), fetcher, OneShot);

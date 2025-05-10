@@ -9,6 +9,7 @@
 //! - Peer 1 seeds a file at share_key_1
 //! - Peer 2 fetches from share_key_1, publishing at share_key_2
 //! - Peer 3 fetches from share_key_2, etc...
+#![recursion_limit = "256"]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,11 +111,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     let mut share_resolve_op = Operator::new(
         cancel.clone(),
         share_resolver,
-        WithVeilidConnection::new(
-            WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
-            node.clone(),
-            conn_state.clone(),
-        ),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     // Resolve bootstrap share keys and want_index_digest
@@ -168,7 +165,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     let mut share_announce_op = Operator::new(
         cancel.clone(),
         ShareAnnouncer::new(node.clone(), index.clone()),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
     share_announce_op
         .send(share_announcer::Request::Announce)
@@ -194,7 +191,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             index.root().to_path_buf(),
             target_rx,
         ),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
         args.fetchers,
     );
 
@@ -207,7 +204,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         cancel.clone(),
         // TODO: should use the share key publicly; hide this from the actor / op interface
         HaveAnnouncer::new(node.clone(), share_header.have_map().unwrap().key().clone()),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     let share = ShareInfo {
@@ -232,7 +229,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     let seeder_op = Operator::new(
         cancel.clone(),
         seeder,
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     // Create and run fetcher

@@ -24,6 +24,7 @@ pub struct PieceVerifier {
 const VERIFIED_BROADCAST_CAPACITY: usize = 16;
 
 impl PieceVerifier {
+    #[tracing::instrument(skip_all)]
     pub fn new(index: Arc<RwLock<Index>>) -> PieceVerifier {
         let (verified_tx, _) = broadcast::channel(VERIFIED_BROADCAST_CAPACITY);
         PieceVerifier {
@@ -143,6 +144,7 @@ impl Actor for PieceVerifier {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         // update piece state
         let prior_state = match self.piece_states.get_mut(&req.key()) {

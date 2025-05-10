@@ -1,4 +1,5 @@
 //! Example: fetch a file
+#![recursion_limit = "256"]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +30,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use stigmerge_peer::actor::{ConnectionState, OneShot, Operator, WithVeilidConnection};
+use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
 use stigmerge_peer::block_fetcher::BlockFetcher;
 use stigmerge_peer::fetcher::{Clients, Fetcher};
 use stigmerge_peer::have_announcer::HaveAnnouncer;
@@ -67,7 +68,7 @@ async fn main() -> std::result::Result<(), Error> {
     let mut resolve_op = Operator::new(
         cancel.clone(),
         share_resolver,
-        WithVeilidConnection::new(OneShot, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     // Parse share key and want_index_digest
@@ -103,7 +104,7 @@ async fn main() -> std::result::Result<(), Error> {
             download_dir.clone(),
             target_rx,
         ),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
         50,
     );
 
@@ -116,7 +117,7 @@ async fn main() -> std::result::Result<(), Error> {
     let have_announcer = Operator::new(
         cancel.clone(),
         HaveAnnouncer::new(node.clone(), header.have_map().unwrap().key().clone()),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     let share = ShareInfo {

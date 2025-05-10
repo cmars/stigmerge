@@ -34,6 +34,7 @@ pub mod tests;
 
 const VEILID_UPDATE_CAPACITY: usize = 1024;
 
+#[tracing::instrument(skip_all, fields(state_dir, ns), err)]
 pub async fn new_routing_context(
     state_dir: &str,
     ns: Option<String>,

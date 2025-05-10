@@ -59,6 +59,7 @@ impl Status {
 }
 
 impl Fetcher {
+    #[tracing::instrument(skip_all, fields(share))]
     pub fn new(share: ShareInfo, clients: Clients) -> Fetcher {
         let (status_tx, status_rx) = watch::channel(Status::NotStarted);
         Fetcher {
@@ -71,6 +72,7 @@ impl Fetcher {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn subscribe_fetcher_status(&self) -> watch::Receiver<Status> {
         self.status_rx.clone()
     }
@@ -295,6 +297,7 @@ impl Fetcher {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn join(self) -> Result<()> {
         self.clients.piece_verifier.join().await??;
         self.clients.block_fetcher.join().await??;

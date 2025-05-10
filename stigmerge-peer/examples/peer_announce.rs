@@ -1,4 +1,5 @@
 //! Example: announce peers for a file and resolve their peers
+#![recursion_limit = "256"]
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -28,7 +29,7 @@ use tracing::{info, warn};
 use veilid_core::{TypedKey, VeilidUpdate};
 
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ConnectionState, Operator, UntilCancelled, WithVeilidConnection};
+use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::peer_announcer::{self, PeerAnnouncer};
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
@@ -61,14 +62,14 @@ async fn main() -> std::result::Result<(), Error> {
     let mut share_resolver_op = Operator::new(
         cancel.clone(),
         ShareResolver::new(node.clone()),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     // First announce our share to get our own share key
     let mut share_announcer_op = Operator::new(
         cancel.clone(),
         ShareAnnouncer::new(node.clone(), index.clone()),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
     share_announcer_op
         .send(share_announcer::Request::Announce)
@@ -88,14 +89,14 @@ async fn main() -> std::result::Result<(), Error> {
     let mut peer_announcer_op = Operator::new(
         cancel.clone(),
         PeerAnnouncer::new(node.clone(), &header.payload_digest()),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     // Create peer resolver to watch other shares
     let mut peer_resolver_op = Operator::new(
         cancel.clone(),
         peer_resolver::PeerResolver::new(node.clone()),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     // Announce initial peer keys

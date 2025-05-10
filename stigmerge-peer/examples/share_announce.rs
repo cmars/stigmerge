@@ -1,4 +1,5 @@
 //! Example: announce a file
+#![recursion_limit = "256"]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ConnectionState, OneShot, Operator, WithVeilidConnection};
+use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
 use stigmerge_peer::new_routing_context;
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
@@ -55,7 +56,7 @@ async fn main() -> std::result::Result<(), Error> {
     let mut announce_op = Operator::new(
         cancel.clone(),
         ShareAnnouncer::new(node.clone(), index.clone()),
-        WithVeilidConnection::new(OneShot, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
     announce_op.send(share_announcer::Request::Announce).await?;
 

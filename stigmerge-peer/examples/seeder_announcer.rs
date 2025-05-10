@@ -1,4 +1,5 @@
 //! Example: announce and seed a file
+#![recursion_limit = "256"]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,9 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{
-    ConnectionState, OneShot, Operator, UntilCancelled, WithVeilidConnection,
-};
+use stigmerge_peer::actor::{ConnectionState, OneShot, Operator, WithVeilidConnection};
 use stigmerge_peer::content_addressable::ContentAddressable;
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
@@ -61,7 +60,7 @@ async fn main() -> std::result::Result<(), Error> {
     let mut announce_op = Operator::new(
         cancel.clone(),
         ShareAnnouncer::new(node.clone(), index.clone()),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
     announce_op.send(share_announcer::Request::Announce).await?;
 
@@ -97,7 +96,7 @@ async fn main() -> std::result::Result<(), Error> {
     let mut seeder_op = Operator::new(
         cancel.clone(),
         Seeder::new(node.clone(), share, seeder_clients),
-        WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     // Verify the index, notifying seeder of verified pieces

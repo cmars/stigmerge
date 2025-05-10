@@ -38,6 +38,7 @@ pub struct Seeder<N: Node> {
 }
 
 impl<N: Node> Seeder<N> {
+    #[tracing::instrument(skip_all)]
     pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
         Seeder {
             node,
@@ -122,6 +123,7 @@ impl<P: Node> Actor for Seeder<P> {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         match req {
             Request::HaveMap => Ok(Response::HaveMap(self.piece_map.clone())),

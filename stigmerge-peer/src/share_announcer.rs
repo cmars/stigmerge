@@ -31,6 +31,7 @@ impl<N: Node> ShareAnnouncer<N> {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn announce(&mut self) -> Result<Response> {
         let (key, target, header) = self.node.announce_index(&self.index).await?;
         self.share = Some(ShareAnnounce {
@@ -45,6 +46,7 @@ impl<N: Node> ShareAnnouncer<N> {
         })
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn reannounce(&mut self) -> Result<Response> {
         match self.share.as_mut() {
             Some(ShareAnnounce {
@@ -92,7 +94,6 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
         cancel: CancellationToken,
         mut server_ch: crate::actor::ChanServer<Self::Request, Self::Response>,
     ) -> Result<()> {
-        self.share = None;
         loop {
             match self.share {
                 None => {
@@ -130,6 +131,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         match req {
             Request::Announce => {

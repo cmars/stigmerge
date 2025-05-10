@@ -1,9 +1,11 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
+use backoff::backoff::Backoff;
 use tokio::{
-    select,
+    select, spawn,
     sync::{broadcast, watch, Mutex, MutexGuard},
     task::{self, JoinError, JoinSet},
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -84,6 +86,7 @@ pub struct Operator<Req, Resp> {
 }
 
 impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Operator<Req, Resp> {
+    #[tracing::instrument(skip_all)]
     pub fn new<
         A: Actor<Request = Req, Response = Resp> + Clone + Send + 'static,
         R: Runner<A> + Send + 'static,
@@ -93,10 +96,10 @@ impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Op
         mut runner: R,
     ) -> Self {
         let (client_ch, server_ch) = unbounded();
-        let mut task_actor = actor.clone();
+        let task_actor = actor.clone();
         let task_cancel = cancel.child_token();
         let mut tasks = JoinSet::new();
-        tasks.spawn(async move { runner.run(&mut task_actor, task_cancel, server_ch).await });
+        tasks.spawn(async move { runner.run(task_actor, task_cancel, server_ch).await });
         Self {
             cancel,
             client_ch,
@@ -104,6 +107,7 @@ impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Op
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn new_clone_pool<
         A: Actor<Request = Req, Response = Resp> + Clone + Send + 'static,
         R: Runner<A> + Clone + Send + 'static,
@@ -117,12 +121,12 @@ impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Op
         let mut tasks = JoinSet::new();
         for _ in 0..n {
             let mut task_runner = runner.clone();
-            let mut task_actor = actor.clone();
+            let task_actor = actor.clone();
             let task_cancel = cancel.child_token();
             let task_server_ch = server_ch.clone();
             tasks.spawn(async move {
                 task_runner
-                    .run(&mut task_actor, task_cancel, task_server_ch)
+                    .run(task_actor, task_cancel, task_server_ch)
                     .await
             });
         }
@@ -133,26 +137,32 @@ impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Op
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn send(&mut self, req: Req) -> Result<()> {
         self.client_ch.send(req).await
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub fn try_send(&mut self, req: Req) -> Result<()> {
         self.client_ch.try_send(req)
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn recv(&mut self) -> Option<Resp> {
         self.client_ch.recv().await
     }
 
+    #[tracing::instrument(skip_all, ret)]
     pub async fn recv_pending(&mut self) -> usize {
         self.client_ch.recv_pending().await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn cancel(&self) {
         self.cancel.cancel();
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn join(self) -> std::result::Result<Result<()>, JoinError> {
         for res in self.tasks.join_all().await.into_iter() {
             if let Err(e) = res {
@@ -166,7 +176,7 @@ impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Op
 pub trait Runner<A: Actor> {
     fn run(
         &mut self,
-        actor: &mut A,
+        actor: A,
         cancel: CancellationToken,
         server_ch: ChanServer<A::Request, A::Response>,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
@@ -182,9 +192,10 @@ impl<
             + 'static,
     > Runner<A> for OneShot
 {
+    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
-        actor: &mut A,
+        mut actor: A,
         cancel: CancellationToken,
         server_ch: ChanServer<A::Request, A::Response>,
     ) -> Result<()> {
@@ -202,9 +213,10 @@ impl<
             + 'static,
     > Runner<A> for UntilCancelled
 {
+    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
-        actor: &mut A,
+        mut actor: A,
         cancel: CancellationToken,
         server_ch: ChanServer<A::Request, A::Response>,
     ) -> Result<()> {
@@ -221,8 +233,7 @@ impl<
     }
 }
 
-pub struct WithVeilidConnection<T, N> {
-    runner: T,
+pub struct WithVeilidConnection<N> {
     node: N,
     update_rx: broadcast::Receiver<VeilidUpdate>,
     state: Arc<Mutex<ConnectionState>>,
@@ -243,17 +254,17 @@ impl ConnectionState {
     }
 }
 
-impl<T, N: Node> WithVeilidConnection<T, N> {
-    pub fn new(runner: T, node: N, state: Arc<Mutex<ConnectionState>>) -> Self {
+impl<N: Node> WithVeilidConnection<N> {
+    pub fn new(node: N, state: Arc<Mutex<ConnectionState>>) -> Self {
         let update_rx = node.subscribe_veilid_update();
         Self {
-            runner,
             node,
             update_rx,
             state,
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn disconnected<'a>(
         &mut self,
         cancel: CancellationToken,
@@ -288,60 +299,102 @@ impl<T, N: Node> WithVeilidConnection<T, N> {
     }
 }
 
-const MAX_TRANSIENT_ERRORS: u8 = 5;
+const MAX_TRANSIENT_RETRIES: u8 = 5;
 
 impl<
-        T: Runner<A> + Send + Sync + 'static,
         A: Actor<Request: Clone + Send + Sync + 'static, Response: Clone + Send + Sync + 'static>
             + Send
             + Sync
             + 'static,
         N: Node,
-    > Runner<A> for WithVeilidConnection<T, N>
+    > Runner<A> for WithVeilidConnection<N>
 {
+    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
-        actor: &mut A,
+        actor_inner: A,
         cancel: CancellationToken,
         server_ch: ChanServer<<A as Actor>::Request, <A as Actor>::Response>,
     ) -> Result<()> {
         let state = self.state.clone();
-        let mut err_cnt = 0; // Transient error count, used to reconnect if we encounter too many.
+        let mut exp_backoff = backoff::ExponentialBackoffBuilder::new()
+            .with_max_interval(Duration::from_secs(5))
+            .build();
+        let mut retries = 0;
+        let actor = Arc::new(Mutex::new(actor_inner));
         loop {
             {
                 let st = state.lock().await;
                 if !*st.connected.borrow() {
-                    err_cnt = 0;
                     self.disconnected(cancel.clone(), st).await?;
                     continue;
                 }
             }
+
+            let actor_handle = actor.clone();
+            let actor_cancel = cancel.child_token();
+            let actor_server_ch = server_ch.clone();
+            let actor_task = spawn(async move {
+                actor_handle
+                    .lock()
+                    .await
+                    .run(actor_cancel.child_token(), actor_server_ch.clone())
+                    .await
+            });
             select! {
                 _ = cancel.cancelled() => {
                     return Err(CancelError.into())
                 }
-                res = self.runner.run(actor, cancel.child_token(), server_ch.clone()) => {
+                join_res = actor_task => {
+                    let res = join_res?;
+                    warn!("actor run: {:?}", res);
                     match res {
-                        Ok(())=>return Ok(()),
+                        Ok(())=>{
+                            info!("actor run: ok");
+                            return Ok(());
+                        }
                         Err(e) => {
                             error!("{:?}", e);
                             if e.is_transient() {
-                                err_cnt+=1;
-                                if err_cnt < MAX_TRANSIENT_ERRORS {
+                                sleep(exp_backoff.next_backoff().unwrap_or(exp_backoff.max_interval)).await;
+                                retries += 1;
+                                if retries < MAX_TRANSIENT_RETRIES {
                                     continue;
                                 }
-                            }
-                            if e.is_permanent() {
+                                warn!("too many transient errors");
+                            } else if e.is_permanent() {
                                 cancel.cancel();
                                 return Err(e);
                             }
                             {
                                 if let Ok(st) = state.try_lock() {
                                     info!("marking disconnected");
+                                    self.node.reset().await?;
+                                    st.connected.send_if_modified(|val| if *val { *val = false; true } else { false });
+                                    exp_backoff.reset();
+                                    retries = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+                res = self.update_rx.recv() => {
+                    let update = res?;
+                    match update {
+                        VeilidUpdate::Attachment(veilid_state_attachment) => {
+                            if !veilid_state_attachment.public_internet_ready {
+                                if let Ok(st) = state.try_lock() {
+                                    info!("marking disconnected: {:?}", veilid_state_attachment);
                                     st.connected.send_if_modified(|val| if *val { *val = false; true } else { false });
                                 }
                             }
                         }
+                        VeilidUpdate::Shutdown => {
+                            warn!("shutdown");
+                            cancel.cancel();
+                            return Err(VeilidAPIError::Shutdown.into())
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -349,10 +402,9 @@ impl<
     }
 }
 
-impl<T: Clone, N: Clone> Clone for WithVeilidConnection<T, N> {
+impl<N: Clone> Clone for WithVeilidConnection<N> {
     fn clone(&self) -> Self {
         Self {
-            runner: self.runner.clone(),
             node: self.node.clone(),
             update_rx: self.update_rx.resubscribe(),
             state: self.state.clone(),

@@ -26,6 +26,7 @@ pub struct HaveAnnouncer<N: Node> {
 
 impl<N: Node> HaveAnnouncer<N> {
     /// Create a new have_announcer service.
+    #[tracing::instrument(skip_all)]
     pub fn new(node: N, key: TypedKey) -> Self {
         Self {
             node,
@@ -89,6 +90,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         let mut pieces_map = self.pieces_map.write().await;
         Ok(match req {

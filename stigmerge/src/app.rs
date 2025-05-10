@@ -26,7 +26,7 @@ use stigmerge_peer::{
     share_resolver::{self, ShareResolver},
     types::ShareInfo,
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{cli::Commands, initialize_stderr_logging, initialize_ui_logging, Cli};
 
@@ -43,6 +43,7 @@ impl App {
         })
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn run(&mut self) -> Result<()> {
         self.multi_progress
             .println(format!("🐝 stigmerge {}", env!("CARGO_PKG_VERSION")))?;
@@ -71,6 +72,7 @@ impl App {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn run_with_node<T: Node + Sync + Send + 'static>(&self, node: T) -> Result<()> {
         let mut tasks = JoinSet::new();
 
@@ -141,17 +143,15 @@ impl App {
             _ => bail!("unexpected subcommand"),
         };
 
+        debug!("root: {}", root.to_string_lossy());
+
         // Set up share resolver
         let share_resolver = ShareResolver::new(node.clone());
         let target_rx = share_resolver.subscribe_target();
         let mut share_resolve_op = Operator::new(
             cancel.clone(),
             share_resolver,
-            WithVeilidConnection::new(
-                WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
-                node.clone(),
-                conn_state.clone(),
-            ),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
 
         // Resolve bootstrap share keys and want_index_digest
@@ -163,6 +163,7 @@ impl App {
                 ..
             } => {
                 for share_key_str in share_keys.iter() {
+                    debug!("resolving share key: {share_key_str}");
                     let share_key: TypedKey = share_key_str.parse()?;
                     let want_index_digest = match index_digest {
                         Some(digest_string) => {
@@ -212,12 +213,13 @@ impl App {
             c => bail!("unexpected subcommand: {:?}", c),
         };
         let index = want_index.ok_or(Error::msg("failed to resolve index"))?;
+        debug!("resolved index");
 
         // Announce our own share of the index
         let mut share_announce_op = Operator::new(
             cancel.clone(),
             ShareAnnouncer::new(node.clone(), index.clone()),
-            WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
         share_announce_op
             .send(share_announcer::Request::Announce)
@@ -241,7 +243,7 @@ impl App {
             cancel.clone(),
             // TODO: should use the share key publicly; hide this from the actor / op interface
             HaveAnnouncer::new(node.clone(), share_header.have_map().unwrap().key().clone()),
-            WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
 
         let share = ShareInfo {
@@ -259,7 +261,7 @@ impl App {
                 index.root().to_path_buf(),
                 target_rx,
             ),
-            WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
             self.cli.fetchers,
         );
 
@@ -286,7 +288,7 @@ impl App {
         let seeder_op = Operator::new(
             cancel.clone(),
             seeder,
-            WithVeilidConnection::new(UntilCancelled, node.clone(), conn_state.clone()),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
         tasks.spawn(async move { seeder_op.join().await? });
 

@@ -1,9 +1,12 @@
 use std::{collections::HashSet, path::PathBuf};
 
 use stigmerge_fileindex::Index;
-use tokio::{select, sync::broadcast};
+use tokio::{
+    select,
+    sync::{broadcast, watch},
+};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -19,32 +22,31 @@ use crate::{
 /// the expected index by verifying its content digest.
 pub struct ShareResolver<N: Node> {
     node: N,
-    target_tx: broadcast::Sender<Target>,
+    target_tx: watch::Sender<Option<Target>>,
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
     watching: HashSet<TypedKey>,
 }
-
-const TARGET_BROADCAST_CAPACITY: usize = 16;
-
 impl<P: Node> ShareResolver<P> {
     /// Create a new share_resolver service.
     pub fn new(node: P) -> Self {
         let updates = node.subscribe_veilid_update();
+        // Initialize with a default target
+        let (target_tx, _) = watch::channel(None);
         Self {
             node,
-            target_tx: broadcast::channel(TARGET_BROADCAST_CAPACITY).0,
+            target_tx,
             updates,
             watching: HashSet::new(),
         }
     }
 
-    pub fn subscribe_target(&self) -> broadcast::Receiver<Target> {
+    pub fn subscribe_target(&self) -> watch::Receiver<Option<Target>> {
         self.target_tx.subscribe()
     }
 }
 
 /// Share resolver request messages.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Request {
     /// Resolve the Index located at a remote share key, with a known index
     /// digest, for merging into a local file share.
@@ -174,10 +176,12 @@ impl<P: Node> Actor for ShareResolver<P> {
                                 self.watching.remove(req.key());
                                 self.node.cancel_watch(req.key());
                             }
+                            debug!(?resp);
                             server_ch.send(resp).await?;
                         }
-                        Err(e) => {
-                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err_msg: e.to_string() }).await?;
+                        Err(err) => {
+                            warn!(?err);
+                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err_msg: err.to_string() }).await?;
                         }
                     }
                 }
@@ -204,6 +208,7 @@ impl<P: Node> Actor for ShareResolver<P> {
     }
 
     /// Handle a share_resolver request, provide a response.
+    #[tracing::instrument(skip(self), err)]
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Index {
@@ -223,10 +228,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                 };
 
                 if digest_matches {
-                    self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
-                        warn!("no target subscribers: {}", e);
-                        0
-                    });
+                    self.target_tx.send_replace(Some(target.to_owned()));
                     Response::Index {
                         key: key.clone(),
                         header,
@@ -242,10 +244,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                 prior_target,
             } => {
                 let (target, header) = self.node.resolve_route(key, *prior_target).await?;
-                self.target_tx.send(target.to_owned()).unwrap_or_else(|e| {
-                    warn!("no target subscribers: {}", e);
-                    0
-                });
+                self.target_tx.send_replace(Some(target.to_owned()));
                 Response::Header {
                     key: key.clone(),
                     header,
