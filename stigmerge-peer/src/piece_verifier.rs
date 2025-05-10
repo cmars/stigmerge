@@ -9,7 +9,7 @@ use tokio::{
     sync::{broadcast, RwLock},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{warn, Level};
 
 use crate::{actor::Actor, error::Result, types::PieceState};
 
@@ -120,7 +120,7 @@ impl Actor for PieceVerifier {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -144,7 +144,7 @@ impl Actor for PieceVerifier {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         // update piece state
         let prior_state = match self.piece_states.get_mut(&req.key()) {

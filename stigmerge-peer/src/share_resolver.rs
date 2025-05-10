@@ -6,7 +6,7 @@ use tokio::{
     sync::{broadcast, watch},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, Level};
 use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -147,7 +147,7 @@ impl<P: Node> Actor for ShareResolver<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -208,7 +208,7 @@ impl<P: Node> Actor for ShareResolver<P> {
     }
 
     /// Handle a share_resolver request, provide a response.
-    #[tracing::instrument(skip(self), err)]
+    #[tracing::instrument(skip(self), err, level = Level::TRACE)]
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Index {

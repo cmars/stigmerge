@@ -4,7 +4,7 @@ use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
 use tokio::select;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{warn, Level};
 
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
@@ -77,7 +77,7 @@ impl Fetcher {
         self.status_rx.clone()
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         loop {
             self.state = match self.state {

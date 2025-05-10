@@ -8,6 +8,7 @@ use tokio::{
     sync::broadcast,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Level;
 use veilid_core::VeilidUpdate;
 
 use crate::{
@@ -80,7 +81,7 @@ impl<P: Node> Actor for Seeder<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -123,7 +124,7 @@ impl<P: Node> Actor for Seeder<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         match req {
             Request::HaveMap => Ok(Response::HaveMap(self.piece_map.clone())),

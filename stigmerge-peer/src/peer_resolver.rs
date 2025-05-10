@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, Level};
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
 
 use crate::{
@@ -85,7 +85,7 @@ impl<P: Node> Actor for PeerResolver<P> {
     type Response = Response;
 
     /// Run the service until cancelled.
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -138,7 +138,7 @@ impl<P: Node> Actor for PeerResolver<P> {
     }
 
     /// Handle a peer_resolver request, provide a response.
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Resolve { key } => {

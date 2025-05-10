@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, Level};
 use veilid_core::{TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -86,7 +86,7 @@ impl<P: Node> Actor for HaveResolver<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -132,7 +132,7 @@ impl<P: Node> Actor for HaveResolver<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Resolve { key } => {

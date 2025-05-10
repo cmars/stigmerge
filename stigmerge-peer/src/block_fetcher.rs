@@ -10,7 +10,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::select;
 use tokio::sync::{watch, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{trace, warn, Level};
 use veilid_core::Target;
 
 use crate::actor::{Actor, ChanServer};
@@ -119,7 +119,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -161,7 +161,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         if self.target.is_none() {
             return Ok(Response::FetchFailed {
@@ -171,9 +171,11 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         }
         match req {
             Request::Fetch { block, flush } => {
-                debug!(
+                trace!(
                     "Fetching block: file={} piece={} block={}",
-                    block.file_index, block.piece_index, block.block_index
+                    block.file_index,
+                    block.piece_index,
+                    block.block_index
                 );
 
                 // Attempt to fetch the block

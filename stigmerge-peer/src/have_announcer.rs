@@ -2,6 +2,7 @@ use std::{ops::Deref, sync::Arc, time::Duration};
 
 use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
+use tracing::Level;
 
 use crate::{
     actor::{Actor, ChanServer},
@@ -57,7 +58,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -90,7 +91,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         let mut pieces_map = self.pieces_map.write().await;
         Ok(match req {

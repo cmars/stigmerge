@@ -7,7 +7,7 @@ use tokio::{
     time::{sleep, sleep_until, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace, warn, Level};
 use veilid_core::{
     DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Target, Timestamp,
     TimestampDuration, ValueData, ValueSubkeyRangeSet, VeilidAPIError, VeilidUpdate,
@@ -37,7 +37,7 @@ pub struct Veilid {
 }
 
 impl Veilid {
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
     pub async fn new(
         routing_context: RoutingContext,
         update_tx: broadcast::Sender<VeilidUpdate>,
@@ -50,7 +50,7 @@ impl Veilid {
         })
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
     async fn open_or_create_dht_record(
         &self,
         rc: &RoutingContext,
@@ -83,7 +83,7 @@ impl Veilid {
         Ok(dht_rec)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
     async fn open_or_create_have_map_record(
         &self,
         rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
@@ -115,7 +115,7 @@ impl Veilid {
         Ok((dht_rec, o_cnt))
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
     async fn open_or_create_peer_map_record(
         &self,
         rc: &tokio::sync::RwLockReadGuard<'_, RoutingContext>,
@@ -146,7 +146,7 @@ impl Veilid {
         Ok((dht_rec, o_cnt))
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
     async fn write_header(
         &self,
         rc: &RoutingContext,
@@ -168,7 +168,7 @@ impl Veilid {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
     async fn write_index_bytes(
         &self,
         rc: &RoutingContext,
@@ -195,7 +195,7 @@ impl Veilid {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
     async fn read_header(&self, rc: &RoutingContext, key: &TypedKey) -> Result<Header> {
         debug!(key = key.to_string());
         let subkey_value = match rc.get_dht_value(key.to_owned(), 0, true).await? {
@@ -218,7 +218,7 @@ impl Veilid {
         Ok(header)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = Level::TRACE, skip_all, err)]
     async fn read_index(
         &self,
         rc: &RoutingContext,
@@ -255,11 +255,12 @@ impl Veilid {
         ))
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = Level::TRACE, skip_all)]
     async fn release_prior_route(&self, rc: &RoutingContext, prior_route: Option<Target>) {
         match prior_route {
             Some(Target::PrivateRoute(target)) => {
-                // Log the error at a low level (like trace?)
+                // Ignore errors here; prior route may have already been
+                // released and veilid_core logs the error.
                 let _ = rc.api().release_private_route(target);
             }
             _ => {}
