@@ -10,11 +10,12 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::select;
 use tokio::sync::{watch, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, warn, Level};
+use tracing::{trace, Level};
 use veilid_core::Target;
 
 use crate::actor::{Actor, ChanServer};
 use crate::error::Result;
+use crate::is_cancelled;
 use crate::node::Node;
 use crate::Error;
 
@@ -107,15 +108,6 @@ pub enum Response {
     },
 }
 
-impl Response {
-    fn block(&self) -> FileBlockFetch {
-        match self {
-            Response::Fetched { block, .. } => block.to_owned(),
-            Response::FetchFailed { block, .. } => block.to_owned(),
-        }
-    }
-}
-
 impl<P: Node + Send> Actor for BlockFetcher<P> {
     type Request = Request;
     type Response = Response;
@@ -134,7 +126,12 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                          return Ok(())
                      }
                      res = self.target_update_rx.changed() => {
-                         res?;
+                         if let Err(e) = res {
+                             if cancel.is_cancelled() {
+                                 return Ok(());
+                             }
+                             return Err(e.into());
+                         }
                          self.target = *self.target_update_rx.borrow_and_update();
                      }
                 }
@@ -145,24 +142,30 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                     return Ok(())
                 }
                 res = self.target_update_rx.changed() => {
-                    res?;
+                    if let Err(e) = res {
+                        if cancel.is_cancelled() {
+                            return Ok(());
+                        }
+                        return Err(e.into());
+                    }
                     self.target = *self.target_update_rx.borrow_and_update();
                 }
                 req = server_ch.recv() => {
                     match req {
                         None => return Ok(()),
                         Some(req) => {
-                            let resp = self.handle(&req).await?;
-                            let res = if let Response::FetchFailed { ref error_msg, .. } = resp {
-                                // TODO: is it a problem we're losing the original error type here?
-                                Err(Error::msg(error_msg.to_owned()))
-                            } else {
-                                Ok(())
-                            };
-                            // Whether the fetch was successful or not, respond back to the caller.
-                            server_ch.send(resp).await?;
-                            // Exit on a fetch failure to allow runner supervision (circuit breakers, etc)
-                            res?;
+                            match self.handle(&req).await {
+                                Ok(resp) => server_ch.send(resp).await?,
+                                Err(e) => {
+                                    if is_cancelled(&e) {
+                                        return Ok(());
+                                    }
+                                    // Whether the fetch was successful or not, respond back to the caller.
+                                    let resp = Response::FetchFailed { block: req.block(), error_msg: e.to_string() };
+                                    server_ch.send(resp).await?;
+                                    return Err(e);
+                                }
+                            }
                         }
                     }
                 }
@@ -188,19 +191,11 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                 );
 
                 // Attempt to fetch the block
-                match self.fetch_block(block, *flush).await {
-                    Ok(length) => Ok(Response::Fetched {
-                        block: block.clone(),
-                        length,
-                    }),
-                    Err(e) => {
-                        warn!("Failed to fetch block: {}", e);
-                        Ok(Response::FetchFailed {
-                            block: block.clone(),
-                            error_msg: e.to_string(),
-                        })
-                    }
-                }
+                let length = self.fetch_block(block, *flush).await?;
+                Ok(Response::Fetched {
+                    block: block.clone(),
+                    length,
+                })
             }
         }
     }
@@ -234,6 +229,15 @@ mod tests {
     use crate::Error;
 
     use super::*;
+
+    impl Response {
+        fn block(&self) -> FileBlockFetch {
+            match self {
+                Response::Fetched { block, .. } => block.to_owned(),
+                Response::FetchFailed { block, .. } => block.to_owned(),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn fetch_single_block() {
@@ -321,7 +325,7 @@ mod tests {
             .join()
             .await
             .expect("fetcher task")
-            .expect("fetcher run");
+            .expect("fetch ok");
     }
 
     #[tokio::test]
@@ -394,7 +398,7 @@ mod tests {
             .join()
             .await
             .expect("fetcher task")
-            .expect("fetcher run");
+            .expect_err("mock block fetch error");
     }
 
     #[tokio::test]
@@ -444,6 +448,6 @@ mod tests {
             .join()
             .await
             .expect("fetcher task")
-            .expect("fetcher run");
+            .expect("fetcher run, cancelled");
     }
 }
