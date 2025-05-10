@@ -6,7 +6,7 @@ use tokio::{
     sync::{broadcast, watch},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn, Level};
+use tracing::{info, trace, warn, Level};
 use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -176,7 +176,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                                 self.watching.remove(req.key());
                                 self.node.cancel_watch(req.key());
                             }
-                            debug!(?resp);
+                            trace!(?resp);
                             server_ch.send(resp).await?;
                         }
                         Err(err) => {

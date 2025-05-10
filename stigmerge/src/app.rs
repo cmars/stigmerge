@@ -332,7 +332,6 @@ impl App {
             "{msg} {wide_bar} {binary_bytes}/{binary_total_bytes}",
         )?);
         let progress_cancel = cancel.clone();
-        let multi_progress = self.multi_progress.clone();
         tasks.spawn(async move {
             loop {
                 select! {
@@ -363,9 +362,7 @@ impl App {
                                 fetch_progress.set_length(length);
                             }
                             fetcher::Status::Done => {
-                                fetch_progress.set_message("Done");
-                                fetch_progress.set_style(ProgressStyle::with_template("{msg}")?);
-                                return Ok(());
+                                fetch_progress.finish_with_message("Fetch complete");
                             }
                             _ => {}
                         }
