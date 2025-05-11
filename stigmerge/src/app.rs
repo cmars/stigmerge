@@ -8,6 +8,7 @@ use tokio::{
     select,
     sync::{watch, RwLock},
     task::JoinSet,
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 use veilid_core::TypedKey;
@@ -371,6 +372,7 @@ impl App {
                             }
                             _ => {}
                         }
+                        sleep(Duration::from_millis(250)).await;
                     }
                 }
             }
@@ -412,6 +414,7 @@ impl App {
                         indexer_progress.set_position(progress.position);
                     }
                 }
+                sleep(Duration::from_millis(250)).await;
             }
         });
         let verifier_cancel = cancel.clone();
@@ -433,6 +436,7 @@ impl App {
                         verifier_progress.set_position(progress.position);
                     }
                 }
+                sleep(Duration::from_millis(250)).await;
             }
         });
         Ok(())
