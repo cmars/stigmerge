@@ -2,6 +2,7 @@ mod header;
 mod index;
 mod peerinfo;
 mod request;
+mod response;
 
 #[allow(dead_code)]
 #[rustfmt::skip]
@@ -14,6 +15,7 @@ use veilid_core::ValueData;
 pub use header::{HaveMapRef, Header, PeerMapRef};
 pub use peerinfo::PeerInfo;
 pub use request::{AdvertisePeerRequest, BlockRequest, Request};
+pub use response::Response;
 
 const MAX_RECORD_DATA_SIZE: usize = 1_048_576;
 const MAX_INDEX_BYTES: usize = MAX_RECORD_DATA_SIZE - ValueData::MAX_LEN;

@@ -54,7 +54,8 @@ impl<N: Node> BlockFetcher<N> {
         let result = self
             .node
             .request_block(self.target.unwrap(), block.piece_index, block.block_index)
-            .await?;
+            .await?
+            .ok_or(Error::msg("block not found"))?;
         // Write the block to the file
         let fh = match self.files.get_mut(&block.file_index) {
             Some(fh) => fh,
@@ -260,7 +261,7 @@ mod tests {
         let mut node = StubNode::new();
         // Mock the block data that StubPeer will return
         node.request_block_result = Arc::new(Mutex::new(move |_, _, _| {
-            Ok(vec![BLOCK_DATA; BLOCK_SIZE_BYTES])
+            Ok(Some(vec![BLOCK_DATA; BLOCK_SIZE_BYTES]))
         }));
 
         let (target_tx, target_rx) = watch::channel(None);
@@ -348,10 +349,11 @@ mod tests {
         // Set up BlockFetcher with error-returning stub
         let mut node = StubNode::new();
         // Mock the block request to return an error
-        node.request_block_result =
-            Arc::new(Mutex::new(move |_, _, _| -> crate::Result<Vec<u8>> {
+        node.request_block_result = Arc::new(Mutex::new(
+            move |_, _, _| -> crate::Result<Option<Vec<u8>>> {
                 Err(Error::msg("mock block fetch error"))
-            }));
+            },
+        ));
 
         let (target_tx, target_rx) = watch::channel(None);
         let fetcher_root = tf_path.parent().unwrap().to_path_buf();

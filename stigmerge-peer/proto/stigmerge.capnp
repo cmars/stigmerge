@@ -153,3 +153,17 @@ struct AdvertisePeerRequest @0x9fc1f4852147f84a {
 
   key @0 :TypedKey;     # Peer's main DHT key for this share.
 }
+
+struct Response @0xc4aa805fc8c058eb {
+    union {
+        badRequest @0 :Void;
+        blockResponse @1 :BlockResponse;
+    }
+}
+
+struct BlockResponse @0x9cb40a5d37926bf3 {
+    union {
+        notFound @0 :Void;
+        contents @1 :Data;
+    }
+}

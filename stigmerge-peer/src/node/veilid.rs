@@ -20,7 +20,7 @@ use crate::{
     piece_map::PieceMap,
     proto::{
         AdvertisePeerRequest, BlockRequest, Decoder, Encoder, HaveMapRef, Header, PeerInfo,
-        PeerMapRef, Request,
+        PeerMapRef, Request, Response,
     },
     Error, Result,
 };
@@ -389,7 +389,7 @@ impl Node for Veilid {
         target: Target,
         piece: usize,
         block: usize,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         let rc = self.routing_context.read().await;
         let block_req = Request::BlockRequest(BlockRequest {
             piece: piece as u32,
@@ -397,13 +397,31 @@ impl Node for Veilid {
         });
         let block_req_bytes = block_req.encode()?;
         let resp_bytes = rc.app_call(target, block_req_bytes).await?;
-        Ok(resp_bytes)
+        let resp: Response = Response::decode(resp_bytes.as_slice())?;
+        match resp {
+            Response::BlockResponse(Some(contents)) => Ok(Some(contents)),
+            Response::BlockResponse(None) => Ok(None),
+            _ => Err(Error::msg(format!("unexpected response: {:?}", resp))),
+        }
     }
 
     #[tracing::instrument(skip_all, err)]
-    async fn reply_block_contents(&mut self, call_id: OperationId, contents: &[u8]) -> Result<()> {
+    async fn reply_block_contents(
+        &mut self,
+        call_id: OperationId,
+        contents: Option<&[u8]>,
+    ) -> Result<()> {
         let rc = self.routing_context.read().await;
-        rc.api().app_call_reply(call_id, contents.to_vec()).await?;
+        rc.api()
+            .app_call_reply(
+                call_id,
+                match contents {
+                    Some(contents) => Response::BlockResponse(Some(contents.to_vec())),
+                    None => Response::BlockResponse(None),
+                }
+                .encode()?,
+            )
+            .await?;
         Ok(())
     }
 

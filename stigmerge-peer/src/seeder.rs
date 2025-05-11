@@ -109,9 +109,9 @@ impl<P: Node> Actor for Seeder<P> {
                                 proto::Request::BlockRequest(block_req) => {
                                     if self.piece_map.get(block_req.piece) {
                                         let rd = self.read_block_into(&block_req, &mut buf).await?;
-                                        self.node.reply_block_contents(veilid_app_call.id(), &buf[..rd]).await?;
+                                        self.node.reply_block_contents(veilid_app_call.id(), Some(&buf[..rd])).await?;
                                     } else {
-                                        self.node.reply_block_contents(veilid_app_call.id(), &[]).await?;
+                                        self.node.reply_block_contents(veilid_app_call.id(), None).await?;
                                     }
                                 }
                                 _ => {}  // Ignore other request types
@@ -200,22 +200,30 @@ mod tests {
         let mut node = StubNode::new();
         let update_tx = node.update_tx.clone();
         let reply_contents_called = Arc::new(Mutex::new(false));
-        let reply_contents_data = Arc::new(Mutex::new(Vec::new()));
+        let reply_contents_data = Arc::new(Mutex::new(None));
         let reply_contents_called_clone = reply_contents_called.clone();
         let reply_contents_data_clone = reply_contents_data.clone();
 
         let (replied_tx, mut replied_rx) = mpsc::channel(1);
 
-        node.reply_block_contents_result =
-            Arc::new(Mutex::new(move |_call_id: OperationId, contents: &[u8]| {
+        node.reply_block_contents_result = Arc::new(Mutex::new(
+            move |_call_id: OperationId, contents: Option<&[u8]>| {
                 *reply_contents_called_clone.lock().unwrap() = true;
-                reply_contents_data_clone
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(contents);
+                match contents {
+                    Some(data) => {
+                        reply_contents_data_clone
+                            .lock()
+                            .unwrap()
+                            .replace(data.to_vec());
+                    }
+                    None => {
+                        *reply_contents_data_clone.lock().unwrap() = None;
+                    }
+                };
                 replied_tx.try_send(()).expect("replied");
                 Ok(())
-            }));
+            },
+        ));
 
         // Create share info
         let share_info = ShareInfo {
@@ -279,12 +287,16 @@ mod tests {
         // Verify the data returned matches what we expect
         let reply_data = reply_contents_data.lock().unwrap();
         assert_eq!(
-            reply_data.len(),
+            reply_data.as_ref().unwrap().len(),
             BLOCK_SIZE_BYTES,
             "should return full block"
         );
         assert!(
-            reply_data.iter().all(|&b| b == BLOCK_DATA),
+            reply_data
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|&b| b == BLOCK_DATA),
             "all bytes should match the pattern"
         );
     }
@@ -308,22 +320,27 @@ mod tests {
         let update_tx = node.update_tx.clone();
 
         let reply_contents_called = Arc::new(Mutex::new(false));
-        let reply_contents_data = Arc::new(Mutex::new(Vec::new()));
+        let reply_contents_data = Arc::new(Mutex::new(None));
         let reply_contents_called_clone = reply_contents_called.clone();
         let reply_contents_data_clone = reply_contents_data.clone();
 
         let (replied_tx, mut replied_rx) = mpsc::channel(1);
 
-        node.reply_block_contents_result =
-            Arc::new(Mutex::new(move |_call_id: OperationId, contents: &[u8]| {
+        node.reply_block_contents_result = Arc::new(Mutex::new(
+            move |_call_id: OperationId, contents: Option<&[u8]>| {
                 *reply_contents_called_clone.lock().unwrap() = true;
-                reply_contents_data_clone
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(contents);
+                match contents {
+                    Some(data) => {
+                        *reply_contents_data_clone.lock().unwrap() = Some(data.to_vec());
+                    }
+                    None => {
+                        *reply_contents_data_clone.lock().unwrap() = None;
+                    }
+                };
                 replied_tx.try_send(()).expect("replied");
                 Ok(())
-            }));
+            },
+        ));
 
         // Create share info
         let share_info = ShareInfo {
@@ -380,8 +397,7 @@ mod tests {
         // Verify empty data was returned for unverified piece
         let reply_data = reply_contents_data.lock().unwrap();
         assert_eq!(
-            reply_data.len(),
-            0,
+            *reply_data, None,
             "should return empty data for unverified piece"
         );
     }
