@@ -109,9 +109,9 @@ impl<P: Node> Actor for Seeder<P> {
                                 proto::Request::BlockRequest(block_req) => {
                                     if self.piece_map.get(block_req.piece) {
                                         let rd = self.read_block_into(&block_req, &mut buf).await?;
-                                        self.node.reply_block_contents(veilid_app_call.id(), &buf[..rd]).await?;
+                                        self.node.reply_block_contents(veilid_app_call.id(), Some(&buf[..rd])).await?;
                                     } else {
-                                        self.node.reply_block_contents(veilid_app_call.id(), &[]).await?;
+                                        self.node.reply_block_contents(veilid_app_call.id(), None).await?;
                                     }
                                 }
                                 _ => {}  // Ignore other request types
@@ -206,16 +206,17 @@ mod tests {
 
         let (replied_tx, mut replied_rx) = mpsc::channel(1);
 
-        node.reply_block_contents_result =
-            Arc::new(Mutex::new(move |_call_id: OperationId, contents: &[u8]| {
+        node.reply_block_contents_result = Arc::new(Mutex::new(
+            move |_call_id: OperationId, contents: Option<&[u8]>| {
                 *reply_contents_called_clone.lock().unwrap() = true;
-                reply_contents_data_clone
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(contents);
+                *reply_contents_data_clone.lock().unwrap() = match contents {
+                    Some(contents) => contents.to_vec(),
+                    None => vec![],
+                };
                 replied_tx.try_send(()).expect("replied");
                 Ok(())
-            }));
+            },
+        ));
 
         // Create share info
         let share_info = ShareInfo {
@@ -314,16 +315,17 @@ mod tests {
 
         let (replied_tx, mut replied_rx) = mpsc::channel(1);
 
-        node.reply_block_contents_result =
-            Arc::new(Mutex::new(move |_call_id: OperationId, contents: &[u8]| {
+        node.reply_block_contents_result = Arc::new(Mutex::new(
+            move |_call_id: OperationId, contents: Option<&[u8]>| {
                 *reply_contents_called_clone.lock().unwrap() = true;
-                reply_contents_data_clone
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(contents);
+                *reply_contents_data_clone.lock().unwrap() = match contents {
+                    Some(contents) => contents.to_vec(),
+                    None => vec![],
+                };
                 replied_tx.try_send(()).expect("replied");
                 Ok(())
-            }));
+            },
+        ));
 
         // Create share info
         let share_info = ShareInfo {

@@ -31,9 +31,9 @@ pub struct StubNode {
     pub resolve_route_result:
         Arc<Mutex<dyn Fn(&TypedKey, Option<Target>) -> Result<(Target, Header)> + Send + 'static>>,
     pub request_block_result:
-        Arc<Mutex<dyn Fn(Target, usize, usize) -> Result<Vec<u8>> + Send + 'static>>,
+        Arc<Mutex<dyn Fn(Target, usize, usize) -> Result<Option<Vec<u8>>> + Send + 'static>>,
     pub reply_block_contents_result:
-        Arc<Mutex<dyn Fn(OperationId, &[u8]) -> Result<()> + Send + 'static>>,
+        Arc<Mutex<dyn Fn(OperationId, Option<&[u8]>) -> Result<()> + Send + 'static>>,
     pub request_advertise_peer_result:
         Arc<Mutex<dyn Fn(&Target, &TypedKey) -> Result<()> + Send + 'static>>,
     pub watch_result: Arc<
@@ -84,7 +84,7 @@ impl StubNode {
                 },
             )),
             reply_block_contents_result: Arc::new(Mutex::new(
-                |_call_id: OperationId, _contents: &[u8]| {
+                |_call_id: OperationId, _contents: Option<&[u8]>| {
                     panic!("unexpected call to reply_block_contents")
                 },
             )),
@@ -176,11 +176,15 @@ impl Node for StubNode {
         target: Target,
         piece: usize,
         block: usize,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         (*(self.request_block_result.lock().unwrap()))(target, piece, block)
     }
 
-    async fn reply_block_contents(&mut self, call_id: OperationId, contents: &[u8]) -> Result<()> {
+    async fn reply_block_contents(
+        &mut self,
+        call_id: OperationId,
+        contents: Option<&[u8]>,
+    ) -> Result<()> {
         (*(self.reply_block_contents_result.lock().unwrap()))(call_id, contents)
     }
 

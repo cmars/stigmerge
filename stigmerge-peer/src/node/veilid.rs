@@ -389,7 +389,7 @@ impl Node for Veilid {
         target: Target,
         piece: usize,
         block: usize,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         let rc = self.routing_context.read().await;
         let block_req = Request::BlockRequest(BlockRequest {
             piece: piece as u32,
@@ -397,13 +397,23 @@ impl Node for Veilid {
         });
         let block_req_bytes = block_req.encode()?;
         let resp_bytes = rc.app_call(target, block_req_bytes).await?;
-        Ok(resp_bytes)
+        Ok(if resp_bytes.is_empty() {
+            None
+        } else {
+            Some(resp_bytes)
+        })
     }
 
     #[tracing::instrument(skip_all, err)]
-    async fn reply_block_contents(&mut self, call_id: OperationId, contents: &[u8]) -> Result<()> {
+    async fn reply_block_contents(
+        &mut self,
+        call_id: OperationId,
+        contents: Option<&[u8]>,
+    ) -> Result<()> {
         let rc = self.routing_context.read().await;
-        rc.api().app_call_reply(call_id, contents.to_vec()).await?;
+        rc.api()
+            .app_call_reply(call_id, contents.unwrap_or(&[]).to_vec())
+            .await?;
         Ok(())
     }
 

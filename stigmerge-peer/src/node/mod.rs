@@ -49,12 +49,12 @@ pub trait Node: Clone + Send {
         target: Target,
         piece: usize,
         block: usize,
-    ) -> impl Future<Output = Result<Vec<u8>>> + Send;
+    ) -> impl Future<Output = Result<Option<Vec<u8>>>> + Send;
 
     fn reply_block_contents(
         &mut self,
         call_id: OperationId,
-        contents: &[u8],
+        contents: Option<&[u8]>,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn request_advertise_peer(
