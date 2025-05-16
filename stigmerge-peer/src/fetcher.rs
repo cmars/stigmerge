@@ -150,6 +150,7 @@ impl Fetcher {
                     return Err(Error::msg("plan cancelled"))
                 }
                 res = self.clients.block_fetcher.send(block_fetcher::Request::Fetch {
+                    share_key: None,
                     block: FileBlockFetch {
                         file_index: want_block.file_index,
                         piece_index: want_block.piece_index,
@@ -232,6 +233,7 @@ impl Fetcher {
                         Some(block_fetcher::Response::FetchFailed { block, error_msg }) => {
                             warn!("failed to fetch block: {}", error_msg);
                             self.clients.block_fetcher.send(block_fetcher::Request::Fetch {
+                                share_key: None,
                                 block: block.clone(),
                                 flush: false
                             }).await?;
@@ -280,6 +282,7 @@ impl Fetcher {
                             for block_index in 0..piece_blocks  {
                                 self.clients.block_fetcher.send(
                                     block_fetcher::Request::Fetch {
+                                        share_key: None,
                                         block: FileBlockFetch {
                                            file_index,
                                            piece_index,
