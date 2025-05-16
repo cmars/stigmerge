@@ -1,10 +1,7 @@
 use std::{collections::HashSet, path::PathBuf};
 
 use stigmerge_fileindex::Index;
-use tokio::{
-    select,
-    sync::{broadcast, watch},
-};
+use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, warn, Level};
 use veilid_core::{Target, ValueSubkeyRangeSet, VeilidUpdate};
@@ -22,7 +19,8 @@ use crate::{
 /// the expected index by verifying its content digest.
 pub struct ShareResolver<N: Node> {
     node: N,
-    target_tx: watch::Sender<Option<Target>>,
+    target_tx: flume::Sender<(TypedKey, Target)>,
+    target_rx: flume::Receiver<(TypedKey, Target)>,
     updates: broadcast::Receiver<veilid_core::VeilidUpdate>,
     watching: HashSet<TypedKey>,
 }
@@ -30,18 +28,19 @@ impl<P: Node> ShareResolver<P> {
     /// Create a new share_resolver service.
     pub fn new(node: P) -> Self {
         let updates = node.subscribe_veilid_update();
-        // Initialize with a default target
-        let (target_tx, _) = watch::channel(None);
+        // Initialize the broadcast channel
+        let (target_tx, target_rx) = flume::unbounded();
         Self {
             node,
             target_tx,
+            target_rx,
             updates,
             watching: HashSet::new(),
         }
     }
 
-    pub fn subscribe_target(&self) -> watch::Receiver<Option<Target>> {
-        self.target_tx.subscribe()
+    pub fn subscribe_target(&self) -> flume::Receiver<(TypedKey, Target)> {
+        self.target_rx.clone()
     }
 }
 
@@ -228,7 +227,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                 };
 
                 if digest_matches {
-                    self.target_tx.send_replace(Some(target.to_owned()));
+                    let _ = self.target_tx.send((key.clone(), target.to_owned()));
                     Response::Index {
                         key: key.clone(),
                         header,
@@ -244,7 +243,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                 prior_target,
             } => {
                 let (target, header) = self.node.resolve_route(key, *prior_target).await?;
-                self.target_tx.send_replace(Some(target.to_owned()));
+                let _ = self.target_tx.send((key.clone(), target.to_owned()));
                 Response::Header {
                     key: key.clone(),
                     header,
@@ -264,6 +263,7 @@ impl<P: Node + Clone> Clone for ShareResolver<P> {
         Self {
             node: self.node.clone(),
             target_tx: self.target_tx.clone(),
+            target_rx: self.target_rx.clone(),
             updates: self.updates.resubscribe(),
             watching: self.watching.clone(),
         }
