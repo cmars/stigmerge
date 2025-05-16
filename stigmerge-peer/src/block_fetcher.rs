@@ -4,6 +4,7 @@ use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rand::seq::IteratorRandom;
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -28,9 +29,9 @@ pub struct BlockFetcher<N: Node> {
     want_index: Arc<RwLock<Index>>,
     root: PathBuf,
     target_update_rx: flume::Receiver<(TypedKey, Target)>,
-    target: Option<Target>,
     current_key: Option<TypedKey>,
     files: HashMap<usize, File>,
+    share_routes: HashMap<TypedKey, Target>,
 }
 
 impl<N: Node> BlockFetcher<N> {
@@ -46,18 +47,23 @@ impl<N: Node> BlockFetcher<N> {
             want_index,
             root,
             target_update_rx,
-            target: None,
             current_key: None,
             files: HashMap::new(),
+            share_routes: HashMap::new(),
         }
     }
 
     #[tracing::instrument(skip_all, err)]
-    async fn fetch_block(&mut self, block: &FileBlockFetch, flush: bool) -> Result<usize> {
+    async fn fetch_block(
+        &mut self,
+        target: Target,
+        block: &FileBlockFetch,
+        flush: bool,
+    ) -> Result<usize> {
         // Request block from peer with retry logic
         let result = self
             .node
-            .request_block(self.target.unwrap(), block.piece_index, block.block_index)
+            .request_block(target, block.piece_index, block.block_index)
             .await?
             .ok_or(Error::msg("block not found"))?;
         // Write the block to the file
@@ -86,11 +92,19 @@ impl<N: Node> BlockFetcher<N> {
         }
         Ok(block_end)
     }
+
+    fn random_target(&self) -> Option<&Target> {
+        self.share_routes.values().choose(&mut rand::rng())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Request {
-    Fetch { block: FileBlockFetch, flush: bool },
+    Fetch {
+        share_key: Option<TypedKey>,
+        block: FileBlockFetch,
+        flush: bool,
+    },
 }
 
 impl Request {
@@ -123,28 +137,26 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         cancel: CancellationToken,
         mut server_ch: ChanServer<Self::Request, Self::Response>,
     ) -> Result<()> {
-        self.target = None;
         self.current_key = None;
         loop {
-            if let None = self.target {
+            if self.share_routes.is_empty() {
                 select! {
-                     _ = cancel.cancelled() => {
-                         return Ok(())
-                     }
-                     res = self.target_update_rx.recv_async() => {
-                         match res {
-                             Ok((key, target)) => {
-                                 self.current_key = Some(key);
-                                 self.target = Some(target);
-                             }
-                             Err(e) => {
+                    _ = cancel.cancelled() => {
+                        return Ok(())
+                    }
+                    res = self.target_update_rx.recv_async() => {
+                        match res {
+                            Ok((key, target)) => {
+                                self.share_routes.insert(key, target);
+                            }
+                            Err(e) => {
                                 if cancel.is_cancelled() {
                                     return Ok(());
                                 }
                                 return Err(Error::msg(format!("target update channel: {e}")).into());
-                             }
-                         }
-                     }
+                            }
+                       }
+                    }
                 }
             }
 
@@ -155,8 +167,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                 res = self.target_update_rx.recv_async() => {
                     match res {
                         Ok((key, target)) => {
-                            self.current_key = Some(key);
-                            self.target = Some(target);
+                            self.share_routes.insert(key, target);
                         }
                         Err(e) => {
                             if cancel.is_cancelled() {
@@ -191,14 +202,18 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
-        if self.target.is_none() {
+        if self.share_routes.is_empty() {
             return Ok(Response::FetchFailed {
                 block: req.block().to_owned(),
-                error_msg: "fetch target not available yet".to_owned(),
+                error_msg: "target routes not available yet".to_owned(),
             });
         }
         match req {
-            Request::Fetch { block, flush } => {
+            Request::Fetch {
+                share_key,
+                block,
+                flush,
+            } => {
                 trace!(
                     "Fetching block: file={} piece={} block={}",
                     block.file_index,
@@ -206,8 +221,21 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                     block.block_index
                 );
 
+                let target = match match share_key {
+                    Some(key) => self.share_routes.get(&key),
+                    None => self.random_target(),
+                } {
+                    Some(target) => target,
+                    None => {
+                        return Ok(Response::FetchFailed {
+                            block: req.block().to_owned(),
+                            error_msg: "target route not found".to_owned(),
+                        });
+                    }
+                };
+
                 // Attempt to fetch the block
-                let length = self.fetch_block(block, *flush).await?;
+                let length = self.fetch_block(target.to_owned(), block, *flush).await?;
                 Ok(Response::Fetched {
                     block: block.clone(),
                     length,
@@ -224,9 +252,9 @@ impl<P: Node> Clone for BlockFetcher<P> {
             want_index: self.want_index.clone(),
             root: self.root.clone(),
             target_update_rx: self.target_update_rx.clone(),
-            target: self.target,
             current_key: self.current_key.clone(),
             files: HashMap::new(),
+            share_routes: self.share_routes.clone(),
         }
     }
 }
@@ -304,6 +332,7 @@ mod tests {
             piece_offset: 0,
         };
         let req = Request::Fetch {
+            share_key: Some(fake_key.to_owned()),
             block: block.clone(),
             flush: true,
         };
@@ -396,6 +425,7 @@ mod tests {
             piece_offset: 0,
         };
         let req = Request::Fetch {
+            share_key: Some(fake_key.to_owned()),
             block: block.clone(),
             flush: true,
         };
@@ -450,6 +480,7 @@ mod tests {
         // Request a block without sending target update first
         operator
             .send(Request::Fetch {
+                share_key: None,
                 block: FileBlockFetch {
                     file_index: 0,
                     piece_index: 0,
