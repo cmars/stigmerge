@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, Level};
-use veilid_core::{TimestampDuration, ValueSubkeyRangeSet};
+use veilid_core::ValueSubkeyRangeSet;
 
 use crate::{
     actor::{Actor, ChanServer},
@@ -158,11 +158,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                     self.peer_to_share_map
                         .insert(peer_map_ref.key().to_owned(), key.to_owned());
                     self.node
-                        .watch(
-                            peer_map_ref.key().to_owned(),
-                            ValueSubkeyRangeSet::full(),
-                            TimestampDuration::new_secs(60),
-                        )
+                        .watch(peer_map_ref.key().to_owned(), ValueSubkeyRangeSet::full())
                         .await?;
                     Response::Watching {
                         key: key.to_owned(),
@@ -178,7 +174,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                 let (_, header) = self.node.resolve_route(key, None).await?;
                 if let Some(peer_map_ref) = header.peer_map() {
                     self.peer_to_share_map.remove(peer_map_ref.key());
-                    self.node.cancel_watch(peer_map_ref.key());
+                    self.node.cancel_watch(peer_map_ref.key()).await?;
                 }
                 Response::WatchCancelled {
                     key: key.to_owned(),
@@ -206,7 +202,7 @@ mod tests {
     };
 
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{TimestampDuration, TypedKey, ValueSubkeyRangeSet};
+    use veilid_core::{TypedKey, ValueSubkeyRangeSet};
 
     use crate::{
         actor::{OneShot, Operator},
@@ -277,11 +273,9 @@ mod tests {
         let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_subkeys = Arc::new(RwLock::new(None));
-        let recorded_duration = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
         let recorded_subkeys_clone = recorded_subkeys.clone();
-        let recorded_duration_clone = recorded_duration.clone();
 
         // Setup the resolve_route_result to return a header with a peer_map
         let peer_map_key =
@@ -306,10 +300,9 @@ mod tests {
         ));
 
         node.watch_result = Arc::new(Mutex::new(
-            move |key: TypedKey, subkeys: ValueSubkeyRangeSet, duration: TimestampDuration| {
+            move |key: TypedKey, subkeys: ValueSubkeyRangeSet| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
-                *recorded_duration_clone.write().unwrap() = Some(duration);
                 Ok(())
             },
         ));
@@ -340,19 +333,13 @@ mod tests {
         // Verify the watch was called correctly
         let recorded_key = recorded_key.read().unwrap();
         let recorded_subkeys = recorded_subkeys.read().unwrap();
-        let recorded_duration = recorded_duration.read().unwrap();
 
         assert!(recorded_key.is_some(), "Key was not recorded");
         assert!(recorded_subkeys.is_some(), "Subkeys were not recorded");
-        assert!(recorded_duration.is_some(), "Duration was not recorded");
         assert_eq!(recorded_key.as_ref().unwrap(), &peer_map_key);
         assert_eq!(
             recorded_subkeys.as_ref().unwrap(),
             &ValueSubkeyRangeSet::full()
-        );
-        assert_eq!(
-            recorded_duration.as_ref().unwrap(),
-            &TimestampDuration::new_secs(60)
         );
 
         // Clean up
@@ -369,6 +356,7 @@ mod tests {
         let recorded_key_clone = recorded_key.clone();
         node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
             *recorded_key_clone.write().unwrap() = Some(key.clone());
+            Ok(())
         }));
 
         // Setup the resolve_route_result to return a header with a peer_map
@@ -432,9 +420,7 @@ mod tests {
         let mut node = StubNode::new();
 
         node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedKey, _subkeys: ValueSubkeyRangeSet, _duration: TimestampDuration| {
-                Ok(())
-            },
+            move |_key: TypedKey, _subkeys: ValueSubkeyRangeSet| Ok(()),
         ));
 
         // Create a test key and channel

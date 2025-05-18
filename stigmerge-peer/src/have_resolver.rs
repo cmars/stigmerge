@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, Level};
-use veilid_core::{TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
+use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, ChanServer},
@@ -30,7 +30,7 @@ where
     P: Node,
 {
     /// Create a new have_resolver service with the given peer.
-    pub(super) fn new(node: P) -> Self {
+    pub fn new(node: P) -> Self {
         let updates = node.subscribe_veilid_update();
         Self {
             node,
@@ -149,11 +149,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                         .insert(have_map_ref.key().to_owned(), key.to_owned());
                     info!("watch: have map key {}", have_map_ref.key());
                     self.node
-                        .watch(
-                            have_map_ref.key().to_owned(),
-                            ValueSubkeyRangeSet::full(),
-                            TimestampDuration::new_secs(60),
-                        )
+                        .watch(have_map_ref.key().to_owned(), ValueSubkeyRangeSet::full())
                         .await?;
                     Response::Watching {
                         key: key.to_owned(),
@@ -169,7 +165,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                 let (_, header) = self.node.resolve_route(key, None).await?;
                 if let Some(have_map_ref) = header.have_map() {
                     self.have_to_share_map.remove(have_map_ref.key());
-                    self.node.cancel_watch(have_map_ref.key());
+                    self.node.cancel_watch(have_map_ref.key()).await?;
                 }
                 Response::WatchCancelled {
                     key: key.to_owned(),
@@ -198,8 +194,8 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
     use veilid_core::{
-        CryptoKey, Target, TimestampDuration, ValueData, ValueSubkeyRangeSet, VeilidUpdate,
-        VeilidValueChange, CRYPTO_KEY_LENGTH, CRYPTO_KIND_VLD0,
+        CryptoKey, Target, ValueData, ValueSubkeyRangeSet, VeilidUpdate, VeilidValueChange,
+        CRYPTO_KEY_LENGTH, CRYPTO_KIND_VLD0,
     };
 
     use crate::{
@@ -264,11 +260,9 @@ mod tests {
         let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
         let recorded_subkeys = Arc::new(RwLock::new(None));
-        let recorded_duration = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
         let recorded_subkeys_clone = recorded_subkeys.clone();
-        let recorded_duration_clone = recorded_duration.clone();
 
         let have_map_key = TypedKey::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xa5; 32]));
         let have_map_key_clone = have_map_key.clone();
@@ -289,10 +283,9 @@ mod tests {
         ));
 
         node.watch_result = Arc::new(Mutex::new(
-            move |key: TypedKey, subkeys: ValueSubkeyRangeSet, duration: TimestampDuration| {
+            move |key: TypedKey, subkeys: ValueSubkeyRangeSet| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
-                *recorded_duration_clone.write().unwrap() = Some(duration);
                 Ok(())
             },
         ));
@@ -323,19 +316,13 @@ mod tests {
         // Verify the watch was called correctly
         let recorded_key = recorded_key.read().unwrap();
         let recorded_subkeys = recorded_subkeys.read().unwrap();
-        let recorded_duration = recorded_duration.read().unwrap();
 
         assert!(recorded_key.is_some(), "Key was not recorded");
         assert!(recorded_subkeys.is_some(), "Subkeys were not recorded");
-        assert!(recorded_duration.is_some(), "Duration was not recorded");
         assert_eq!(recorded_key.as_ref().unwrap(), &have_map_key);
         assert_eq!(
             recorded_subkeys.as_ref().unwrap(),
             &ValueSubkeyRangeSet::full()
-        );
-        assert_eq!(
-            recorded_duration.as_ref().unwrap(),
-            &TimestampDuration::new_secs(60)
         );
 
         // Clean up
@@ -354,6 +341,7 @@ mod tests {
         let recorded_key_clone = recorded_key.clone();
         node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
             *recorded_key_clone.write().unwrap() = Some(key.clone());
+            Ok(())
         }));
 
         let have_map_key_clone = have_map_key.clone();
@@ -435,9 +423,7 @@ mod tests {
 
         // Mock watch
         node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedKey, _subkeys: ValueSubkeyRangeSet, _duration: TimestampDuration| {
-                Ok(())
-            },
+            move |_key: TypedKey, _subkeys: ValueSubkeyRangeSet| Ok(()),
         ));
 
         // Mock resolve_have_map (called when watch fires)

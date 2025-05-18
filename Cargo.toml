@@ -27,7 +27,7 @@ tokio = { version = "1.40", features = ["full"] }
 tokio-util = { version = "0.7" }
 tracing = { version = "0.1", features = ["log", "attributes"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-veilid-core = { version = "0.4.4" }
+veilid-core = { version = "0.4.6" }
 
 [profile.release]
 strip = true

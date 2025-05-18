@@ -5,7 +5,7 @@ use std::{
 
 use stigmerge_fileindex::Index;
 use tokio::sync::broadcast::{self, Receiver, Sender};
-use veilid_core::{OperationId, Target, TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
+use veilid_core::{OperationId, Target, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{error::Result, node::TypedKey, piece_map::PieceMap};
 use crate::{
@@ -36,12 +36,9 @@ pub struct StubNode {
         Arc<Mutex<dyn Fn(OperationId, Option<&[u8]>) -> Result<()> + Send + 'static>>,
     pub request_advertise_peer_result:
         Arc<Mutex<dyn Fn(&Target, &TypedKey) -> Result<()> + Send + 'static>>,
-    pub watch_result: Arc<
-        Mutex<
-            dyn Fn(TypedKey, ValueSubkeyRangeSet, TimestampDuration) -> Result<()> + Send + 'static,
-        >,
-    >,
-    pub cancel_watch_result: Arc<Mutex<dyn Fn(&TypedKey) + Send + 'static>>,
+    pub watch_result:
+        Arc<Mutex<dyn Fn(TypedKey, ValueSubkeyRangeSet) -> Result<()> + Send + 'static>>,
+    pub cancel_watch_result: Arc<Mutex<dyn Fn(&TypedKey) -> Result<()> + Send + 'static>>,
     pub merge_have_map_result: Arc<
         Mutex<dyn Fn(TypedKey, ValueSubkeyRangeSet, &mut PieceMap) -> Result<()> + Send + 'static>,
     >,
@@ -94,9 +91,7 @@ impl StubNode {
                 },
             )),
             watch_result: Arc::new(Mutex::new(
-                |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| {
-                    panic!("unexpected call to watch")
-                },
+                |_key: TypedKey, _values: ValueSubkeyRangeSet| panic!("unexpected call to watch"),
             )),
             cancel_watch_result: Arc::new(Mutex::new(|_key: &TypedKey| {
                 panic!("unexpected call to cancel_watch")
@@ -188,16 +183,11 @@ impl Node for StubNode {
         (*(self.reply_block_contents_result.lock().unwrap()))(call_id, contents)
     }
 
-    async fn watch(
-        &mut self,
-        key: TypedKey,
-        values: ValueSubkeyRangeSet,
-        period: TimestampDuration,
-    ) -> Result<()> {
-        (*(self.watch_result.lock().unwrap()))(key, values, period)
+    async fn watch(&mut self, key: TypedKey, values: ValueSubkeyRangeSet) -> Result<()> {
+        (*(self.watch_result.lock().unwrap()))(key, values)
     }
 
-    fn cancel_watch(&mut self, key: &TypedKey) {
+    async fn cancel_watch(&mut self, key: &TypedKey) -> Result<()> {
         (*(self.cancel_watch_result.lock().unwrap()))(key)
     }
 

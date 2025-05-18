@@ -108,7 +108,7 @@ pub enum Response {
 }
 
 impl Response {
-    fn index_complete(&self) -> bool {
+    pub fn index_complete(&self) -> bool {
         match self {
             Response::ValidPiece { index_complete, .. } => *index_complete,
             _ => false,

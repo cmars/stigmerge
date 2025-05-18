@@ -3,10 +3,7 @@ use std::{future::Future, path::Path};
 
 use backoff::ExponentialBackoff;
 use tokio::sync::broadcast::Receiver;
-use veilid_core::{
-    CryptoKey, CryptoTyped, OperationId, Target, TimestampDuration, ValueSubkeyRangeSet,
-    VeilidUpdate,
-};
+use veilid_core::{CryptoKey, CryptoTyped, OperationId, Target, ValueSubkeyRangeSet, VeilidUpdate};
 
 use stigmerge_fileindex::Index;
 
@@ -67,10 +64,12 @@ pub trait Node: Clone + Send {
         &mut self,
         key: TypedKey,
         values: ValueSubkeyRangeSet,
-        period: TimestampDuration,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
-    fn cancel_watch(&mut self, key: &TypedKey);
+    fn cancel_watch(
+        &mut self,
+        key: &TypedKey,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn merge_have_map(
         &mut self,
@@ -121,30 +120,3 @@ pub fn retry_backoff() -> ExponentialBackoff {
 pub fn reset_backoff() -> ExponentialBackoff {
     ExponentialBackoff::default()
 }
-
-macro_rules! with_backoff_retry {
-    ($op:expr) => {{
-        use backoff::backoff::Backoff as _;
-        let mut retry_backoff = crate::node::retry_backoff();
-        let mut result = $op;
-        loop {
-            match result {
-                Ok(_) => break,
-                Err(ref e) => {
-                    tracing::warn!(err = format!("{}", e));
-                    match retry_backoff.next_backoff() {
-                        Some(delay) => tokio::time::sleep(delay).await,
-                        None => {
-                            tracing::warn!("operation retries exceeded");
-                            break;
-                        }
-                    };
-                    result = $op;
-                }
-            }
-        }
-        result
-    }};
-}
-
-pub(crate) use with_backoff_retry;

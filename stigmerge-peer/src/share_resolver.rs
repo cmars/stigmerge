@@ -7,7 +7,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, warn, Level};
-use veilid_core::{Target, TimestampDuration, ValueSubkeyRangeSet, VeilidUpdate};
+use veilid_core::{Target, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, ChanServer},
@@ -170,11 +170,11 @@ impl<P: Node> Actor for ShareResolver<P> {
                                 // Valid usable shares are watched.
                                 info!("watch: share key {valid_key}");
                                 self.watching.insert(*valid_key);
-                                self.node.watch(*valid_key, ValueSubkeyRangeSet::single(0), TimestampDuration::new(60_000_000)).await?;
+                                self.node.watch(*valid_key, ValueSubkeyRangeSet::single(0)).await?;
                             } else {
                                 // Invalid or unusable shares are unwatched.
                                 self.watching.remove(req.key());
-                                self.node.cancel_watch(req.key());
+                                self.node.cancel_watch(req.key()).await?;
                             }
                             trace!(?resp);
                             server_ch.send(resp).await?;
@@ -281,7 +281,7 @@ mod tests {
     use sha2::{Digest as _, Sha256};
     use stigmerge_fileindex::Indexer;
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{CryptoKey, Target, TimestampDuration, TypedKey, ValueSubkeyRangeSet};
+    use veilid_core::{CryptoKey, Target, TypedKey, ValueSubkeyRangeSet};
 
     use crate::actor::{OneShot, Operator};
     use crate::{
@@ -318,9 +318,9 @@ mod tests {
                 ))
             }));
         node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| Ok(()),
+            move |_key: TypedKey, _values: ValueSubkeyRangeSet| Ok(()),
         ));
-        node.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedKey| {}));
+        node.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedKey| Ok(())));
 
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot);
@@ -409,7 +409,7 @@ mod tests {
             },
         ));
         node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedKey, _values: ValueSubkeyRangeSet, _period: TimestampDuration| Ok(()),
+            move |_key: TypedKey, _values: ValueSubkeyRangeSet| Ok(()),
         ));
 
         let cancel = CancellationToken::new();
