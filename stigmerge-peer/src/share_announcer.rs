@@ -1,7 +1,7 @@
 use stigmerge_fileindex::Index;
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, Level};
+use tracing::{debug, info, Level};
 use veilid_core::{Target, VeilidUpdate};
 
 use crate::{actor::Actor, node::TypedKey, proto::Header, Node, Result};
@@ -135,6 +135,10 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
     async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
         match req {
             Request::Announce => {
+                debug!(
+                    "Request::Announce {:?}",
+                    self.share.as_ref().map(|s| s.key.to_string())
+                );
                 return self.reannounce().await;
             }
         }

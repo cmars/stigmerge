@@ -108,7 +108,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     // Set up share resolver
     let share_resolver = ShareResolver::new(node.clone());
     let target_rx = share_resolver.subscribe_target();
-    let mut share_resolve_op = Operator::new(
+    let mut share_resolver_op = Operator::new(
         cancel.clone(),
         share_resolver,
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
@@ -125,14 +125,14 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
                 .map_err(|_| Error::msg("Invalid digest length"))?;
 
             // Resolve the index from the bootstrap peer
-            share_resolve_op
+            share_resolver_op
                 .send(share_resolver::Request::Index {
                     key: share_key.clone(),
                     want_index_digest: Some(want_index_digest),
                     root: root.clone(),
                 })
                 .await?;
-            let index = match share_resolve_op.recv().await {
+            let index = match share_resolver_op.recv().await {
                 Some(share_resolver::Response::Index { index, .. }) => index,
                 Some(share_resolver::Response::BadIndex { .. }) => anyhow::bail!("Bad index"),
                 Some(share_resolver::Response::NotAvailable { err_msg, .. }) => {
@@ -190,6 +190,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             Arc::new(RwLock::new(index.clone())),
             index.root().to_path_buf(),
             target_rx,
+            share_resolver_op.client_tx(),
         ),
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
         args.fetchers,

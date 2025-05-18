@@ -8,12 +8,12 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn, Level};
 use veilid_core::{VeilidAPIError, VeilidUpdate};
 
 use crate::{
-    error::{CancelError, Permanent, Transient},
-    Node, Result,
+    error::{is_route_invalid, CancelError, Permanent, Transient},
+    is_cancelled, Node, Result,
 };
 
 /// Common interface for RPC services that handle requests and responses over channels.
@@ -171,6 +171,10 @@ impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Op
         }
         Ok(Ok(()))
     }
+
+    pub fn client_tx(&self) -> flume::Sender<Req> {
+        self.client_ch.tx.clone()
+    }
 }
 
 pub trait Runner<A: Actor> {
@@ -309,7 +313,7 @@ impl<
         N: Node,
     > Runner<A> for WithVeilidConnection<N>
 {
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE))]
     async fn run(
         &mut self,
         actor_inner: A,
@@ -317,10 +321,13 @@ impl<
         server_ch: ChanServer<<A as Actor>::Request, <A as Actor>::Response>,
     ) -> Result<()> {
         let state = self.state.clone();
-        let mut exp_backoff = backoff::ExponentialBackoffBuilder::new()
+        let mut route_backoff = backoff::ExponentialBackoffBuilder::new()
+            .with_max_interval(Duration::from_secs(3))
+            .build();
+        let mut transient_backoff = backoff::ExponentialBackoffBuilder::new()
             .with_max_interval(Duration::from_secs(5))
             .build();
-        let mut retries = 0;
+        let mut transient_retries = 0;
         let actor = Arc::new(Mutex::new(actor_inner));
         loop {
             {
@@ -354,11 +361,19 @@ impl<
                             return Ok(());
                         }
                         Err(e) => {
+                            if is_cancelled(&e) {
+                                return Ok(());
+                            }
                             error!("{:?}", e);
+                            if is_route_invalid(&e) {
+                                debug!("route invalid");
+                                sleep(route_backoff.next_backoff().unwrap_or(route_backoff.max_interval)).await;
+                                continue;
+                            }
                             if e.is_transient() {
-                                sleep(exp_backoff.next_backoff().unwrap_or(exp_backoff.max_interval)).await;
-                                retries += 1;
-                                if retries < MAX_TRANSIENT_RETRIES {
+                                sleep(transient_backoff.next_backoff().unwrap_or(transient_backoff.max_interval)).await;
+                                transient_retries += 1;
+                                if transient_retries < MAX_TRANSIENT_RETRIES {
                                     continue;
                                 }
                                 warn!("too many transient errors");
@@ -371,8 +386,9 @@ impl<
                                     info!("marking disconnected");
                                     self.node.reset().await?;
                                     st.connected.send_if_modified(|val| if *val { *val = false; true } else { false });
-                                    exp_backoff.reset();
-                                    retries = 0;
+                                    route_backoff.reset();
+                                    transient_backoff.reset();
+                                    transient_retries = 0;
                                 }
                             }
                         }
@@ -386,6 +402,9 @@ impl<
                                 if let Ok(st) = state.try_lock() {
                                     info!("marking disconnected: {:?}", veilid_state_attachment);
                                     st.connected.send_if_modified(|val| if *val { *val = false; true } else { false });
+                                    route_backoff.reset();
+                                    transient_backoff.reset();
+                                    transient_retries = 0;
                                 }
                             }
                         }
@@ -412,8 +431,8 @@ impl<N: Clone> Clone for WithVeilidConnection<N> {
     }
 }
 
-fn unbounded<Request, Response>() -> (ChanClient<Request, Response>, ChanServer<Request, Response>)
-{
+pub(crate) fn unbounded<Request, Response>(
+) -> (ChanClient<Request, Response>, ChanServer<Request, Response>) {
     let (client_tx, client_rx) = flume::unbounded();
     let (server_tx, server_rx) = flume::unbounded();
     (

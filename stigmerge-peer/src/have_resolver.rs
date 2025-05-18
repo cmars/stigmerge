@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, Level};
+use tracing::{debug, info, Level};
 use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -136,6 +136,7 @@ impl<P: Node> Actor for HaveResolver<P> {
     async fn handle(&mut self, req: &Request) -> Result<Response> {
         Ok(match req {
             Request::Resolve { key } => {
+                debug!("Request::Resolve {key}");
                 let have_map = self.node.resolve_have_map(key).await?;
                 Response::Resolve {
                     key: key.to_owned(),
@@ -143,6 +144,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                 }
             }
             Request::Watch { key } => {
+                debug!("Request::Watch {key}");
                 let (_, header) = self.node.resolve_route(key, None).await?;
                 if let Some(have_map_ref) = header.have_map() {
                     self.have_to_share_map
@@ -162,6 +164,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                 }
             }
             Request::CancelWatch { key } => {
+                debug!("Request::CancelWatch {key}");
                 let (_, header) = self.node.resolve_route(key, None).await?;
                 if let Some(have_map_ref) = header.have_map() {
                     self.have_to_share_map.remove(have_map_ref.key());

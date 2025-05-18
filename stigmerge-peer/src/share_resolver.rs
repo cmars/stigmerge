@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::PathBuf};
 use stigmerge_fileindex::Index;
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, trace, warn, Level};
+use tracing::{debug, info, trace, warn, Level};
 use veilid_core::{Target, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -215,6 +215,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                 want_index_digest,
                 root,
             } => {
+                debug!("Request::Index {key}");
                 let (target, header, mut index) =
                     self.node.resolve_route_index(key, root.as_path()).await?;
                 let peer_index_digest = index.digest()?;
@@ -242,8 +243,9 @@ impl<P: Node> Actor for ShareResolver<P> {
                 ref key,
                 prior_target,
             } => {
+                debug!("Request::Header {key}");
                 let (target, header) = self.node.resolve_route(key, *prior_target).await?;
-                let _ = self.target_tx.send((key.clone(), target.to_owned()));
+                let _ = self.target_tx.try_send((key.clone(), target.to_owned()));
                 Response::Header {
                     key: key.clone(),
                     header,

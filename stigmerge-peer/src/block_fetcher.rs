@@ -11,16 +11,16 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::select;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, Level};
+use tracing::{debug, trace, Level};
 use veilid_core::Target;
 
 use crate::node::TypedKey;
 
 use crate::actor::{Actor, ChanServer};
-use crate::error::Result;
-use crate::is_cancelled;
+use crate::error::{is_route_invalid, Result};
 use crate::node::Node;
 use crate::Error;
+use crate::{is_cancelled, share_resolver};
 
 use super::types::FileBlockFetch;
 
@@ -32,6 +32,7 @@ pub struct BlockFetcher<N: Node> {
     current_key: Option<TypedKey>,
     files: HashMap<usize, File>,
     share_routes: HashMap<TypedKey, Target>,
+    share_resolver_tx: flume::Sender<share_resolver::Request>,
 }
 
 impl<N: Node> BlockFetcher<N> {
@@ -41,6 +42,7 @@ impl<N: Node> BlockFetcher<N> {
         want_index: Arc<RwLock<Index>>,
         root: PathBuf,
         target_update_rx: flume::Receiver<(TypedKey, Target)>,
+        share_resolver_tx: flume::Sender<share_resolver::Request>,
     ) -> Self {
         Self {
             node,
@@ -50,12 +52,14 @@ impl<N: Node> BlockFetcher<N> {
             current_key: None,
             files: HashMap::new(),
             share_routes: HashMap::new(),
+            share_resolver_tx,
         }
     }
 
     #[tracing::instrument(skip_all, err)]
     async fn fetch_block(
         &mut self,
+        key: TypedKey,
         target: Target,
         block: &FileBlockFetch,
         flush: bool,
@@ -65,7 +69,7 @@ impl<N: Node> BlockFetcher<N> {
             .node
             .request_block(target, block.piece_index, block.block_index)
             .await?
-            .ok_or(Error::msg("block not found"))?;
+            .ok_or(Error::msg(format!("block not found: {key}")))?;
         // Write the block to the file
         let fh = match self.files.get_mut(&block.file_index) {
             Some(fh) => fh,
@@ -93,8 +97,9 @@ impl<N: Node> BlockFetcher<N> {
         Ok(block_end)
     }
 
-    fn random_target(&self) -> Option<&Target> {
-        self.share_routes.values().choose(&mut rand::rng())
+    fn random_target(&self) -> Option<(&TypedKey, &Target)> {
+        let key = self.share_routes.keys().choose(&mut rand::rng());
+        key.map(|k| (k, self.share_routes.get(k).unwrap()))
     }
 }
 
@@ -187,6 +192,13 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                                     if is_cancelled(&e) {
                                         return Ok(());
                                     }
+                                    if is_route_invalid(&e) {
+                                        if let Request::Fetch{share_key: Some(share_key), ..} = req {
+                                            debug!("invalid route for {share_key}, requesting header");
+                                            let _ = self.share_resolver_tx.try_send(share_resolver::Request::Header{ key: share_key, prior_target: None });
+                                            return Err(e);
+                                        }
+                                    }
                                     // Whether the fetch was successful or not, respond back to the caller.
                                     let resp = Response::FetchFailed { block: req.block(), error_msg: e.to_string() };
                                     server_ch.send(resp).await?;
@@ -221,11 +233,11 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                     block.block_index
                 );
 
-                let target = match match share_key {
-                    Some(key) => self.share_routes.get(&key),
+                let (key, target) = match match share_key {
+                    Some(key) => self.share_routes.get(key).map(|target| (key, target)),
                     None => self.random_target(),
                 } {
-                    Some(target) => target,
+                    Some(key_target) => key_target,
                     None => {
                         return Ok(Response::FetchFailed {
                             block: req.block().to_owned(),
@@ -235,7 +247,9 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                 };
 
                 // Attempt to fetch the block
-                let length = self.fetch_block(target.to_owned(), block, *flush).await?;
+                let length = self
+                    .fetch_block(key.to_owned(), target.to_owned(), block, *flush)
+                    .await?;
                 Ok(Response::Fetched {
                     block: block.clone(),
                     length,
@@ -255,6 +269,7 @@ impl<P: Node> Clone for BlockFetcher<P> {
             current_key: self.current_key.clone(),
             files: HashMap::new(),
             share_routes: self.share_routes.clone(),
+            share_resolver_tx: self.share_resolver_tx.clone(),
         }
     }
 }
@@ -310,12 +325,19 @@ mod tests {
 
         let (target_tx, target_rx) = flume::unbounded();
         let fetcher_root = tf_path.parent().unwrap().to_path_buf();
+        let (share_resolver_tx, _) = flume::unbounded();
 
         // Start BlockFetcher
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+            BlockFetcher::new(
+                node,
+                Arc::new(RwLock::new(index)),
+                fetcher_root,
+                target_rx,
+                share_resolver_tx,
+            ),
             OneShot,
         );
 
@@ -404,11 +426,18 @@ mod tests {
 
         let (target_tx, target_rx) = flume::unbounded();
         let fetcher_root = tf_path.parent().unwrap().to_path_buf();
+        let (share_resolver_tx, _) = flume::unbounded();
 
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+            BlockFetcher::new(
+                node,
+                Arc::new(RwLock::new(index)),
+                fetcher_root,
+                target_rx,
+                share_resolver_tx,
+            ),
             OneShot,
         );
 
@@ -473,8 +502,15 @@ mod tests {
         // Set up BlockFetcher
         let node = StubNode::new();
         let (_, target_rx) = flume::unbounded::<(TypedKey, Target)>();
+        let (share_resolver_tx, _) = flume::unbounded();
         let cancel = CancellationToken::new();
-        let fetcher = BlockFetcher::new(node, Arc::new(RwLock::new(index)), tf_path, target_rx);
+        let fetcher = BlockFetcher::new(
+            node,
+            Arc::new(RwLock::new(index)),
+            tf_path,
+            target_rx,
+            share_resolver_tx,
+        );
         let mut operator = Operator::new(cancel.clone(), fetcher, OneShot);
 
         // Request a block without sending target update first

@@ -65,7 +65,7 @@ async fn main() -> std::result::Result<(), Error> {
     // Set up share resolver
     let share_resolver = ShareResolver::new(node.clone());
     let target_rx = share_resolver.subscribe_target();
-    let mut resolve_op = Operator::new(
+    let mut share_resolver_op = Operator::new(
         cancel.clone(),
         share_resolver,
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
@@ -79,7 +79,7 @@ async fn main() -> std::result::Result<(), Error> {
         .map_err(|_| Error::msg("Invalid digest length"))?;
 
     // Resolve the index
-    resolve_op
+    share_resolver_op
         .send(share_resolver::Request::Index {
             key: key.clone(),
             want_index_digest: Some(want_index_digest),
@@ -87,7 +87,7 @@ async fn main() -> std::result::Result<(), Error> {
         })
         .await?;
 
-    let (header, index) = match resolve_op.recv().await {
+    let (header, index) = match share_resolver_op.recv().await {
         Some(share_resolver::Response::Index { header, index, .. }) => (header, index),
         Some(share_resolver::Response::BadIndex { .. }) => anyhow::bail!("Bad index"),
         Some(share_resolver::Response::NotAvailable { err_msg, .. }) => anyhow::bail!(err_msg),
@@ -103,6 +103,7 @@ async fn main() -> std::result::Result<(), Error> {
             want_index.clone(),
             download_dir.clone(),
             target_rx,
+            share_resolver_op.client_tx(),
         ),
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
         50,
