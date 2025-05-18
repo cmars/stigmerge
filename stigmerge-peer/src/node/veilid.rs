@@ -1,16 +1,10 @@
-use std::{cmp::min, collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{cmp::min, path::Path, sync::Arc};
 
-use tokio::{
-    select,
-    sync::{broadcast, RwLock},
-    task::JoinSet,
-    time::{sleep, sleep_until, Instant},
-};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, trace, warn, Level};
 use veilid_core::{
-    DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Target, Timestamp,
-    TimestampDuration, ValueData, ValueSubkeyRangeSet, VeilidAPIError, VeilidUpdate,
+    DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Target, ValueData,
+    ValueSubkeyRangeSet, VeilidAPIError, VeilidUpdate,
 };
 
 use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
@@ -25,15 +19,12 @@ use crate::{
     Error, Result,
 };
 
-use super::{with_backoff_retry, Node, TypedKey};
+use super::{Node, TypedKey};
 
 pub struct Veilid {
     routing_context: Arc<RwLock<RoutingContext>>,
 
     update_tx: broadcast::Sender<VeilidUpdate>,
-
-    watchers: JoinSet<Result<()>>,
-    watch_cancels: HashMap<TypedKey, CancellationToken>,
 }
 
 impl Veilid {
@@ -45,8 +36,6 @@ impl Veilid {
         Ok(Veilid {
             routing_context: Arc::new(RwLock::new(routing_context)),
             update_tx,
-            watchers: JoinSet::new(),
-            watch_cancels: HashMap::new(),
         })
     }
 
@@ -273,8 +262,6 @@ impl Clone for Veilid {
         Veilid {
             routing_context: self.routing_context.clone(),
             update_tx: self.update_tx.clone(),
-            watchers: JoinSet::new(),
-            watch_cancels: HashMap::new(),
         }
     }
 }
@@ -295,8 +282,7 @@ impl Node for Veilid {
     }
 
     #[tracing::instrument(skip_all, err)]
-    async fn shutdown(mut self) -> Result<()> {
-        self.watchers.shutdown().await;
+    async fn shutdown(self) -> Result<()> {
         let rc = self.routing_context.write().await;
         rc.api().shutdown().await;
         Ok(())
@@ -427,12 +413,7 @@ impl Node for Veilid {
     }
 
     #[tracing::instrument(skip_all, err)]
-    async fn watch(
-        &mut self,
-        key: TypedKey,
-        values: ValueSubkeyRangeSet,
-        period: TimestampDuration,
-    ) -> Result<()> {
+    async fn watch(&mut self, key: TypedKey, values: ValueSubkeyRangeSet) -> Result<()> {
         {
             // Ensure DHT record is open on this node
             let _ = self
@@ -442,56 +423,22 @@ impl Node for Veilid {
                 .open_dht_record(key.to_owned(), None)
                 .await?;
         }
-        let watch_cancel = CancellationToken::new();
-        if let Some(prior) = self.watch_cancels.insert(key.clone(), watch_cancel.clone()) {
-            // Replace prior watch with this one
-            prior.cancel();
-        }
         let rc = self.routing_context.clone();
-        self.watchers.spawn(async move {
-            loop {
-                let routing_context = rc.read().await;
-                let now = Timestamp::now();
-                let expiration = match with_backoff_retry!({
-                    if watch_cancel.is_cancelled() {
-                        return Ok(());
-                    }
-                    routing_context
-                        .watch_dht_values(
-                            key,
-                            values.clone(),
-                            // TODO: configurable?
-                            now + period,
-                            16,
-                        )
-                        .await
-                }) {
-                    Ok(res) => res,
-                    Err(_e) => {
-                        sleep(Duration::from_secs(5)).await;
-                        continue;
-                    }
-                };
-                let deadline =
-                    Instant::now() + Duration::from_micros(expiration.saturating_sub(now).as_u64());
-                select! {
-                    _ = sleep_until(deadline) => {
-                        continue;
-                    }
-                    _ = watch_cancel.cancelled() => {
-                        return Ok(());
-                    }
-                };
-            }
-        });
+        let routing_context = rc.read().await;
+        routing_context
+            .watch_dht_values(key, Some(values.clone()), None, None)
+            .await?;
         Ok(())
     }
 
     #[tracing::instrument(skip_all)]
-    fn cancel_watch(&mut self, key: &TypedKey) {
-        if let Some(prior) = self.watch_cancels.remove(key) {
-            prior.cancel();
-        }
+    async fn cancel_watch(&mut self, key: &TypedKey) -> Result<()> {
+        let rc = self.routing_context.clone();
+        let routing_context = rc.read().await;
+        routing_context
+            .watch_dht_values(key.to_owned(), None, None, Some(0))
+            .await?;
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, err)]

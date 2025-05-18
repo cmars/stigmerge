@@ -30,7 +30,7 @@
           buildInputs = (with pkgs; [
             cargo
             cargo-watch
-            (rust-bin.stable."1.81.0".default.override { extensions = [ "rust-src" ]; })
+            (rust-bin.stable."1.86.0".default.override { extensions = [ "rust-src" ]; })
             rustfmt
             rust-analyzer
             clang
@@ -54,7 +54,7 @@
 
           buildInputs = with pkgs; [
             cargo
-            rust-bin.stable."1.81.0".default
+            rust-bin.stable."1.86.0".default
             capnproto
             protobuf
             pkg-config
