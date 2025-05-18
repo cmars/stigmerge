@@ -2,9 +2,7 @@
   description = "stigmerge";
 
   inputs = {
-    # NixOS 24.11 has recent enough versions of capnproto and protobuf to
-    # develop on Veilid.
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-24.11";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
