@@ -55,9 +55,9 @@ async fn main() -> std::result::Result<(), Error> {
     let state_dir = tempfile::tempdir()?;
 
     // Set up Veilid node
-    let (routing_context, update_tx, _) =
+    let (routing_context, update_tx, update_rx) =
         new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let node = Veilid::new(routing_context, update_tx).await?;
+    let node = Veilid::new(routing_context, update_tx, update_rx).await?;
 
     let cancel = CancellationToken::new();
     let conn_state = Arc::new(Mutex::new(ConnectionState::new()));
@@ -79,18 +79,18 @@ async fn main() -> std::result::Result<(), Error> {
         .map_err(|_| Error::msg("Invalid digest length"))?;
 
     // Resolve the index
-    resolve_op
-        .send(share_resolver::Request::Index {
+    let (header, index) = match resolve_op
+        .call(share_resolver::Request::Index {
+            response_tx: None,
             key: key.clone(),
             want_index_digest: Some(want_index_digest),
             root: download_dir.clone(),
         })
-        .await?;
-
-    let (header, index) = match resolve_op.recv().await {
-        Some(share_resolver::Response::Index { header, index, .. }) => (header, index),
-        Some(share_resolver::Response::BadIndex { .. }) => anyhow::bail!("Bad index"),
-        Some(share_resolver::Response::NotAvailable { err_msg, .. }) => anyhow::bail!(err_msg),
+        .await?
+    {
+        share_resolver::Response::Index { header, index, .. } => (header, index),
+        share_resolver::Response::BadIndex { .. } => anyhow::bail!("Bad index"),
+        share_resolver::Response::NotAvailable { err_msg, .. } => anyhow::bail!(err_msg),
         _ => anyhow::bail!("Unexpected response"),
     };
 

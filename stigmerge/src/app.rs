@@ -66,8 +66,8 @@ impl App {
 
         // Set up Veilid node
         let state_dir = self.cli.state_dir()?;
-        let (routing_context, update_tx, _) = new_routing_context(&state_dir, None).await?;
-        let node = Veilid::new(routing_context, update_tx).await?;
+        let (routing_context, update_tx, update_rx) = new_routing_context(&state_dir, None).await?;
+        let node = Veilid::new(routing_context, update_tx, update_rx).await?;
 
         let res = self.run_with_node(node.clone()).await;
         let _ = node.shutdown().await;
@@ -182,21 +182,21 @@ impl App {
                         }
                         None => None,
                     };
-
                     // Resolve the index from the bootstrap peer
-                    share_resolve_op
-                        .send(share_resolver::Request::Index {
+                    let index = match share_resolve_op
+                        .call(share_resolver::Request::Index {
+                            response_tx: None,
                             key: share_key.clone(),
                             want_index_digest,
                             root: root.clone(),
                         })
-                        .await?;
-                    let index = match share_resolve_op.recv().await {
-                        Some(share_resolver::Response::Index { index, .. }) => index,
-                        Some(share_resolver::Response::BadIndex { .. }) => {
+                        .await?
+                    {
+                        share_resolver::Response::Index { index, .. } => index,
+                        share_resolver::Response::BadIndex { .. } => {
                             anyhow::bail!("Bad index")
                         }
-                        Some(share_resolver::Response::NotAvailable { err_msg, .. }) => {
+                        share_resolver::Response::NotAvailable { err_msg, .. } => {
                             anyhow::bail!(err_msg)
                         }
                         _ => anyhow::bail!("Unexpected response"),
@@ -227,15 +227,14 @@ impl App {
             ShareAnnouncer::new(node.clone(), index.clone()),
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
-        share_announce_op
-            .send(share_announcer::Request::Announce)
-            .await?;
-        let (share_key, share_header) = match share_announce_op.recv().await {
-            Some(share_announcer::Response::Announce { key, header, .. }) => (key, header),
-            Some(share_announcer::Response::NotAvailable) => {
+        let (share_key, share_header) = match share_announce_op
+            .call(share_announcer::Request::Announce { response_tx: None })
+            .await?
+        {
+            share_announcer::Response::Announce { key, header, .. } => (key, header),
+            share_announcer::Response::NotAvailable => {
                 anyhow::bail!("failed to announce share")
             }
-            None => todo!(),
         };
 
         info!("announced share, key: {share_key}");
@@ -296,7 +295,7 @@ impl App {
             seeder,
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
-        tasks.spawn(async move { seeder_op.join().await? });
+        tasks.spawn(async move { seeder_op.join().await });
 
         info!("Seeding until ctrl-c...");
         let seed_progress = self.multi_progress.add(ProgressBar::new_spinner());

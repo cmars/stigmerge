@@ -1,8 +1,9 @@
 use std::ops::Deref;
 
 use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
-use tokio::select;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
+use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
 use tracing::{warn, Level};
 
@@ -19,12 +20,19 @@ pub struct Fetcher {
     state: State,
     status_tx: watch::Sender<Status>,
     status_rx: watch::Receiver<Status>,
+
+    fetch_tasks: JoinSet<Result<()>>,
+    fetch_tx: flume::Sender<block_fetcher::Response>,
+    fetch_rx: flume::Receiver<block_fetcher::Response>,
+
+    verify_tx: flume::Sender<piece_verifier::Response>,
+    verify_rx: flume::Receiver<piece_verifier::Response>,
 }
 
 pub struct Clients {
-    pub block_fetcher: Operator<block_fetcher::Request, block_fetcher::Response>,
-    pub piece_verifier: Operator<piece_verifier::Request, piece_verifier::Response>,
-    pub have_announcer: Operator<have_announcer::Request, have_announcer::Response>,
+    pub block_fetcher: Operator<block_fetcher::Request>,
+    pub piece_verifier: Operator<piece_verifier::Request>,
+    pub have_announcer: Operator<have_announcer::Request>,
 }
 
 #[derive(Debug)]
@@ -62,6 +70,8 @@ impl Fetcher {
     #[tracing::instrument(skip_all, fields(share))]
     pub fn new(share: ShareInfo, clients: Clients) -> Fetcher {
         let (status_tx, status_rx) = watch::channel(Status::NotStarted);
+        let (fetch_tx, fetch_rx) = flume::unbounded();
+        let (verify_tx, verify_rx) = flume::unbounded();
         Fetcher {
             clients,
             have_index: share.want_index.empty(),
@@ -69,6 +79,11 @@ impl Fetcher {
             state: State::Indexing,
             status_tx,
             status_rx,
+            fetch_tasks: JoinSet::new(),
+            fetch_tx,
+            fetch_rx,
+            verify_tx,
+            verify_rx,
         }
     }
 
@@ -147,17 +162,22 @@ impl Fetcher {
         for want_block in diff.want {
             select! {
                 _ = cancel.cancelled() => {
-                    return Err(Error::msg("plan cancelled"))
+                    self.fetch_tasks.abort_all();
+                    cancel.cancel();
+                    return Err(Error::msg("plan cancelled"));
                 }
-                res = self.clients.block_fetcher.send(block_fetcher::Request::Fetch {
-                    block: FileBlockFetch {
-                        file_index: want_block.file_index,
-                        piece_index: want_block.piece_index,
-                        piece_offset: want_block.piece_offset,
-                        block_index: want_block.block_index,
-                    },
-                    flush: true,
-                }) => {
+                res = self.clients.block_fetcher.defer(
+                    block_fetcher::Request::Fetch {
+                        response_tx: None,
+                        block: FileBlockFetch {
+                            file_index: want_block.file_index,
+                            piece_index: want_block.piece_index,
+                            piece_offset: want_block.piece_offset,
+                            block_index: want_block.block_index,
+                        },
+                        flush: true,
+                    }, self.fetch_tx.clone(),
+                ) => {
                     res?;
                     want_length += want_block.block_length;
                 }
@@ -169,13 +189,16 @@ impl Fetcher {
                 _ = cancel.cancelled() => {
                     return Err(Error::msg("plan cancelled"))
                 }
-                res = self.clients.piece_verifier.send(piece_verifier::Request::Piece(PieceState::new(
-                    have_block.file_index,
-                    have_block.piece_index,
-                    have_block.piece_offset,
-                    self.want_index.payload().pieces()[have_block.piece_index].block_count(),
-                    have_block.block_index,
-                ))) => {
+                res = self.clients.piece_verifier.defer(piece_verifier::Request::Piece {
+                    piece_state: PieceState::new(
+                        have_block.file_index,
+                        have_block.piece_index,
+                        have_block.piece_offset,
+                        self.want_index.payload().pieces()[have_block.piece_index].block_count(),
+                        have_block.block_index,
+                    ),
+                    response_tx: None,
+                }, self.verify_tx.clone()) => {
                     res?;
                     have_length += have_block.block_length;
                 }
@@ -204,13 +227,13 @@ impl Fetcher {
                 _ = cancel.cancelled() => {
                     return Ok(State::Done)
                 }
-                res = self.clients.block_fetcher.recv() => {
+                res = self.fetch_rx.recv_async() => {
                     match res {
                         // An empty fetcher channel means we've received a
                         // response for all block requests. However, some of
                         // these might fail to validate.
-                        None => continue,
-                        Some(block_fetcher::Response::Fetched { block, length }) => {
+                        Err(_) => continue,
+                        Ok(block_fetcher::Response::Fetched { block, length }) => {
                             fetched_bytes += TryInto::<u64>::try_into(length).unwrap();
 
                             // Send progress to subscribers
@@ -221,27 +244,30 @@ impl Fetcher {
                                 });
 
                             // Update verifier
-                            self.clients.piece_verifier.send(piece_verifier::Request::Piece(PieceState::new(
-                                block.file_index,
-                                block.piece_index,
-                                block.piece_offset,
-                                self.want_index.payload().pieces()[block.piece_index].block_count(),
-                                block.block_index,
-                            ))).await?;
+                            self.clients.piece_verifier.defer(piece_verifier::Request::Piece {
+                                piece_state: PieceState::new(
+                                    block.file_index,
+                                    block.piece_index,
+                                    block.piece_offset,
+                                    self.want_index.payload().pieces()[block.piece_index].block_count(),
+                                    block.block_index,
+                                ),
+                                response_tx: None,
+                            }, self.verify_tx.clone()).await?;
                         }
-                        Some(block_fetcher::Response::FetchFailed { block, error_msg }) => {
+                        Ok(block_fetcher::Response::FetchFailed { block, error_msg }) => {
                             warn!("failed to fetch block: {}", error_msg);
-                            self.clients.block_fetcher.send(block_fetcher::Request::Fetch {
+                            self.clients.block_fetcher.defer(block_fetcher::Request::Fetch {
+                                response_tx: None,
                                 block: block.clone(),
                                 flush: false
-                            }).await?;
+                            }, self.fetch_tx.clone()).await?;
                         }
                     }
                 }
-                res = self.clients.piece_verifier.recv() => {
-                    match res {
-                        None => continue,
-                        Some(piece_verifier::Response::ValidPiece { file_index:_, piece_index, index_complete }) => {
+                res = self.verify_rx.recv_async() => {
+                    match res? {
+                        piece_verifier::Response::ValidPiece { file_index:_, piece_index, index_complete } => {
                             verified_pieces += 1u64;
 
                             // Update verify progress
@@ -254,6 +280,7 @@ impl Fetcher {
                             // Update have map
                             self.clients.have_announcer.send(
                                 have_announcer::Request::Set {
+                                    response_tx: None,
                                     piece_index: piece_index.try_into().unwrap(),
                                 }).await?;
 
@@ -262,7 +289,7 @@ impl Fetcher {
                                 return Ok(State::Done);
                             }
                         }
-                        Some(piece_verifier::Response::InvalidPiece { file_index, piece_index }) => {
+                        piece_verifier::Response::InvalidPiece { file_index, piece_index } => {
                             let piece_length = self.want_index.payload().pieces()[piece_index].length();
                             warn!(file_index, piece_index, piece_length, "invalid piece");
 
@@ -278,8 +305,9 @@ impl Fetcher {
                             // Re-fetch all the blocks in the failed piece
                             let piece_blocks = piece_length / BLOCK_SIZE_BYTES + if piece_length % BLOCK_SIZE_BYTES > 0 { 1 } else { 0 };
                             for block_index in 0..piece_blocks  {
-                                self.clients.block_fetcher.send(
+                                self.clients.block_fetcher.defer(
                                     block_fetcher::Request::Fetch {
+                                        response_tx: None,
                                         block: FileBlockFetch {
                                            file_index,
                                            piece_index,
@@ -287,10 +315,10 @@ impl Fetcher {
                                            block_index
                                         },
                                         flush: false,
-                                    }).await?;
+                                    }, self.fetch_tx.clone()).await?;
                             }
                         }
-                        Some(piece_verifier::Response::IncompletePiece { .. }) => {}
+                        piece_verifier::Response::IncompletePiece { .. } => {}
                     }
                 }
             }
@@ -299,9 +327,11 @@ impl Fetcher {
 
     #[tracing::instrument(skip_all, err)]
     async fn join(self) -> Result<()> {
-        self.clients.piece_verifier.join().await??;
-        self.clients.block_fetcher.join().await??;
-        self.clients.have_announcer.join().await??;
+        try_join!(
+            self.clients.piece_verifier.join(),
+            self.clients.block_fetcher.join(),
+            self.clients.have_announcer.join(),
+        )?;
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use std::{cmp::min, path::Path, sync::Arc};
 
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, trace, warn, Level};
 use veilid_core::{
     DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Target, ValueData,
@@ -24,18 +24,21 @@ use super::{Node, TypedKey};
 pub struct Veilid {
     routing_context: Arc<RwLock<RoutingContext>>,
 
-    update_tx: broadcast::Sender<VeilidUpdate>,
+    update_tx: flume::Sender<VeilidUpdate>,
+    update_rx: flume::Receiver<VeilidUpdate>,
 }
 
 impl Veilid {
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     pub async fn new(
         routing_context: RoutingContext,
-        update_tx: broadcast::Sender<VeilidUpdate>,
+        update_tx: flume::Sender<VeilidUpdate>,
+        update_rx: flume::Receiver<VeilidUpdate>,
     ) -> Result<Self> {
         Ok(Veilid {
             routing_context: Arc::new(RwLock::new(routing_context)),
             update_tx,
+            update_rx,
         })
     }
 
@@ -262,13 +265,14 @@ impl Clone for Veilid {
         Veilid {
             routing_context: self.routing_context.clone(),
             update_tx: self.update_tx.clone(),
+            update_rx: self.update_rx.clone(),
         }
     }
 }
 
 impl Node for Veilid {
-    fn subscribe_veilid_update(&self) -> broadcast::Receiver<VeilidUpdate> {
-        self.update_tx.subscribe()
+    fn subscribe_veilid_update(&self) -> flume::Receiver<VeilidUpdate> {
+        self.update_rx.clone()
     }
 
     #[tracing::instrument(skip_all, err)]

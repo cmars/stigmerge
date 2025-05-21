@@ -23,7 +23,6 @@ pub mod veilid_config;
 
 use std::sync::Arc;
 
-use tokio::sync::broadcast::{self, Receiver, Sender};
 use veilid_core::{RoutingContext, VeilidUpdate};
 
 pub use error::{is_cancelled, is_hangup, Error, Result};
@@ -32,15 +31,17 @@ pub use node::{Node, Veilid};
 #[cfg(test)]
 pub mod tests;
 
-const VEILID_UPDATE_CAPACITY: usize = 1024;
-
 #[tracing::instrument(skip_all, fields(state_dir, ns), err)]
 pub async fn new_routing_context(
     state_dir: &str,
     ns: Option<String>,
-) -> Result<(RoutingContext, Sender<VeilidUpdate>, Receiver<VeilidUpdate>)> {
-    let (cb_update_tx, update_rx): (Sender<VeilidUpdate>, Receiver<VeilidUpdate>) =
-        broadcast::channel(VEILID_UPDATE_CAPACITY);
+) -> Result<(
+    RoutingContext,
+    flume::Sender<VeilidUpdate>,
+    flume::Receiver<VeilidUpdate>,
+)> {
+    let (cb_update_tx, update_rx): (flume::Sender<VeilidUpdate>, flume::Receiver<VeilidUpdate>) =
+        flume::unbounded();
     let update_tx = cb_update_tx.clone();
 
     // Configure Veilid core

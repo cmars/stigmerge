@@ -72,9 +72,9 @@ async fn main() -> Result<()> {
     let state_dir = tempfile::tempdir()?;
 
     // Set up Veilid node
-    let (routing_context, update_tx, _) =
+    let (routing_context, update_tx, update_rx) =
         new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let node = Veilid::new(routing_context, update_tx).await?;
+    let node = Veilid::new(routing_context, update_tx, update_rx).await?;
 
     let res = run(node.clone()).await;
     let _ = node.shutdown().await;
@@ -123,19 +123,19 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             let want_index_digest: [u8; 32] = want_index_digest
                 .try_into()
                 .map_err(|_| Error::msg("Invalid digest length"))?;
-
             // Resolve the index from the bootstrap peer
-            share_resolve_op
-                .send(share_resolver::Request::Index {
+            let index = match share_resolve_op
+                .call(share_resolver::Request::Index {
+                    response_tx: None,
                     key: share_key.clone(),
                     want_index_digest: Some(want_index_digest),
                     root: root.clone(),
                 })
-                .await?;
-            let index = match share_resolve_op.recv().await {
-                Some(share_resolver::Response::Index { index, .. }) => index,
-                Some(share_resolver::Response::BadIndex { .. }) => anyhow::bail!("Bad index"),
-                Some(share_resolver::Response::NotAvailable { err_msg, .. }) => {
+                .await?
+            {
+                share_resolver::Response::Index { index, .. } => index,
+                share_resolver::Response::BadIndex { .. } => anyhow::bail!("Bad index"),
+                share_resolver::Response::NotAvailable { err_msg, .. } => {
                     anyhow::bail!(err_msg)
                 }
                 _ => anyhow::bail!("Unexpected response"),
@@ -167,17 +167,16 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         ShareAnnouncer::new(node.clone(), index.clone()),
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
-    share_announce_op
-        .send(share_announcer::Request::Announce)
-        .await?;
-    let (share_key, share_header) = match share_announce_op.recv().await {
-        Some(share_announcer::Response::Announce {
+    let (share_key, share_header) = match share_announce_op
+        .call(share_announcer::Request::Announce { response_tx: None })
+        .await?
+    {
+        share_announcer::Response::Announce {
             key,
             target: _,
             header,
-        }) => (key, header),
-        Some(share_announcer::Response::NotAvailable) => anyhow::bail!("failed to announce share"),
-        None => todo!(),
+        } => (key, header),
+        share_announcer::Response::NotAvailable => anyhow::bail!("failed to announce share"),
     };
 
     info!("announced share, key: {share_key}");
@@ -253,7 +252,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             info!("fetch complete, key={share_key}");
         }
         join_res = seeder_op.join() => {
-            join_res.expect("seeder task").expect("seeder done");
+            join_res.expect("seeder task");
         }
     }
 

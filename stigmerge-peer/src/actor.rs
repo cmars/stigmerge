@@ -3,8 +3,8 @@ use std::{sync::Arc, time::Duration};
 use backoff::backoff::Backoff;
 use tokio::{
     select, spawn,
-    sync::{broadcast, watch, Mutex, MutexGuard},
-    task::{self, JoinError, JoinSet},
+    sync::{oneshot, watch, Mutex, MutexGuard},
+    task::{self, JoinSet},
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
@@ -19,7 +19,8 @@ use crate::{
 /// Common interface for RPC services that handle requests and responses over channels.
 pub trait Actor {
     /// The type of request messages this service handles.
-    type Request;
+    type Request: Respondable<Response = Self::Response>;
+
     /// The type of response messages this service returns.
     type Response;
 
@@ -27,89 +28,52 @@ pub trait Actor {
     fn run(
         &mut self,
         cancel: CancellationToken,
-        server_ch: ChanServer<Self::Request, Self::Response>,
+        request_rx: flume::Receiver<Self::Request>,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// Handle a request message and produce a response.
-    fn handle(
+    fn handle_request(
         &mut self,
-        req: &Self::Request,
-    ) -> impl std::future::Future<Output = Result<Self::Response>> + Send;
+        req: Self::Request,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
-#[derive(Clone)]
-pub struct ChanClient<Request, Response> {
-    tx: flume::Sender<Request>,
-    rx: flume::Receiver<Response>,
+pub trait Respondable {
+    type Response: Send + Sync;
+
+    fn with_response(&mut self) -> oneshot::Receiver<Self::Response>;
+
+    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>>;
 }
 
-impl<Request: Send + Sync + 'static, Response: Send + Sync + 'static>
-    ChanClient<Request, Response>
-{
-    pub async fn send(&self, req: Request) -> Result<()> {
-        self.tx.send_async(req).await.map_err(|e| e.into())
-    }
-
-    pub fn try_send(&self, req: Request) -> Result<()> {
-        self.tx.try_send(req).map_err(|e| e.into())
-    }
-
-    pub async fn recv(&mut self) -> Option<Response> {
-        self.rx.recv_async().await.ok()
-    }
-
-    pub async fn recv_pending(&mut self) -> usize {
-        self.rx.len()
-    }
-}
-
-#[derive(Clone)]
-pub struct ChanServer<Request, Response> {
-    tx: flume::Sender<Response>,
-    rx: flume::Receiver<Request>,
-}
-
-impl<Request, Response: Send + Sync + 'static> ChanServer<Request, Response> {
-    pub async fn send(&self, req: Response) -> Result<()> {
-        self.tx.send_async(req).await.map_err(|e| e.into())
-    }
-
-    pub async fn recv(&mut self) -> Option<Request> {
-        self.rx.recv_async().await.ok()
-    }
-}
-
-pub struct Operator<Req, Resp> {
+pub struct Operator<Req> {
     cancel: CancellationToken,
-    client_ch: ChanClient<Req, Resp>,
+    request_tx: flume::Sender<Req>,
     tasks: task::JoinSet<Result<()>>,
 }
 
-impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Operator<Req, Resp> {
+impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
     #[tracing::instrument(skip_all)]
-    pub fn new<
-        A: Actor<Request = Req, Response = Resp> + Clone + Send + 'static,
-        R: Runner<A> + Send + 'static,
-    >(
+    pub fn new<A: Actor<Request = Req> + Clone + Send + 'static, R: Runner<A> + Send + 'static>(
         cancel: CancellationToken,
         actor: A,
         mut runner: R,
     ) -> Self {
-        let (client_ch, server_ch) = unbounded();
+        let (request_tx, request_rx) = flume::unbounded();
         let task_actor = actor.clone();
         let task_cancel = cancel.child_token();
         let mut tasks = JoinSet::new();
-        tasks.spawn(async move { runner.run(task_actor, task_cancel, server_ch).await });
+        tasks.spawn(async move { runner.run(task_actor, task_cancel, request_rx).await });
         Self {
             cancel,
-            client_ch,
+            request_tx,
             tasks,
         }
     }
 
     #[tracing::instrument(skip_all)]
     pub fn new_clone_pool<
-        A: Actor<Request = Req, Response = Resp> + Clone + Send + 'static,
+        A: Actor<Request = Req> + Clone + Send + 'static,
         R: Runner<A> + Clone + Send + 'static,
     >(
         cancel: CancellationToken,
@@ -117,44 +81,49 @@ impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Op
         runner: R,
         n: usize,
     ) -> Self {
-        let (client_ch, server_ch) = unbounded();
+        let (request_tx, request_rx) = flume::unbounded();
         let mut tasks = JoinSet::new();
         for _ in 0..n {
             let mut task_runner = runner.clone();
             let task_actor = actor.clone();
             let task_cancel = cancel.child_token();
-            let task_server_ch = server_ch.clone();
+            let task_request_rx = request_rx.clone();
             tasks.spawn(async move {
                 task_runner
-                    .run(task_actor, task_cancel, task_server_ch)
+                    .run(task_actor, task_cancel, task_request_rx)
                     .await
             });
         }
         Self {
             cancel,
-            client_ch,
+            request_tx,
             tasks,
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
-    pub async fn send(&mut self, req: Req) -> Result<()> {
-        self.client_ch.send(req).await
+    pub async fn call(&mut self, mut req: Req) -> Result<Req::Response> {
+        let resp_rx = req.with_response();
+        self.request_tx.send(req)?;
+        Ok(resp_rx.await?)
     }
 
-    #[tracing::instrument(skip_all, err)]
-    pub fn try_send(&mut self, req: Req) -> Result<()> {
-        self.client_ch.try_send(req)
+    pub async fn defer(
+        &mut self,
+        mut req: Req,
+        resp_tx: flume::Sender<Req::Response>,
+    ) -> Result<()> {
+        let resp_rx = req.with_response();
+        self.tasks.spawn(async move {
+            resp_tx.send_async(resp_rx.await?).await?;
+            Ok(())
+        });
+        self.request_tx.send(req)?;
+        Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
-    pub async fn recv(&mut self) -> Option<Resp> {
-        self.client_ch.recv().await
-    }
-
-    #[tracing::instrument(skip_all, ret)]
-    pub async fn recv_pending(&mut self) -> usize {
-        self.client_ch.recv_pending().await
+    pub(super) async fn send(&mut self, req: Req) -> Result<()> {
+        self.request_tx.send(req)?;
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -162,14 +131,13 @@ impl<Req: Clone + Send + Sync + 'static, Resp: Clone + Send + Sync + 'static> Op
         self.cancel.cancel();
     }
 
-    #[tracing::instrument(skip_all, err)]
-    pub async fn join(self) -> std::result::Result<Result<()>, JoinError> {
+    pub async fn join(self) -> Result<()> {
         for res in self.tasks.join_all().await.into_iter() {
             if let Err(e) = res {
-                return Ok(Err(e));
+                return Err(e);
             }
         }
-        Ok(Ok(()))
+        Ok(())
     }
 }
 
@@ -178,7 +146,7 @@ pub trait Runner<A: Actor> {
         &mut self,
         actor: A,
         cancel: CancellationToken,
-        server_ch: ChanServer<A::Request, A::Response>,
+        request_rx: flume::Receiver<A::Request>,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
@@ -192,14 +160,13 @@ impl<
             + 'static,
     > Runner<A> for OneShot
 {
-    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
         mut actor: A,
         cancel: CancellationToken,
-        server_ch: ChanServer<A::Request, A::Response>,
+        request_rx: flume::Receiver<A::Request>,
     ) -> Result<()> {
-        actor.run(cancel, server_ch).await
+        actor.run(cancel, request_rx).await
     }
 }
 
@@ -207,25 +174,24 @@ impl<
 pub struct UntilCancelled;
 
 impl<
-        A: Actor<Request: Clone + Send + Sync + 'static, Response: Clone + Send + Sync + 'static>
+        A: Actor<Request: Send + Sync + 'static, Response: Send + Sync + 'static>
             + Send
             + Sync
             + 'static,
     > Runner<A> for UntilCancelled
 {
-    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
         mut actor: A,
         cancel: CancellationToken,
-        server_ch: ChanServer<A::Request, A::Response>,
+        request_rx: flume::Receiver<A::Request>,
     ) -> Result<()> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
                     return Err(CancelError.into())
                 }
-                _ = actor.run(cancel.child_token(), server_ch.clone()) => {
+                _ = actor.run(cancel.child_token(), request_rx.clone()) => {
                     continue;
                 }
             }
@@ -235,7 +201,7 @@ impl<
 
 pub struct WithVeilidConnection<N> {
     node: N,
-    update_rx: broadcast::Receiver<VeilidUpdate>,
+    update_rx: flume::Receiver<VeilidUpdate>,
     state: Arc<Mutex<ConnectionState>>,
 }
 
@@ -264,7 +230,6 @@ impl<N: Node> WithVeilidConnection<N> {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
     async fn disconnected<'a>(
         &mut self,
         cancel: CancellationToken,
@@ -275,7 +240,7 @@ impl<N: Node> WithVeilidConnection<N> {
                 _ = cancel.cancelled() => {
                     return Err(CancelError.into())
                 }
-                res = self.update_rx.recv() => {
+                res = self.update_rx.recv_async() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
@@ -302,19 +267,18 @@ impl<N: Node> WithVeilidConnection<N> {
 const MAX_TRANSIENT_RETRIES: u8 = 5;
 
 impl<
-        A: Actor<Request: Clone + Send + Sync + 'static, Response: Clone + Send + Sync + 'static>
+        A: Actor<Request: Send + Sync + 'static, Response: Send + Sync + 'static>
             + Send
             + Sync
             + 'static,
         N: Node,
     > Runner<A> for WithVeilidConnection<N>
 {
-    #[tracing::instrument(skip_all, err)]
     async fn run(
         &mut self,
         actor_inner: A,
         cancel: CancellationToken,
-        server_ch: ChanServer<<A as Actor>::Request, <A as Actor>::Response>,
+        request_rx: flume::Receiver<A::Request>,
     ) -> Result<()> {
         let state = self.state.clone();
         let mut exp_backoff = backoff::ExponentialBackoffBuilder::new()
@@ -333,12 +297,12 @@ impl<
 
             let actor_handle = actor.clone();
             let actor_cancel = cancel.child_token();
-            let actor_server_ch = server_ch.clone();
+            let actor_request_rx = request_rx.clone();
             let actor_task = spawn(async move {
                 actor_handle
                     .lock()
                     .await
-                    .run(actor_cancel.child_token(), actor_server_ch.clone())
+                    .run(actor_cancel.child_token(), actor_request_rx.clone())
                     .await
             });
             select! {
@@ -349,7 +313,7 @@ impl<
                     let res = join_res?;
                     warn!("actor run: {:?}", res);
                     match res {
-                        Ok(())=>{
+                        Ok(()) => {
                             info!("actor run: ok");
                             return Ok(());
                         }
@@ -378,7 +342,7 @@ impl<
                         }
                     }
                 }
-                res = self.update_rx.recv() => {
+                res = self.update_rx.recv_async() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
@@ -406,24 +370,8 @@ impl<N: Clone> Clone for WithVeilidConnection<N> {
     fn clone(&self) -> Self {
         Self {
             node: self.node.clone(),
-            update_rx: self.update_rx.resubscribe(),
+            update_rx: self.update_rx.clone(),
             state: self.state.clone(),
         }
     }
-}
-
-fn unbounded<Request, Response>() -> (ChanClient<Request, Response>, ChanServer<Request, Response>)
-{
-    let (client_tx, client_rx) = flume::unbounded();
-    let (server_tx, server_rx) = flume::unbounded();
-    (
-        ChanClient {
-            tx: client_tx,
-            rx: server_rx,
-        },
-        ChanServer {
-            tx: server_tx,
-            rx: client_rx,
-        },
-    )
 }

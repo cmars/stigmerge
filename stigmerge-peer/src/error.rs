@@ -90,6 +90,13 @@ pub fn is_proto(e: &Error) -> bool {
     }
 }
 
+pub fn is_io(e: &Error) -> bool {
+    match as_io(e) {
+        Some(_) => true,
+        _ => false,
+    }
+}
+
 /// Trait for errors that may be caused by transient conditions which may clear
 /// up upon retrying.
 pub trait Transient {

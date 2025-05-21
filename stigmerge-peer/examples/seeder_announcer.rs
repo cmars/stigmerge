@@ -49,9 +49,9 @@ async fn main() -> std::result::Result<(), Error> {
     let state_dir = tempfile::tempdir()?;
 
     // Set up Veilid peer
-    let (routing_context, update_tx, _) =
+    let (routing_context, update_tx, update_rx) =
         new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let node = Veilid::new(routing_context, update_tx).await?;
+    let node = Veilid::new(routing_context, update_tx, update_rx).await?;
 
     let cancel = CancellationToken::new();
     let conn_state = Arc::new(Mutex::new(ConnectionState::new()));
@@ -62,15 +62,16 @@ async fn main() -> std::result::Result<(), Error> {
         ShareAnnouncer::new(node.clone(), index.clone()),
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
-    announce_op.send(share_announcer::Request::Announce).await?;
 
-    let resp = announce_op.recv().await;
-    let (key, target, header) = match resp {
-        Some(share_announcer::Response::Announce {
+    let (key, target, header) = match announce_op
+        .call(share_announcer::Request::Announce { response_tx: None })
+        .await?
+    {
+        share_announcer::Response::Announce {
             key,
             target,
             header,
-        }) => (key, target, header),
+        } => (key, target, header),
         _ => anyhow::bail!("Announce failed"),
     };
     info!("announced: key={key}, target={target:?}");
@@ -102,22 +103,19 @@ async fn main() -> std::result::Result<(), Error> {
     // Verify the index, notifying seeder of verified pieces
     for (piece_index, piece) in index.payload().pieces().iter().enumerate() {
         for block_index in 0..piece.block_count() {
-            let req = piece_verifier::Request::Piece(PieceState::new(
-                0,
-                piece_index,
-                0,
-                piece.block_count(),
-                block_index,
-            ));
-            verifier_op.send(req).await?;
-            let resp = verifier_op.recv().await;
+            let req = piece_verifier::Request::Piece {
+                response_tx: None,
+                piece_state: PieceState::new(0, piece_index, 0, piece.block_count(), block_index),
+            };
+            let resp = verifier_op.call(req).await?;
             info!("verifier: {resp:?}");
         }
     }
 
     // Query the seeder's have map
-    seeder_op.send(seeder::Request::HaveMap).await?;
-    let seeder::Response::HaveMap(have_map) = seeder_op.recv().await.unwrap();
+    let seeder::Response::HaveMap(have_map) = seeder_op
+        .call(seeder::Request::HaveMap { response_tx: None })
+        .await?;
 
     info!(
         "seeding {} {} {have_map:?}",
@@ -131,15 +129,7 @@ async fn main() -> std::result::Result<(), Error> {
         }
     }
 
-    announce_op
-        .join()
-        .await
-        .expect("announce task")
-        .expect("announce run");
-    seeder_op
-        .join()
-        .await
-        .expect("seeder task")
-        .expect("seeder run");
+    announce_op.join().await.expect("announce task");
+    seeder_op.join().await.expect("seeder task");
     Ok(())
 }

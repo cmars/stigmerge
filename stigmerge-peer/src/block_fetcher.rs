@@ -4,17 +4,18 @@ use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::select;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{oneshot, watch, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, Level};
 use veilid_core::Target;
 
-use crate::actor::{Actor, ChanServer};
-use crate::error::Result;
+use crate::actor::{Actor, Respondable};
+use crate::error::{is_io, is_proto, is_route_invalid, Result, Transient};
 use crate::is_cancelled;
 use crate::node::Node;
 use crate::Error;
@@ -84,15 +85,37 @@ impl<N: Node> BlockFetcher<N> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Request {
-    Fetch { block: FileBlockFetch, flush: bool },
+    Fetch {
+        response_tx: Option<oneshot::Sender<Response>>,
+        block: FileBlockFetch,
+        flush: bool,
+    },
 }
 
 impl Request {
     fn block(&self) -> FileBlockFetch {
         match self {
             Request::Fetch { block, .. } => block.to_owned(),
+        }
+    }
+}
+
+impl Respondable for Request {
+    type Response = Response;
+
+    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
+        let (tx, rx) = oneshot::channel();
+        match self {
+            Request::Fetch { response_tx, .. } => *response_tx = Some(tx),
+        }
+        rx
+    }
+
+    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+        match self {
+            Request::Fetch { response_tx, .. } => response_tx,
         }
     }
 }
@@ -117,7 +140,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
     async fn run(
         &mut self,
         cancel: CancellationToken,
-        mut server_ch: ChanServer<Self::Request, Self::Response>,
+        request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
         self.target = None;
         loop {
@@ -151,23 +174,16 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                     }
                     self.target = *self.target_update_rx.borrow_and_update();
                 }
-                req = server_ch.recv() => {
-                    match req {
-                        None => return Ok(()),
-                        Some(req) => {
-                            match self.handle(&req).await {
-                                Ok(resp) => server_ch.send(resp).await?,
-                                Err(e) => {
-                                    if is_cancelled(&e) {
-                                        return Ok(());
-                                    }
-                                    // Whether the fetch was successful or not, respond back to the caller.
-                                    let resp = Response::FetchFailed { block: req.block(), error_msg: e.to_string() };
-                                    server_ch.send(resp).await?;
-                                    return Err(e);
-                                }
-                            }
+                res = request_rx.recv_async() => {
+                    let req = res?;
+                    if let Err(e) = self.handle_request(req).await {
+                        if is_cancelled(&e) {
+                            return Ok(());
                         }
+                        if e.is_transient() || is_route_invalid(&e) || is_proto(&e) || is_io(&e) {
+                            continue;
+                        }
+                        return Err(e);
                     }
                 }
             }
@@ -175,15 +191,23 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         if self.target.is_none() {
-            return Ok(Response::FetchFailed {
+            let resp = Response::FetchFailed {
                 block: req.block().to_owned(),
                 error_msg: "fetch target not available yet".to_owned(),
-            });
+            };
+            if let Some(Err(resp)) = req.response_tx().map(|tx| tx.send(resp)) {
+                return Err(anyhow!("failed to send response: {:?}", resp));
+            }
+            return Ok(());
         }
-        match req {
-            Request::Fetch { block, flush } => {
+        let (resp, resp_tx) = match req {
+            Request::Fetch {
+                block,
+                ref flush,
+                response_tx,
+            } => {
                 trace!(
                     "Fetching block: file={} piece={} block={}",
                     block.file_index,
@@ -192,13 +216,28 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                 );
 
                 // Attempt to fetch the block
-                let length = self.fetch_block(block, *flush).await?;
-                Ok(Response::Fetched {
-                    block: block.clone(),
-                    length,
-                })
+                match self.fetch_block(&block, *flush).await {
+                    Ok(length) => (
+                        Response::Fetched {
+                            block: block,
+                            length,
+                        },
+                        response_tx,
+                    ),
+                    Err(e) => (
+                        Response::FetchFailed {
+                            block,
+                            error_msg: e.to_string(),
+                        },
+                        response_tx,
+                    ),
+                }
             }
+        };
+        if let Some(Err(resp)) = resp_tx.map(|tx| tx.send(resp)) {
+            return Err(anyhow!("failed to send response: {:?}", resp));
         }
+        Ok(())
     }
 }
 
@@ -286,13 +325,12 @@ mod tests {
             piece_offset: 0,
         };
         let req = Request::Fetch {
+            response_tx: None,
             block: block.clone(),
             flush: true,
         };
-        operator.send(req).await.expect("send request");
-
         // Verify response
-        let resp = operator.recv().await.expect("receive response");
+        let resp = operator.call(req).await.expect("send request");
         assert!(
             matches!(
                 resp,
@@ -322,11 +360,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator
-            .join()
-            .await
-            .expect("fetcher task")
-            .expect("fetch ok");
+        operator.join().await.expect("fetcher task");
     }
 
     #[tokio::test]
@@ -375,14 +409,16 @@ mod tests {
             block_index: 0,
             piece_offset: 0,
         };
-        let req = Request::Fetch {
-            block: block.clone(),
-            flush: true,
-        };
-        operator.send(req).await.expect("send request");
 
         // Verify we get a FetchFailed response with our error
-        let resp = operator.recv().await.expect("receive response");
+        let resp = operator
+            .call(Request::Fetch {
+                response_tx: None,
+                block: block.clone(),
+                flush: true,
+            })
+            .await
+            .expect("send request");
         match resp {
             Response::FetchFailed {
                 block: failed_block,
@@ -396,11 +432,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator
-            .join()
-            .await
-            .expect("fetcher task")
-            .expect_err("mock block fetch error");
+        operator.join().await.expect("fetcher task");
     }
 
     #[tokio::test]
@@ -428,8 +460,10 @@ mod tests {
         let mut operator = Operator::new(cancel.clone(), fetcher, OneShot);
 
         // Request a block without sending target update first
+        let (tx, rx) = oneshot::channel();
         operator
             .send(Request::Fetch {
+                response_tx: Some(tx),
                 block: FileBlockFetch {
                     file_index: 0,
                     piece_index: 0,
@@ -442,14 +476,10 @@ mod tests {
             .expect("send request");
 
         // Client has not responded to requests
-        assert_eq!(operator.recv_pending().await, 0);
+        assert_eq!(rx.is_empty(), true);
 
         // Clean up
         cancel.cancel();
-        operator
-            .join()
-            .await
-            .expect("fetcher task")
-            .expect("fetcher run, cancelled");
+        operator.join().await.expect("fetcher task");
     }
 }
