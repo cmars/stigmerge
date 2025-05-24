@@ -2,7 +2,6 @@ use std::time::Duration;
 use std::{future::Future, path::Path};
 
 use backoff::ExponentialBackoff;
-use tokio::sync::broadcast::Receiver;
 use veilid_core::{CryptoKey, CryptoTyped, OperationId, Target, ValueSubkeyRangeSet, VeilidUpdate};
 
 use stigmerge_fileindex::Index;
@@ -14,7 +13,7 @@ use crate::{proto::Header, Result};
 pub type TypedKey = CryptoTyped<CryptoKey>;
 
 pub trait Node: Clone + Send {
-    fn subscribe_veilid_update(&self) -> Receiver<VeilidUpdate>;
+    fn subscribe_veilid_update(&self) -> flume::Receiver<VeilidUpdate>;
 
     fn reset(&mut self) -> impl Future<Output = Result<()>> + Send;
     fn shutdown(self) -> impl Future<Output = Result<()>> + Send;

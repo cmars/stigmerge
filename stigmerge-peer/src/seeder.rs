@@ -5,23 +5,43 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
-    sync::broadcast,
+    sync::oneshot,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use veilid_core::VeilidUpdate;
 
 use crate::{
-    actor::{Actor, ChanServer},
+    actor::{Actor, Respondable},
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
     types::{PieceState, ShareInfo},
     Node, Result,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Request {
-    HaveMap,
+    HaveMap {
+        response_tx: Option<oneshot::Sender<Response>>,
+    },
+}
+
+impl Respondable for Request {
+    type Response = Response;
+
+    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
+        let (tx, rx) = oneshot::channel();
+        match self {
+            Request::HaveMap { response_tx } => *response_tx = Some(tx),
+        }
+        rx
+    }
+
+    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+        match self {
+            Request::HaveMap { response_tx } => response_tx,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +105,7 @@ impl<P: Node> Actor for Seeder<P> {
     async fn run(
         &mut self,
         cancel: CancellationToken,
-        mut server_ch: ChanServer<Self::Request, Self::Response>,
+        request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
         let mut buf = [0u8; BLOCK_SIZE_BYTES];
         loop {
@@ -93,14 +113,15 @@ impl<P: Node> Actor for Seeder<P> {
                 _ = cancel.cancelled() => {
                     return Ok(());
                 }
-                Some(req) = server_ch.recv() => {
-                    server_ch.send(self.handle(&req).await?).await?;
+                res = request_rx.recv_async() => {
+                    let req = res?;
+                    self.handle_request(req).await?;
                 }
-                res = self.clients.verified_rx.recv() => {
+                res = self.clients.verified_rx.recv_async() => {
                     let piece_state = res?;
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }
-                res = self.clients.update_rx.recv() => {
+                res = self.clients.update_rx.recv_async() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
@@ -125,9 +146,17 @@ impl<P: Node> Actor for Seeder<P> {
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
+    async fn handle_request(&mut self, req: Request) -> Result<()> {
         match req {
-            Request::HaveMap => Ok(Response::HaveMap(self.piece_map.clone())),
+            Request::HaveMap { response_tx } => {
+                let resp = Response::HaveMap(self.piece_map.clone());
+                if let Some(tx) = response_tx {
+                    if let Err(e) = tx.send(resp) {
+                        tracing::warn!("failed to send response: {:?}", e);
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -146,15 +175,15 @@ impl<P: Node> Clone for Seeder<P> {
 }
 
 pub struct Clients {
-    pub verified_rx: broadcast::Receiver<PieceState>,
-    pub update_rx: broadcast::Receiver<VeilidUpdate>,
+    pub verified_rx: flume::Receiver<PieceState>,
+    pub update_rx: flume::Receiver<VeilidUpdate>,
 }
 
 impl Clone for Clients {
     fn clone(&self) -> Self {
         Self {
-            verified_rx: self.verified_rx.resubscribe(),
-            update_rx: self.update_rx.resubscribe(),
+            verified_rx: self.verified_rx.clone(),
+            update_rx: self.update_rx.clone(),
         }
     }
 }
@@ -194,7 +223,7 @@ mod tests {
         let index = create_test_index(&tf_path).await;
 
         // Set up channels
-        let (verified_tx, _) = broadcast::channel(16);
+        let (verified_tx, verified_rx) = flume::bounded(16);
 
         // Create a stub peer with mock reply_block_contents
         let mut node = StubNode::new();
@@ -227,8 +256,8 @@ mod tests {
 
         // Create clients
         let clients = Clients {
-            verified_rx: verified_tx.subscribe(),
-            update_rx: node.update_tx.subscribe(),
+            verified_rx: verified_rx,
+            update_rx: node.update_rx.clone(),
         };
 
         // Create cancellation token
@@ -243,12 +272,13 @@ mod tests {
         let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
         verified_tx.send(piece_state).expect("send verified piece");
 
-        operator
-            .send(Request::HaveMap)
-            .await
-            .expect("requested havemap");
-        let Response::HaveMap(have_map) = operator.recv().await.expect("havemap response");
-        assert!(!have_map.is_empty(), "confirm verified block");
+        let req = Request::HaveMap { response_tx: None };
+        let resp = operator.call(req).await.expect("call havemap");
+        match resp {
+            Response::HaveMap(have_map) => {
+                assert!(!have_map.is_empty(), "confirm verified block");
+            }
+        }
 
         // Send a block request for the verified piece
         let block_req = BlockRequest { piece: 0, block: 0 };
@@ -265,11 +295,7 @@ mod tests {
 
         // Cancel the seeder
         cancel.cancel();
-        operator
-            .join()
-            .await
-            .expect("seeder task")
-            .expect("seeder run");
+        operator.join().await.expect("seeder task");
 
         // Verify reply_block_contents was called
         assert!(
@@ -302,7 +328,7 @@ mod tests {
         let index = create_test_index(&tf_path).await;
 
         // Set up channels
-        let (_verified_tx, verified_rx) = broadcast::channel(16);
+        let (_verified_tx, verified_rx) = flume::bounded(16);
 
         // Create a stub peer with mock reply_block_contents
         let mut node = StubNode::new();
@@ -337,7 +363,7 @@ mod tests {
         // Create clients
         let clients = Clients {
             verified_rx,
-            update_rx: node.update_tx.subscribe(),
+            update_rx: node.update_rx.clone(),
         };
 
         // Create seeder
@@ -367,11 +393,7 @@ mod tests {
         cancel.cancel();
 
         // Verify seeder exits cleanly
-        let result = operator.join().await.expect("seeder task");
-        assert!(
-            result.is_ok(),
-            "seeder should exit cleanly after handling block request"
-        );
+        operator.join().await.expect("seeder task");
 
         // Verify reply_block_contents was called
         assert!(

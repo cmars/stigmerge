@@ -6,37 +6,41 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
-    sync::{broadcast, RwLock},
+    sync::{oneshot, RwLock},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{warn, Level};
 
-use crate::{actor::Actor, error::Result, types::PieceState};
+use crate::{
+    actor::{Actor, Respondable},
+    error::Result,
+    types::PieceState,
+};
 
 #[derive(Clone)]
 pub struct PieceVerifier {
     index: Arc<RwLock<Index>>,
     piece_states: HashMap<(usize, usize), PieceState>,
     verified_pieces: usize,
-    verified_tx: broadcast::Sender<PieceState>,
+    verified_tx: flume::Sender<PieceState>,
+    verified_rx: flume::Receiver<PieceState>,
 }
-
-const VERIFIED_BROADCAST_CAPACITY: usize = 16;
 
 impl PieceVerifier {
     #[tracing::instrument(skip_all)]
     pub fn new(index: Arc<RwLock<Index>>) -> PieceVerifier {
-        let (verified_tx, _) = broadcast::channel(VERIFIED_BROADCAST_CAPACITY);
+        let (verified_tx, verified_rx) = flume::unbounded();
         PieceVerifier {
             index,
             piece_states: HashMap::new(),
             verified_pieces: 0,
             verified_tx,
+            verified_rx,
         }
     }
 
-    pub fn subscribe_verified(&self) -> broadcast::Receiver<PieceState> {
-        self.verified_tx.subscribe()
+    pub fn subscribe_verified(&self) -> flume::Receiver<PieceState> {
+        self.verified_rx.clone()
     }
 
     async fn verify_piece(&self, file_index: usize, piece_index: usize) -> Result<bool> {
@@ -65,9 +69,30 @@ impl PieceVerifier {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub enum Request {
-    Piece(PieceState),
+    Piece {
+        piece_state: PieceState,
+        response_tx: Option<oneshot::Sender<Response>>,
+    },
+}
+
+impl Respondable for Request {
+    type Response = Response;
+
+    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
+        let (tx, rx) = oneshot::channel();
+        match self {
+            Request::Piece { response_tx, .. } => *response_tx = Some(tx),
+        }
+        rx
+    }
+
+    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+        match self {
+            Request::Piece { response_tx, .. } => response_tx,
+        }
+    }
 }
 
 impl Request {
@@ -77,7 +102,7 @@ impl Request {
 
     fn piece_state(&self) -> PieceState {
         match self {
-            Request::Piece(state) => state.to_owned(),
+            Request::Piece { piece_state, .. } => piece_state.clone(),
         }
     }
 
@@ -124,28 +149,23 @@ impl Actor for PieceVerifier {
     async fn run(
         &mut self,
         cancel: CancellationToken,
-        mut server_ch: crate::actor::ChanServer<Self::Request, Self::Response>,
+        request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
                     return Ok(());
                 }
-                res = server_ch.recv() => {
-                    match res {
-                        None => return Ok(()),
-                        Some(req) => {
-                            let resp = self.handle(&req).await?;
-                            server_ch.send(resp.clone()).await?;
-                        }
-                    }
+                res = request_rx.recv_async() => {
+                    let req = res?;
+                    self.handle_request(req).await?;
                 }
             }
         }
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         // update piece state
         let prior_state = match self.piece_states.get_mut(&req.key()) {
             Some(prior_state) => {
@@ -157,38 +177,42 @@ impl Actor for PieceVerifier {
                 self.piece_states.get_mut(&req.key()).unwrap()
             }
         };
-        if prior_state.is_complete() {
+
+        let resp = if prior_state.is_complete() {
             // verify complete ones
             if self
                 .verify_piece(req.file_index(), req.piece_index())
                 .await?
             {
                 self.verified_pieces += 1;
-                self.verified_tx
-                    .send(req.piece_state())
-                    .unwrap_or_else(|e| {
-                        warn!("no target subscribers: {}", e);
-                        0
-                    });
-                Ok(Response::ValidPiece {
+                self.verified_tx.send_async(req.piece_state()).await?;
+                Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
                     index_complete: self.verified_pieces
                         == self.index.read().await.payload().pieces().len(),
-                })
+                }
             } else {
-                Ok(Response::InvalidPiece {
+                Response::InvalidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
-                })
+                }
             }
         } else {
             // indicate incomplete ones
-            Ok(Response::IncompletePiece {
+            Response::IncompletePiece {
                 file_index: req.file_index(),
                 piece_index: req.piece_index(),
-            })
+            }
+        };
+
+        if let Some(tx) = req.response_tx() {
+            if let Err(e) = tx.send(resp) {
+                warn!("failed to send response: {:?}", e);
+            }
         }
+
+        Ok(())
     }
 }
 
@@ -228,9 +252,11 @@ mod tests {
             for block_index in 0..PIECE_SIZE_BLOCKS - 1 {
                 let piece_state =
                     PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
-                let req = Request::Piece(piece_state);
-                operator.send(req).await.expect("send request");
-                let resp = operator.recv().await.expect("receive response");
+                let req = Request::Piece {
+                    piece_state,
+                    response_tx: None,
+                };
+                let resp = operator.call(req).await.expect("call request");
                 assert_eq!(
                     resp,
                     Response::IncompletePiece {
@@ -242,9 +268,11 @@ mod tests {
             // Piece complete & verified
             let piece_state =
                 PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
-            let req = Request::Piece(piece_state);
-            operator.send(req).await.expect("send request");
-            let resp = operator.recv().await.expect("receive response");
+            let req = Request::Piece {
+                piece_state,
+                response_tx: None,
+            };
+            let resp = operator.call(req).await.expect("call request");
             assert_eq!(
                 resp,
                 Response::ValidPiece {
@@ -257,11 +285,7 @@ mod tests {
 
         // shut down verifier
         cancel.cancel();
-        operator
-            .join()
-            .await
-            .expect("verifier task")
-            .expect("verifier run");
+        operator.join().await.expect("verifier task");
     }
 
     #[tokio::test]
@@ -287,9 +311,11 @@ mod tests {
         for block_index in 0..PIECE_SIZE_BLOCKS - 1 {
             let piece_state =
                 PieceState::new(0, CORRUPT_PIECE_INDEX, 0, PIECE_SIZE_BLOCKS, block_index);
-            let req = Request::Piece(piece_state);
-            operator.send(req).await.expect("send request");
-            let resp = operator.recv().await.expect("receive response");
+            let req = Request::Piece {
+                piece_state,
+                response_tx: None,
+            };
+            let resp = operator.call(req).await.expect("call request");
             assert_eq!(
                 resp,
                 Response::IncompletePiece {
@@ -315,9 +341,11 @@ mod tests {
             PIECE_SIZE_BLOCKS,
             PIECE_SIZE_BLOCKS - 1,
         );
-        let req = Request::Piece(piece_state);
-        operator.send(req).await.expect("send request");
-        let resp = operator.recv().await.expect("receive response");
+        let req = Request::Piece {
+            piece_state,
+            response_tx: None,
+        };
+        let resp = operator.call(req).await.expect("call request");
         assert_eq!(
             resp,
             Response::InvalidPiece {
@@ -330,9 +358,11 @@ mod tests {
         for block_index in 0..PIECE_SIZE_BLOCKS - 1 {
             let piece_state =
                 PieceState::new(0, VALID_PIECE_INDEX, 0, PIECE_SIZE_BLOCKS, block_index);
-            let req = Request::Piece(piece_state);
-            operator.send(req).await.expect("send request");
-            let resp = operator.recv().await.expect("receive response");
+            let req = Request::Piece {
+                piece_state,
+                response_tx: None,
+            };
+            let resp = operator.call(req).await.expect("call request");
             assert_eq!(
                 resp,
                 Response::IncompletePiece {
@@ -350,9 +380,11 @@ mod tests {
             PIECE_SIZE_BLOCKS,
             PIECE_SIZE_BLOCKS - 1,
         );
-        let req = Request::Piece(piece_state);
-        operator.send(req).await.expect("send request");
-        let resp = operator.recv().await.expect("receive response");
+        let req = Request::Piece {
+            piece_state,
+            response_tx: None,
+        };
+        let resp = operator.call(req).await.expect("call request");
         assert_eq!(
             resp,
             Response::ValidPiece {
@@ -365,11 +397,7 @@ mod tests {
 
         // shut down verifier
         cancel.cancel();
-        operator
-            .join()
-            .await
-            .expect("verifier task")
-            .expect("verifier run");
+        operator.join().await.expect("verifier task");
     }
 
     #[tokio::test]
@@ -399,9 +427,11 @@ mod tests {
             for block_index in 0..PIECE_SIZE_BLOCKS - 1 {
                 let piece_state =
                     PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
-                let req = Request::Piece(piece_state);
-                operator.send(req).await.expect("send request");
-                let resp = operator.recv().await.expect("receive response");
+                let req = Request::Piece {
+                    piece_state,
+                    response_tx: None,
+                };
+                let resp = operator.call(req).await.expect("call request");
                 assert_eq!(
                     resp,
                     Response::IncompletePiece {
@@ -414,9 +444,11 @@ mod tests {
             // Verify first complete piece
             let piece_state =
                 PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
-            let req = Request::Piece(piece_state);
-            operator.send(req).await.expect("send request");
-            let resp = operator.recv().await.expect("receive response");
+            let req = Request::Piece {
+                piece_state,
+                response_tx: None,
+            };
+            let resp = operator.call(req).await.expect("call request");
             assert_eq!(
                 resp,
                 Response::ValidPiece {
@@ -429,10 +461,6 @@ mod tests {
 
         // shut down verifier
         cancel.cancel();
-        operator
-            .join()
-            .await
-            .expect("verifier task")
-            .expect("verifier run");
+        operator.join().await.expect("verifier task");
     }
 }
