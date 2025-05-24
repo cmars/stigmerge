@@ -103,7 +103,7 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
 
     pub async fn call(&mut self, mut req: Req) -> Result<Req::Response> {
         let resp_rx = req.with_response();
-        self.request_tx.send(req)?;
+        self.request_tx.send_async(req).await?;
         Ok(resp_rx.await?)
     }
 
@@ -117,12 +117,12 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
             resp_tx.send_async(resp_rx.await?).await?;
             Ok(())
         });
-        self.request_tx.send(req)?;
+        self.request_tx.send_async(req).await?;
         Ok(())
     }
 
     pub(super) async fn send(&mut self, req: Req) -> Result<()> {
-        self.request_tx.send(req)?;
+        self.request_tx.send_async(req).await?;
         Ok(())
     }
 

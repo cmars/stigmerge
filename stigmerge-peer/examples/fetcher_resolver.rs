@@ -64,8 +64,8 @@ async fn main() -> std::result::Result<(), Error> {
 
     // Set up share resolver
     let share_resolver = ShareResolver::new(node.clone());
-    let target_rx = share_resolver.subscribe_target();
-    let mut resolve_op = Operator::new(
+    let share_target_rx = share_resolver.subscribe_target();
+    let mut share_resolver_op = Operator::new(
         cancel.clone(),
         share_resolver,
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
@@ -79,7 +79,7 @@ async fn main() -> std::result::Result<(), Error> {
         .map_err(|_| Error::msg("Invalid digest length"))?;
 
     // Resolve the index
-    let (header, index) = match resolve_op
+    let (header, index) = match share_resolver_op
         .call(share_resolver::Request::Index {
             response_tx: None,
             key: key.clone(),
@@ -98,12 +98,7 @@ async fn main() -> std::result::Result<(), Error> {
     let want_index = Arc::new(RwLock::new(index.clone()));
     let block_fetcher = Operator::new_clone_pool(
         cancel.clone(),
-        BlockFetcher::new(
-            node.clone(),
-            want_index.clone(),
-            download_dir.clone(),
-            target_rx,
-        ),
+        BlockFetcher::new(node.clone(), want_index.clone(), download_dir.clone()),
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
         50,
     );
@@ -130,6 +125,8 @@ async fn main() -> std::result::Result<(), Error> {
         block_fetcher,
         piece_verifier,
         have_announcer,
+        share_resolver: share_resolver_op,
+        share_target_rx,
     };
 
     // Create and run fetcher

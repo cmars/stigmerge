@@ -153,8 +153,8 @@ impl App {
 
         // Set up share resolver
         let share_resolver = ShareResolver::new(node.clone());
-        let target_rx = share_resolver.subscribe_target();
-        let mut share_resolve_op = Operator::new(
+        let share_target_rx = share_resolver.subscribe_target();
+        let mut share_resolver_op = Operator::new(
             cancel.clone(),
             share_resolver,
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
@@ -183,7 +183,7 @@ impl App {
                         None => None,
                     };
                     // Resolve the index from the bootstrap peer
-                    let index = match share_resolve_op
+                    let index = match share_resolver_op
                         .call(share_resolver::Request::Index {
                             response_tx: None,
                             key: share_key.clone(),
@@ -222,12 +222,12 @@ impl App {
         debug!("resolved index");
 
         // Announce our own share of the index
-        let mut share_announce_op = Operator::new(
+        let mut share_announcer_op = Operator::new(
             cancel.clone(),
             ShareAnnouncer::new(node.clone(), index.clone()),
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
-        let (share_key, share_header) = match share_announce_op
+        let (share_key, share_header) = match share_announcer_op
             .call(share_announcer::Request::Announce { response_tx: None })
             .await?
         {
@@ -264,7 +264,6 @@ impl App {
                 node.clone(),
                 Arc::new(RwLock::new(index.clone())),
                 index.root().to_path_buf(),
-                target_rx,
             ),
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
             self.cli.fetchers,
@@ -274,6 +273,8 @@ impl App {
             block_fetcher,
             piece_verifier: piece_verifier_op,
             have_announcer,
+            share_resolver: share_resolver_op,
+            share_target_rx,
         };
 
         // Create and run fetcher

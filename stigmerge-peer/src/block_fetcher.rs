@@ -9,7 +9,7 @@ use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::select;
-use tokio::sync::{oneshot, watch, RwLock};
+use tokio::sync::{oneshot, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, Level};
 use veilid_core::Target;
@@ -17,7 +17,7 @@ use veilid_core::Target;
 use crate::actor::{Actor, Respondable};
 use crate::error::{is_io, is_proto, is_route_invalid, Result, Transient};
 use crate::is_cancelled;
-use crate::node::Node;
+use crate::node::{Node, TypedKey};
 use crate::Error;
 
 use super::types::FileBlockFetch;
@@ -26,35 +26,31 @@ pub struct BlockFetcher<N: Node> {
     node: N,
     want_index: Arc<RwLock<Index>>,
     root: PathBuf,
-    target_update_rx: watch::Receiver<Option<Target>>,
-    target: Option<Target>,
     files: HashMap<usize, File>,
 }
 
 impl<N: Node> BlockFetcher<N> {
     /// Creates a new block fetcher service.
-    pub fn new(
-        node: N,
-        want_index: Arc<RwLock<Index>>,
-        root: PathBuf,
-        target_update_rx: watch::Receiver<Option<Target>>,
-    ) -> Self {
+    pub fn new(node: N, want_index: Arc<RwLock<Index>>, root: PathBuf) -> Self {
         Self {
             node,
             want_index,
             root,
-            target_update_rx,
-            target: None,
             files: HashMap::new(),
         }
     }
 
     #[tracing::instrument(skip_all, err)]
-    async fn fetch_block(&mut self, block: &FileBlockFetch, flush: bool) -> Result<usize> {
+    async fn fetch_block(
+        &mut self,
+        target: &Target,
+        block: &FileBlockFetch,
+        flush: bool,
+    ) -> Result<usize> {
         // Request block from peer with retry logic
         let result = self
             .node
-            .request_block(self.target.unwrap(), block.piece_index, block.block_index)
+            .request_block(target.to_owned(), block.piece_index, block.block_index)
             .await?
             .ok_or(Error::msg("block not found"))?;
         // Write the block to the file
@@ -89,17 +85,11 @@ impl<N: Node> BlockFetcher<N> {
 pub enum Request {
     Fetch {
         response_tx: Option<oneshot::Sender<Response>>,
+        share_key: TypedKey,
+        target: Target,
         block: FileBlockFetch,
         flush: bool,
     },
-}
-
-impl Request {
-    fn block(&self) -> FileBlockFetch {
-        match self {
-            Request::Fetch { block, .. } => block.to_owned(),
-        }
-    }
 }
 
 impl Respondable for Request {
@@ -120,15 +110,17 @@ impl Respondable for Request {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Response {
     Fetched {
+        share_key: TypedKey,
         block: FileBlockFetch,
         length: usize,
     },
     FetchFailed {
+        share_key: TypedKey,
         block: FileBlockFetch,
-        error_msg: String,
+        err: Error,
     },
 }
 
@@ -142,37 +134,10 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         cancel: CancellationToken,
         request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
-        self.target = None;
         loop {
-            if let None = self.target {
-                select! {
-                     _ = cancel.cancelled() => {
-                         return Ok(())
-                     }
-                     res = self.target_update_rx.changed() => {
-                         if let Err(e) = res {
-                             if cancel.is_cancelled() {
-                                 return Ok(());
-                             }
-                             return Err(e.into());
-                         }
-                         self.target = *self.target_update_rx.borrow_and_update();
-                     }
-                }
-            }
-
             select! {
                 _ = cancel.cancelled() => {
                     return Ok(())
-                }
-                res = self.target_update_rx.changed() => {
-                    if let Err(e) = res {
-                        if cancel.is_cancelled() {
-                            return Ok(());
-                        }
-                        return Err(e.into());
-                    }
-                    self.target = *self.target_update_rx.borrow_and_update();
                 }
                 res = request_rx.recv_async() => {
                     let req = res?;
@@ -192,42 +157,37 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
-        if self.target.is_none() {
-            let resp = Response::FetchFailed {
-                block: req.block().to_owned(),
-                error_msg: "fetch target not available yet".to_owned(),
-            };
-            if let Some(Err(resp)) = req.response_tx().map(|tx| tx.send(resp)) {
-                return Err(anyhow!("failed to send response: {:?}", resp));
-            }
-            return Ok(());
-        }
         let (resp, resp_tx) = match req {
             Request::Fetch {
+                share_key,
+                target,
                 block,
                 ref flush,
                 response_tx,
             } => {
                 trace!(
-                    "Fetching block: file={} piece={} block={}",
+                    "Fetching block from {}: file={} piece={} block={}",
+                    share_key,
                     block.file_index,
                     block.piece_index,
                     block.block_index
                 );
 
                 // Attempt to fetch the block
-                match self.fetch_block(&block, *flush).await {
+                match self.fetch_block(&target, &block, *flush).await {
                     Ok(length) => (
                         Response::Fetched {
-                            block: block,
+                            share_key,
+                            block,
                             length,
                         },
                         response_tx,
                     ),
                     Err(e) => (
                         Response::FetchFailed {
+                            share_key,
                             block,
-                            error_msg: e.to_string(),
+                            err: e,
                         },
                         response_tx,
                     ),
@@ -247,8 +207,6 @@ impl<P: Node> Clone for BlockFetcher<P> {
             node: self.node.clone(),
             want_index: self.want_index.clone(),
             root: self.root.clone(),
-            target_update_rx: self.target_update_rx.clone(),
-            target: self.target,
             files: HashMap::new(),
         }
     }
@@ -261,7 +219,7 @@ mod tests {
     use stigmerge_fileindex::Indexer;
     use tokio::io::AsyncReadExt;
     use tokio_util::sync::CancellationToken;
-    use veilid_core::CryptoKey;
+    use veilid_core::{CryptoKey, CryptoTyped, CRYPTO_KIND_VLD0};
 
     use crate::actor::{OneShot, Operator};
     use crate::tests::{temp_file, StubNode};
@@ -303,19 +261,15 @@ mod tests {
             Ok(Some(vec![BLOCK_DATA; BLOCK_SIZE_BYTES]))
         }));
 
-        let (target_tx, target_rx) = watch::channel(None);
         let fetcher_root = tf_path.parent().unwrap().to_path_buf();
 
         // Start BlockFetcher
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+            BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root),
             OneShot,
         );
-
-        // Send target update
-        target_tx.send_replace(Some(Target::PrivateRoute(CryptoKey::new([0xbe; 32]))));
 
         // Request first block
         let block = FileBlockFetch {
@@ -326,6 +280,8 @@ mod tests {
         };
         let req = Request::Fetch {
             response_tx: None,
+            share_key: CryptoTyped::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xbe; 32])),
+            target: Target::PrivateRoute(CryptoKey::new([0xbe; 32])),
             block: block.clone(),
             flush: true,
         };
@@ -335,6 +291,7 @@ mod tests {
             matches!(
                 resp,
                 Response::Fetched {
+                    share_key: _,
                     block: _,
                     length: _
                 }
@@ -389,18 +346,14 @@ mod tests {
             },
         ));
 
-        let (target_tx, target_rx) = watch::channel(None);
         let fetcher_root = tf_path.parent().unwrap().to_path_buf();
 
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root, target_rx),
+            BlockFetcher::new(node, Arc::new(RwLock::new(index)), fetcher_root),
             OneShot,
         );
-
-        // Send target update
-        target_tx.send_replace(Some(Target::PrivateRoute(CryptoKey::new([0xbe; 32]))));
 
         // Request first block
         let block = FileBlockFetch {
@@ -414,6 +367,8 @@ mod tests {
         let resp = operator
             .call(Request::Fetch {
                 response_tx: None,
+                share_key: CryptoTyped::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xbe; 32])),
+                target: Target::PrivateRoute(CryptoKey::new([0xbe; 32])),
                 block: block.clone(),
                 flush: true,
             })
@@ -421,62 +376,19 @@ mod tests {
             .expect("send request");
         match resp {
             Response::FetchFailed {
+                share_key,
                 block: failed_block,
-                error_msg,
+                err,
             } => {
+                assert_eq!(
+                    share_key,
+                    CryptoTyped::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xbe; 32]))
+                );
                 assert_eq!(failed_block, block);
-                assert_eq!(error_msg, "mock block fetch error");
+                assert_eq!(err.to_string(), "mock block fetch error");
             }
             _ => panic!("expected FetchFailed response, got {:?}", resp),
         }
-
-        // Clean up
-        cancel.cancel();
-        operator.join().await.expect("fetcher task");
-    }
-
-    #[tokio::test]
-    async fn test_fetch_no_target() {
-        const BLOCK_DATA: u8 = 0xa5;
-
-        // Create a test file with known content
-        let tf = temp_file(BLOCK_DATA, BLOCK_SIZE_BYTES * 2); // 2 blocks
-        let tf_path = tf.path().to_path_buf();
-
-        // Create index from the file
-        let indexer = Indexer::from_file(tf_path.as_path())
-            .await
-            .expect("indexer");
-        let index = indexer.index().await.expect("index");
-
-        // Delete the temp file - we'll verify BlockFetcher recreates it
-        drop(tf);
-
-        // Set up BlockFetcher
-        let node = StubNode::new();
-        let (_, target_rx) = watch::channel(None);
-        let cancel = CancellationToken::new();
-        let fetcher = BlockFetcher::new(node, Arc::new(RwLock::new(index)), tf_path, target_rx);
-        let mut operator = Operator::new(cancel.clone(), fetcher, OneShot);
-
-        // Request a block without sending target update first
-        let (tx, rx) = oneshot::channel();
-        operator
-            .send(Request::Fetch {
-                response_tx: Some(tx),
-                block: FileBlockFetch {
-                    file_index: 0,
-                    piece_index: 0,
-                    piece_offset: 0,
-                    block_index: 0,
-                },
-                flush: false,
-            })
-            .await
-            .expect("send request");
-
-        // Client has not responded to requests
-        assert_eq!(rx.is_empty(), true);
 
         // Clean up
         cancel.cancel();

@@ -1,15 +1,23 @@
+use std::collections::HashMap;
+use std::f64::MAX_EXP;
 use std::ops::Deref;
+use std::time::Duration;
+use std::u64::MAX;
 
+use backoff::backoff::Backoff;
+use moka::future::Cache;
 use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
 use tokio::sync::watch;
-use tokio::task::JoinSet;
 use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
-use tracing::{warn, Level};
+use tracing::{debug, warn, Level};
+use veilid_core::Target;
 
+use crate::error::is_route_invalid;
+use crate::node::TypedKey;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
-use crate::{block_fetcher, piece_verifier, Error, Result};
+use crate::{block_fetcher, piece_verifier, share_resolver, Error, Result};
 
 pub struct Fetcher {
     clients: Clients,
@@ -21,18 +29,124 @@ pub struct Fetcher {
     status_tx: watch::Sender<Status>,
     status_rx: watch::Receiver<Status>,
 
-    fetch_tasks: JoinSet<Result<()>>,
-    fetch_tx: flume::Sender<block_fetcher::Response>,
-    fetch_rx: flume::Receiver<block_fetcher::Response>,
+    pending_fetch_tx: flume::Sender<FileBlockFetch>,
+    pending_fetch_rx: flume::Receiver<FileBlockFetch>,
 
-    verify_tx: flume::Sender<piece_verifier::Response>,
-    verify_rx: flume::Receiver<piece_verifier::Response>,
+    fetch_resp_tx: flume::Sender<block_fetcher::Response>,
+    fetch_resp_rx: flume::Receiver<block_fetcher::Response>,
+
+    verify_resp_tx: flume::Sender<piece_verifier::Response>,
+    verify_resp_rx: flume::Receiver<piece_verifier::Response>,
+
+    peer_tracker: PeerTracker,
+}
+
+#[derive(Debug, Clone)]
+struct PeerStatus {
+    fetch_ok_count: u32,
+    fetch_err_count: u32,
+    is_invalid_target: bool,
+}
+
+impl PeerStatus {
+    fn score(&self) -> i32 {
+        if self.is_invalid_target {
+            i32::MIN
+        } else {
+            TryInto::<i32>::try_into(self.fetch_ok_count).unwrap()
+                - TryInto::<i32>::try_into(self.fetch_err_count).unwrap()
+        }
+    }
+}
+
+impl Default for PeerStatus {
+    fn default() -> Self {
+        PeerStatus {
+            fetch_ok_count: 0,
+            fetch_err_count: 0,
+            is_invalid_target: false,
+        }
+    }
+}
+
+pub struct PeerTracker {
+    targets: HashMap<TypedKey, Target>,
+    peer_status: Cache<TypedKey, PeerStatus>,
+}
+
+const MAX_TRACKED_PEERS: u64 = 64;
+
+impl PeerTracker {
+    pub fn new() -> Self {
+        PeerTracker {
+            targets: HashMap::new(),
+            peer_status: Cache::builder()
+                .time_to_idle(Duration::from_secs(60))
+                .max_capacity(MAX_TRACKED_PEERS)
+                .build(),
+        }
+    }
+
+    pub async fn update(&mut self, key: TypedKey, target: Target) {
+        self.reset(&key).await;
+        self.targets.insert(key, target);
+    }
+
+    pub async fn fetch_ok(&mut self, key: &TypedKey) {
+        let mut status = match self.peer_status.get(&key).await {
+            Some(status) => status,
+            None => PeerStatus::default(),
+        };
+        status.fetch_ok_count += 1;
+        self.peer_status.insert(key.clone(), status).await;
+    }
+
+    pub async fn fetch_err(&mut self, key: &TypedKey, err: Error) -> bool {
+        let mut status = match self.peer_status.get(&key).await {
+            Some(status) => status,
+            None => PeerStatus::default(),
+        };
+        let is_invalid_target = is_route_invalid(&err);
+        let is_newly_invalid = status.is_invalid_target != is_invalid_target;
+
+        status.fetch_ok_count += 1;
+        status.is_invalid_target = is_invalid_target;
+        self.peer_status.insert(key.clone(), status).await;
+
+        is_newly_invalid
+    }
+
+    pub async fn reset(&mut self, key: &TypedKey) {
+        self.peer_status.remove(key).await;
+    }
+
+    pub fn share_target(&self, _block: &FileBlockFetch) -> Option<(&TypedKey, &Target)> {
+        // TODO: factor in have_map and block
+        let mut peers: Vec<(TypedKey, PeerStatus)> = self
+            .peer_status
+            .iter()
+            .map(|(key, status)| (*key, status))
+            .collect();
+        peers.sort_by(|(_, l_status), (_, r_status)| r_status.score().cmp(&l_status.score()));
+        if !peers.is_empty() {
+            return self.targets.get_key_value(&peers[0].0);
+        }
+        if self.targets.is_empty() {
+            None
+        } else {
+            self.targets
+                .iter()
+                .nth(rand::random::<usize>() % self.targets.len())
+        }
+    }
 }
 
 pub struct Clients {
     pub block_fetcher: Operator<block_fetcher::Request>,
     pub piece_verifier: Operator<piece_verifier::Request>,
     pub have_announcer: Operator<have_announcer::Request>,
+    pub share_resolver: Operator<share_resolver::Request>,
+    pub share_target_rx: flume::Receiver<(TypedKey, Target)>,
 }
 
 #[derive(Debug)]
@@ -70,20 +184,28 @@ impl Fetcher {
     #[tracing::instrument(skip_all, fields(share))]
     pub fn new(share: ShareInfo, clients: Clients) -> Fetcher {
         let (status_tx, status_rx) = watch::channel(Status::NotStarted);
-        let (fetch_tx, fetch_rx) = flume::unbounded();
-        let (verify_tx, verify_rx) = flume::unbounded();
+        let (pending_fetch_tx, pending_fetch_rx) = flume::unbounded();
+        let (fetch_resp_tx, fetch_resp_rx) = flume::unbounded();
+        let (verify_resp_tx, verify_resp_rx) = flume::unbounded();
         Fetcher {
             clients,
             have_index: share.want_index.empty(),
             want_index: share.want_index,
             state: State::Indexing,
+
             status_tx,
             status_rx,
-            fetch_tasks: JoinSet::new(),
-            fetch_tx,
-            fetch_rx,
-            verify_tx,
-            verify_rx,
+
+            pending_fetch_tx,
+            pending_fetch_rx,
+
+            fetch_resp_tx,
+            fetch_resp_rx,
+
+            verify_resp_tx,
+            verify_resp_rx,
+
+            peer_tracker: PeerTracker::new(),
         }
     }
 
@@ -162,22 +284,16 @@ impl Fetcher {
         for want_block in diff.want {
             select! {
                 _ = cancel.cancelled() => {
-                    self.fetch_tasks.abort_all();
                     cancel.cancel();
                     return Err(Error::msg("plan cancelled"));
                 }
-                res = self.clients.block_fetcher.defer(
-                    block_fetcher::Request::Fetch {
-                        response_tx: None,
-                        block: FileBlockFetch {
+                res = self.pending_fetch_tx.send_async(
+                        FileBlockFetch {
                             file_index: want_block.file_index,
                             piece_index: want_block.piece_index,
                             piece_offset: want_block.piece_offset,
                             block_index: want_block.block_index,
-                        },
-                        flush: true,
-                    }, self.fetch_tx.clone(),
-                ) => {
+                        }) => {
                     res?;
                     want_length += want_block.block_length;
                 }
@@ -198,7 +314,7 @@ impl Fetcher {
                         have_block.block_index,
                     ),
                     response_tx: None,
-                }, self.verify_tx.clone()) => {
+                }, self.verify_resp_tx.clone()) => {
                     res?;
                     have_length += have_block.block_length;
                 }
@@ -222,18 +338,49 @@ impl Fetcher {
         let mut fetched_bytes = self.status_tx.borrow().deref().position().unwrap_or(0);
         let total_pieces = self.want_index.payload().pieces().len().try_into().unwrap();
         let total_length = self.want_index.payload().length();
+        let mut no_peers_backoff = backoff::ExponentialBackoffBuilder::new()
+            .with_max_interval(Duration::from_secs(5))
+            .build();
         loop {
             select! {
                 _ = cancel.cancelled() => {
                     return Ok(State::Done)
                 }
-                res = self.fetch_rx.recv_async() => {
+                res = self.pending_fetch_rx.recv_async() => {
+                    let block = res?;
+                    let (share_key, target) = match self.peer_tracker.share_target(&block) {
+                        Some((share_key, target)) => (share_key, target),
+                        None => {
+                            match no_peers_backoff.next_backoff() {
+                                Some(duration) => {
+                                    warn!("no peers available, retrying in {:?}", duration);
+                                    tokio::time::sleep(duration).await;
+                                }
+                                None => {
+                                    return Err(Error::msg("no peers available"));
+                                }
+                            }
+                            continue;
+                        },
+                    };
+                    self.clients.block_fetcher.defer(block_fetcher::Request::Fetch{
+                        response_tx: None,
+                        share_key: share_key.to_owned(),
+                        target: target.to_owned(),
+                        block,
+                        flush: self.pending_fetch_rx.is_empty(),
+                    }, self.fetch_resp_tx.clone()).await?;
+                }
+                res = self.fetch_resp_rx.recv_async() => {
                     match res {
                         // An empty fetcher channel means we've received a
                         // response for all block requests. However, some of
                         // these might fail to validate.
                         Err(_) => continue,
-                        Ok(block_fetcher::Response::Fetched { block, length }) => {
+                        Ok(block_fetcher::Response::Fetched { share_key, block, length }) => {
+                            // Update peer stats with success
+                            self.peer_tracker.fetch_ok(&share_key).await;
+
                             fetched_bytes += TryInto::<u64>::try_into(length).unwrap();
 
                             // Send progress to subscribers
@@ -253,19 +400,24 @@ impl Fetcher {
                                     block.block_index,
                                 ),
                                 response_tx: None,
-                            }, self.verify_tx.clone()).await?;
+                            }, self.verify_resp_tx.clone()).await?;
                         }
-                        Ok(block_fetcher::Response::FetchFailed { block, error_msg }) => {
-                            warn!("failed to fetch block: {}", error_msg);
-                            self.clients.block_fetcher.defer(block_fetcher::Request::Fetch {
-                                response_tx: None,
-                                block: block.clone(),
-                                flush: false
-                            }, self.fetch_tx.clone()).await?;
+                        Ok(block_fetcher::Response::FetchFailed { share_key, block, err }) => {
+                            warn!("failed to fetch block: {:?}", err);
+                            // Update peer stats with failure
+                            if self.peer_tracker.fetch_err(&share_key, err).await {
+                                self.clients.share_resolver.call(share_resolver::Request::Header {
+                                    response_tx: None,
+                                    key: share_key,
+                                    // TODO: pass prior target through here?
+                                    prior_target: None,
+                                }).await?;
+                            }
+                            self.pending_fetch_tx.send_async(block).await?;
                         }
                     }
                 }
-                res = self.verify_rx.recv_async() => {
+                res = self.verify_resp_rx.recv_async() => {
                     match res? {
                         piece_verifier::Response::ValidPiece { file_index:_, piece_index, index_complete } => {
                             verified_pieces += 1u64;
@@ -305,21 +457,24 @@ impl Fetcher {
                             // Re-fetch all the blocks in the failed piece
                             let piece_blocks = piece_length / BLOCK_SIZE_BYTES + if piece_length % BLOCK_SIZE_BYTES > 0 { 1 } else { 0 };
                             for block_index in 0..piece_blocks  {
-                                self.clients.block_fetcher.defer(
-                                    block_fetcher::Request::Fetch {
-                                        response_tx: None,
-                                        block: FileBlockFetch {
-                                           file_index,
-                                           piece_index,
-                                           piece_offset: 0,
-                                           block_index
-                                        },
-                                        flush: false,
-                                    }, self.fetch_tx.clone()).await?;
+                                // TODO: spread these requests across peers
+                                // TODO: update peer stats, bad pieces should be penalized
+                                self.pending_fetch_tx.send_async(
+                                    FileBlockFetch {
+                                        file_index,
+                                        piece_index,
+                                        piece_offset: 0,
+                                        block_index
+                                    }).await?;
                             }
                         }
                         piece_verifier::Response::IncompletePiece { .. } => {}
                     }
+                }
+                res = self.clients.share_target_rx.recv_async() => {
+                    let (key, target) = res?;
+                    debug!("share target update for {key}: {target:?}");
+                    self.peer_tracker.update(key, target).await;
                 }
             }
         }
@@ -331,6 +486,7 @@ impl Fetcher {
             self.clients.piece_verifier.join(),
             self.clients.block_fetcher.join(),
             self.clients.have_announcer.join(),
+            self.clients.share_resolver.join(),
         )?;
         Ok(())
     }
