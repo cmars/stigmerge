@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
+use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
 use stigmerge_peer::new_routing_context;
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
@@ -45,9 +45,9 @@ async fn main() -> std::result::Result<(), Error> {
     let state_dir = tempfile::tempdir()?;
 
     // Set up Veilid peer
-    let (routing_context, update_tx, _) =
+    let (routing_context, update_rx) =
         new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let node = Veilid::new(routing_context, update_tx).await?;
+    let node = Veilid::new(routing_context, update_rx).await?;
 
     let cancel = CancellationToken::new();
     let conn_state = Arc::new(Mutex::new(ConnectionState::new()));
@@ -58,15 +58,18 @@ async fn main() -> std::result::Result<(), Error> {
         ShareAnnouncer::new(node.clone(), index.clone()),
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
-    announce_op.send(share_announcer::Request::Announce).await?;
 
-    let resp = announce_op.recv().await;
-    let (key, target, _header) = match resp {
-        Some(share_announcer::Response::Announce {
+    let (key, target, _header) = match announce_op
+        .call(share_announcer::Request::Announce {
+            response_tx: ResponseChannel::default(),
+        })
+        .await?
+    {
+        share_announcer::Response::Announce {
             key,
             target,
             header,
-        }) => (key, target, header),
+        } => (key, target, header),
         _ => anyhow::bail!("Announce failed"),
     };
     info!("announced: key={key}, target={target:?}");
@@ -77,10 +80,6 @@ async fn main() -> std::result::Result<(), Error> {
         }
     }
 
-    announce_op
-        .join()
-        .await
-        .expect("announce task")
-        .expect("announce run");
+    announce_op.join().await.expect("announce task");
     Ok(())
 }

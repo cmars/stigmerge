@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::TypedKey;
 
 use stigmerge_peer::{
-    actor::{ConnectionState, Operator, UntilCancelled, WithVeilidConnection},
+    actor::{ConnectionState, Operator, ResponseChannel, UntilCancelled, WithVeilidConnection},
     block_fetcher::BlockFetcher,
     content_addressable::ContentAddressable,
     fetcher::{self, Clients as FetcherClients, Fetcher},
@@ -66,8 +66,8 @@ impl App {
 
         // Set up Veilid node
         let state_dir = self.cli.state_dir()?;
-        let (routing_context, update_tx, _) = new_routing_context(&state_dir, None).await?;
-        let node = Veilid::new(routing_context, update_tx).await?;
+        let (routing_context, update_rx) = new_routing_context(&state_dir, None).await?;
+        let node = Veilid::new(routing_context, update_rx).await?;
 
         let res = self.run_with_node(node.clone()).await;
         let _ = node.shutdown().await;
@@ -153,8 +153,8 @@ impl App {
 
         // Set up share resolver
         let share_resolver = ShareResolver::new(node.clone());
-        let target_rx = share_resolver.subscribe_target();
-        let mut share_resolve_op = Operator::new(
+        let share_target_rx = share_resolver.subscribe_target();
+        let mut share_resolver_op = Operator::new(
             cancel.clone(),
             share_resolver,
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
@@ -162,12 +162,15 @@ impl App {
 
         // Resolve bootstrap share keys and want_index_digest
         let mut want_index = None;
+        let mut n_fetchers = 1;
         match &self.cli.commands {
             Commands::Fetch {
                 share_keys,
                 index_digest,
+                fetchers,
                 ..
             } => {
+                n_fetchers = *fetchers;
                 for share_key_str in share_keys.iter() {
                     debug!("resolving share key: {share_key_str}");
                     let share_key: TypedKey = share_key_str.parse()?;
@@ -182,21 +185,21 @@ impl App {
                         }
                         None => None,
                     };
-
                     // Resolve the index from the bootstrap peer
-                    share_resolve_op
-                        .send(share_resolver::Request::Index {
+                    let index = match share_resolver_op
+                        .call(share_resolver::Request::Index {
+                            response_tx: ResponseChannel::default(),
                             key: share_key.clone(),
                             want_index_digest,
                             root: root.clone(),
                         })
-                        .await?;
-                    let index = match share_resolve_op.recv().await {
-                        Some(share_resolver::Response::Index { index, .. }) => index,
-                        Some(share_resolver::Response::BadIndex { .. }) => {
+                        .await?
+                    {
+                        share_resolver::Response::Index { index, .. } => index,
+                        share_resolver::Response::BadIndex { .. } => {
                             anyhow::bail!("Bad index")
                         }
-                        Some(share_resolver::Response::NotAvailable { err_msg, .. }) => {
+                        share_resolver::Response::NotAvailable { err_msg, .. } => {
                             anyhow::bail!(err_msg)
                         }
                         _ => anyhow::bail!("Unexpected response"),
@@ -212,30 +215,30 @@ impl App {
                     indexer.subscribe_index_progress(),
                     indexer.subscribe_digest_progress(),
                 )?;
-                let mut index = indexer.index().await?;
-                info!(index_digest = hex::encode(index.digest()?));
+                let index = indexer.index().await?;
                 want_index.get_or_insert(index);
             }
             c => bail!("unexpected subcommand: {:?}", c),
         };
-        let index = want_index.ok_or(Error::msg("failed to resolve index"))?;
-        debug!("resolved index");
+        let mut index = want_index.ok_or(Error::msg("failed to resolve index"))?;
+        info!(index_digest = hex::encode(index.digest()?));
 
         // Announce our own share of the index
-        let mut share_announce_op = Operator::new(
+        let mut share_announcer_op = Operator::new(
             cancel.clone(),
             ShareAnnouncer::new(node.clone(), index.clone()),
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
-        share_announce_op
-            .send(share_announcer::Request::Announce)
-            .await?;
-        let (share_key, share_header) = match share_announce_op.recv().await {
-            Some(share_announcer::Response::Announce { key, header, .. }) => (key, header),
-            Some(share_announcer::Response::NotAvailable) => {
+        let (share_key, share_header) = match share_announcer_op
+            .call(share_announcer::Request::Announce {
+                response_tx: ResponseChannel::default(),
+            })
+            .await?
+        {
+            share_announcer::Response::Announce { key, header, .. } => (key, header),
+            share_announcer::Response::NotAvailable => {
                 anyhow::bail!("failed to announce share")
             }
-            None => todo!(),
         };
 
         info!("announced share, key: {share_key}");
@@ -265,16 +268,17 @@ impl App {
                 node.clone(),
                 Arc::new(RwLock::new(index.clone())),
                 index.root().to_path_buf(),
-                target_rx,
             ),
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
-            self.cli.fetchers,
+            n_fetchers,
         );
 
         let fetcher_clients = FetcherClients {
             block_fetcher,
             piece_verifier: piece_verifier_op,
             have_announcer,
+            share_resolver: share_resolver_op,
+            share_target_rx,
         };
 
         // Create and run fetcher
@@ -296,7 +300,7 @@ impl App {
             seeder,
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
-        tasks.spawn(async move { seeder_op.join().await? });
+        tasks.spawn(async move { seeder_op.join().await });
 
         info!("Seeding until ctrl-c...");
         let seed_progress = self.multi_progress.add(ProgressBar::new_spinner());

@@ -90,6 +90,13 @@ pub fn is_proto(e: &Error) -> bool {
     }
 }
 
+pub fn is_io(e: &Error) -> bool {
+    match as_io(e) {
+        Some(_) => true,
+        _ => false,
+    }
+}
+
 /// Trait for errors that may be caused by transient conditions which may clear
 /// up upon retrying.
 pub trait Transient {
@@ -106,10 +113,10 @@ impl Transient for VeilidAPIError {
             &VeilidAPIError::NoConnection { .. } => true,
             &VeilidAPIError::NotInitialized => true,
             &VeilidAPIError::KeyNotFound { .. } => true,
-            &VeilidAPIError::Generic { .. } => true,
             &VeilidAPIError::Internal { .. } => true,
 
             // These errors are not likely to be transient in nature.
+            &VeilidAPIError::Generic { .. } => false,
             &VeilidAPIError::Unimplemented { .. } => false,
             &VeilidAPIError::ParseError { .. } => false,
             &VeilidAPIError::InvalidArgument { .. } => false,

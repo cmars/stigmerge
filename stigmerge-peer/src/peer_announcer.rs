@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 
 use crate::{
-    actor::{Actor, ChanServer},
+    actor::{Actor, Respondable, ResponseChannel},
     node::TypedKey,
     Node, Result,
 };
@@ -57,17 +57,60 @@ impl<N: Node> PeerAnnouncer<N> {
 }
 
 /// Peer-map announcer request messages.
-#[derive(Clone)]
 pub enum Request {
     /// Announce a known remote peer in good standing.
-    Announce { key: TypedKey },
+    Announce {
+        response_tx: ResponseChannel<Response>,
+        key: TypedKey,
+    },
 
     /// Redact a known peer, it may be unavailable or defective
     /// from the point of view of this peer.
-    Redact { key: TypedKey },
+    Redact {
+        response_tx: ResponseChannel<Response>,
+        key: TypedKey,
+    },
 
     /// Clear all peer announcements.
-    Reset,
+    Reset {
+        response_tx: ResponseChannel<Response>,
+    },
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Announce {
+                response_tx: _,
+                key,
+            } => f.debug_struct("Announce").field("key", key).finish(),
+            Self::Redact {
+                response_tx: _,
+                key,
+            } => f.debug_struct("Redact").field("key", key).finish(),
+            Self::Reset { response_tx: _ } => f.debug_struct("Reset").finish(),
+        }
+    }
+}
+
+impl Respondable for Request {
+    type Response = Response;
+
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
+        match self {
+            Request::Announce { response_tx, .. } => *response_tx = ch,
+            Request::Redact { response_tx, .. } => *response_tx = ch,
+            Request::Reset { response_tx } => *response_tx = ch,
+        }
+    }
+
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
+        match self {
+            Request::Announce { response_tx, .. } => response_tx,
+            Request::Redact { response_tx, .. } => response_tx,
+            Request::Reset { response_tx } => response_tx,
+        }
+    }
 }
 
 /// Peer-map announcer response message, just an acknowledgement or error.
@@ -85,7 +128,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
     async fn run(
         &mut self,
         cancel: CancellationToken,
-        mut server_ch: ChanServer<Request, Response>,
+        request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
         self.node
             .reset_peers(&self.payload_digest, self.max_peers)
@@ -95,53 +138,86 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 _ = cancel.cancelled() => {
                     return Ok(())
                 }
-                res = server_ch.recv() => {
-                    let req = match res {
-                        None => return Ok(()),
-                        Some(req) => req,
-                    };
-                    let resp = match self.handle(&req).await {
-                        Ok(resp) => resp,
-                        Err(e) => Response::Err{err_msg: e.to_string()},
-                    };
-                    server_ch.send(resp).await?;
+                res = request_rx.recv_async() => {
+                    let req = res?;
+                    self.handle_request(req).await?;
                 }
             }
         }
     }
 
     #[tracing::instrument(skip_all, err, level = Level::TRACE)]
-    async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
-        Ok(match req {
-            Request::Announce { key } => {
-                if !self.peer_indexes.contains_key(key) {
-                    let index = self.assign_peer_index(*key);
-                    self.node
-                        .announce_peer(&self.payload_digest, Some(*key), index)
-                        .await?;
-                }
-                Response::Ok
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
+        match req {
+            Request::Announce {
+                key,
+                mut response_tx,
+            } => {
+                let resp = if !self.peer_indexes.contains_key(&key) {
+                    let index = self.assign_peer_index(key);
+                    match self
+                        .node
+                        .announce_peer(&self.payload_digest, Some(key), index)
+                        .await
+                    {
+                        Ok(_) => Response::Ok,
+                        Err(e) => Response::Err {
+                            err_msg: e.to_string(),
+                        },
+                    }
+                } else {
+                    Response::Ok
+                };
+
+                response_tx.send(resp).await?;
             }
-            Request::Redact { key } => {
-                if let Some(index) = self.peer_indexes.get(key) {
+            Request::Redact {
+                key,
+                mut response_tx,
+            } => {
+                let resp = if let Some(index) = self.peer_indexes.get(&key) {
                     let subkey = TryInto::<u16>::try_into(*index).unwrap();
-                    self.node
+                    match self
+                        .node
                         .announce_peer(&self.payload_digest, None, subkey)
-                        .await?;
-                    self.peers[*index] = None;
-                    self.peer_indexes.remove(key);
-                }
-                Response::Ok
+                        .await
+                    {
+                        Ok(_) => {
+                            self.peers[*index] = None;
+                            self.peer_indexes.remove(&key);
+                            Response::Ok
+                        }
+                        Err(e) => Response::Err {
+                            err_msg: e.to_string(),
+                        },
+                    }
+                } else {
+                    Response::Ok
+                };
+
+                response_tx.send(resp).await?;
             }
-            Request::Reset => {
-                self.node
+            Request::Reset { mut response_tx } => {
+                let resp = match self
+                    .node
                     .reset_peers(&self.payload_digest, self.max_peers)
-                    .await?;
-                self.peers.clear();
-                self.peer_indexes.clear();
-                Response::Ok
+                    .await
+                {
+                    Ok(_) => {
+                        self.peers.clear();
+                        self.peer_indexes.clear();
+                        Response::Ok
+                    }
+                    Err(e) => Response::Err {
+                        err_msg: e.to_string(),
+                    },
+                };
+
+                response_tx.send(resp).await?;
             }
-        })
+        }
+
+        Ok(())
     }
 }
 
@@ -156,8 +232,8 @@ mod tests {
     use veilid_core::TypedKey;
 
     use crate::{
-        actor::{OneShot, Operator},
-        peer_announcer::{PeerAnnouncer, Request, Response, DEFAULT_MAX_PEERS},
+        actor::{OneShot, Operator, ResponseChannel},
+        peer_announcer::{PeerAnnouncer, Request, DEFAULT_MAX_PEERS},
         tests::StubNode,
     };
 
@@ -202,10 +278,10 @@ mod tests {
 
         // Send an Announce request
         let req = Request::Announce {
+            response_tx: ResponseChannel::default(),
             key: peer_key.clone(),
         };
-        operator.send(req).await.unwrap();
-        assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
+        operator.call(req).await.expect("call");
 
         // Verify the peer was announced correctly
         let recorded_payload_digest = recorded_payload_digest.read().unwrap();
@@ -226,7 +302,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 
     #[tokio::test]
@@ -270,17 +346,17 @@ mod tests {
 
         // First announce a peer
         let req_announce = Request::Announce {
+            response_tx: ResponseChannel::default(),
             key: peer_key.clone(),
         };
-        operator.send(req_announce).await.unwrap();
-        assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
+        operator.call(req_announce).await.expect("call");
 
         // Then redact it
         let req_redact = Request::Redact {
+            response_tx: ResponseChannel::default(),
             key: peer_key.clone(),
         };
-        operator.send(req_redact).await.unwrap();
-        assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
+        operator.call(req_redact).await.expect("call");
 
         // Verify the peer was redacted correctly
         let recorded_payload_digest = recorded_payload_digest.read().unwrap();
@@ -301,7 +377,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 
     #[tokio::test]
@@ -330,9 +406,10 @@ mod tests {
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send a Reset request
-        let req = Request::Reset;
-        operator.send(req).await.unwrap();
-        assert_eq!(operator.recv().await.expect("recv"), Response::Ok);
+        let req = Request::Reset {
+            response_tx: ResponseChannel::default(),
+        };
+        operator.call(req).await.expect("call");
 
         // Verify the peers were reset correctly
         let recorded_payload_digest = recorded_payload_digest.read().unwrap();
@@ -348,6 +425,6 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 }

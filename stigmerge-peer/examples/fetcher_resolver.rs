@@ -23,6 +23,7 @@ struct Args {
     download_dir: PathBuf,
 }
 
+use stigmerge_peer::actor::ResponseChannel;
 use stigmerge_peer::actor::UntilCancelled;
 use tokio::select;
 use tokio::sync::Mutex;
@@ -55,17 +56,17 @@ async fn main() -> std::result::Result<(), Error> {
     let state_dir = tempfile::tempdir()?;
 
     // Set up Veilid node
-    let (routing_context, update_tx, _) =
+    let (routing_context, update_rx) =
         new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let node = Veilid::new(routing_context, update_tx).await?;
+    let node = Veilid::new(routing_context, update_rx).await?;
 
     let cancel = CancellationToken::new();
     let conn_state = Arc::new(Mutex::new(ConnectionState::new()));
 
     // Set up share resolver
     let share_resolver = ShareResolver::new(node.clone());
-    let target_rx = share_resolver.subscribe_target();
-    let mut resolve_op = Operator::new(
+    let share_target_rx = share_resolver.subscribe_target();
+    let mut share_resolver_op = Operator::new(
         cancel.clone(),
         share_resolver,
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
@@ -79,18 +80,18 @@ async fn main() -> std::result::Result<(), Error> {
         .map_err(|_| Error::msg("Invalid digest length"))?;
 
     // Resolve the index
-    resolve_op
-        .send(share_resolver::Request::Index {
+    let (header, index) = match share_resolver_op
+        .call(share_resolver::Request::Index {
+            response_tx: ResponseChannel::default(),
             key: key.clone(),
             want_index_digest: Some(want_index_digest),
             root: download_dir.clone(),
         })
-        .await?;
-
-    let (header, index) = match resolve_op.recv().await {
-        Some(share_resolver::Response::Index { header, index, .. }) => (header, index),
-        Some(share_resolver::Response::BadIndex { .. }) => anyhow::bail!("Bad index"),
-        Some(share_resolver::Response::NotAvailable { err_msg, .. }) => anyhow::bail!(err_msg),
+        .await?
+    {
+        share_resolver::Response::Index { header, index, .. } => (header, index),
+        share_resolver::Response::BadIndex { .. } => anyhow::bail!("Bad index"),
+        share_resolver::Response::NotAvailable { err_msg, .. } => anyhow::bail!(err_msg),
         _ => anyhow::bail!("Unexpected response"),
     };
 
@@ -98,12 +99,7 @@ async fn main() -> std::result::Result<(), Error> {
     let want_index = Arc::new(RwLock::new(index.clone()));
     let block_fetcher = Operator::new_clone_pool(
         cancel.clone(),
-        BlockFetcher::new(
-            node.clone(),
-            want_index.clone(),
-            download_dir.clone(),
-            target_rx,
-        ),
+        BlockFetcher::new(node.clone(), want_index.clone(), download_dir.clone()),
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
         50,
     );
@@ -130,6 +126,8 @@ async fn main() -> std::result::Result<(), Error> {
         block_fetcher,
         piece_verifier,
         have_announcer,
+        share_resolver: share_resolver_op,
+        share_target_rx,
     };
 
     // Create and run fetcher

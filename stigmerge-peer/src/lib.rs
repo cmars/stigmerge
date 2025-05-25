@@ -23,7 +23,8 @@ pub mod veilid_config;
 
 use std::sync::Arc;
 
-use tokio::sync::broadcast::{self, Receiver, Sender};
+use tokio::sync::broadcast;
+use tracing::warn;
 use veilid_core::{RoutingContext, VeilidUpdate};
 
 pub use error::{is_cancelled, is_hangup, Error, Result};
@@ -32,20 +33,18 @@ pub use node::{Node, Veilid};
 #[cfg(test)]
 pub mod tests;
 
-const VEILID_UPDATE_CAPACITY: usize = 1024;
-
 #[tracing::instrument(skip_all, fields(state_dir, ns), err)]
 pub async fn new_routing_context(
     state_dir: &str,
     ns: Option<String>,
-) -> Result<(RoutingContext, Sender<VeilidUpdate>, Receiver<VeilidUpdate>)> {
-    let (cb_update_tx, update_rx): (Sender<VeilidUpdate>, Receiver<VeilidUpdate>) =
-        broadcast::channel(VEILID_UPDATE_CAPACITY);
-    let update_tx = cb_update_tx.clone();
+) -> Result<(RoutingContext, broadcast::Receiver<VeilidUpdate>)> {
+    let (update_tx, update_rx) = broadcast::channel(1024);
 
     // Configure Veilid core
     let update_callback = Arc::new(move |change: VeilidUpdate| {
-        let _ = cb_update_tx.send(change);
+        if let Err(e) = update_tx.send(change) {
+            warn!("dispatching veilid update: {:?}", e);
+        }
     });
     let config_state_path = Arc::new(state_dir.to_owned());
     let config_ns = Arc::new(ns.to_owned());
@@ -59,5 +58,5 @@ pub async fn new_routing_context(
     api.attach().await?;
 
     let routing_context = api.routing_context()?;
-    Ok((routing_context, update_tx, update_rx))
+    Ok((routing_context, update_rx))
 }

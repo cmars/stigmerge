@@ -24,18 +24,18 @@ use super::{Node, TypedKey};
 pub struct Veilid {
     routing_context: Arc<RwLock<RoutingContext>>,
 
-    update_tx: broadcast::Sender<VeilidUpdate>,
+    update_rx: broadcast::Receiver<VeilidUpdate>,
 }
 
 impl Veilid {
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     pub async fn new(
         routing_context: RoutingContext,
-        update_tx: broadcast::Sender<VeilidUpdate>,
+        update_rx: broadcast::Receiver<VeilidUpdate>,
     ) -> Result<Self> {
         Ok(Veilid {
             routing_context: Arc::new(RwLock::new(routing_context)),
-            update_tx,
+            update_rx,
         })
     }
 
@@ -261,14 +261,14 @@ impl Clone for Veilid {
     fn clone(&self) -> Self {
         Veilid {
             routing_context: self.routing_context.clone(),
-            update_tx: self.update_tx.clone(),
+            update_rx: self.update_rx.resubscribe(),
         }
     }
 }
 
 impl Node for Veilid {
     fn subscribe_veilid_update(&self) -> broadcast::Receiver<VeilidUpdate> {
-        self.update_tx.subscribe()
+        self.update_rx.resubscribe()
     }
 
     #[tracing::instrument(skip_all, err)]

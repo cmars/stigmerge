@@ -1,12 +1,13 @@
-use std::{ops::Deref, sync::Arc, time::Duration};
+use std::{fmt, ops::Deref, sync::Arc, time::Duration};
 
 use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::Level;
+use tracing::{warn, Level};
 
 use crate::{
-    actor::{Actor, ChanServer},
+    actor::{Actor, Respondable, ResponseChannel},
     error::Result,
+    is_cancelled,
     node::TypedKey,
     piece_map::PieceMap,
     Node,
@@ -39,16 +40,65 @@ impl<N: Node> HaveAnnouncer<N> {
 }
 
 /// Have-map announcer request messages.
-#[derive(Clone, Debug)]
 pub enum Request {
     /// Announce that this peer has a given piece.
-    Set { piece_index: u32 },
+    Set {
+        response_tx: ResponseChannel<Response>,
+        piece_index: u32,
+    },
 
     /// Announce that this peer does not have a given piece.
-    Clear { piece_index: u32 },
+    Clear {
+        response_tx: ResponseChannel<Response>,
+        piece_index: u32,
+    },
 
     /// Announce that this peer has no pieces.
-    Reset,
+    Reset {
+        response_tx: ResponseChannel<Response>,
+    },
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Set {
+                response_tx: _,
+                piece_index,
+            } => f
+                .debug_struct("Set")
+                .field("piece_index", piece_index)
+                .finish(),
+            Self::Clear {
+                response_tx: _,
+                piece_index,
+            } => f
+                .debug_struct("Clear")
+                .field("piece_index", piece_index)
+                .finish(),
+            Self::Reset { response_tx: _ } => f.debug_struct("Reset").finish(),
+        }
+    }
+}
+
+impl Respondable for Request {
+    type Response = Response;
+
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
+        match self {
+            Request::Set { response_tx, .. } => *response_tx = ch,
+            Request::Clear { response_tx, .. } => *response_tx = ch,
+            Request::Reset { response_tx, .. } => *response_tx = ch,
+        }
+    }
+
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
+        match self {
+            Request::Set { response_tx, .. } => response_tx,
+            Request::Clear { response_tx, .. } => response_tx,
+            Request::Reset { response_tx, .. } => response_tx,
+        }
+    }
 }
 
 /// Have-map announcer response message, just an acknowledgement or error.
@@ -62,7 +112,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
     async fn run(
         &mut self,
         cancel: CancellationToken,
-        mut server_ch: ChanServer<Self::Request, Self::Response>,
+        request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
         let mut changed = false;
         let mut interval = tokio::time::interval(self.announce_interval);
@@ -71,14 +121,15 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
                 _ = cancel.cancelled() => {
                     return Ok(())
                 }
-                res = server_ch.recv() => {
-                    let req = match res {
-                        None => return Ok(()),
-                        Some(req) => req,
-                    };
-                    let resp = self.handle(&req).await?;
+                res = request_rx.recv_async() => {
+                    let req = res?;
+                    if let Err(e) = self.handle_request(req).await {
+                        if is_cancelled(&e) {
+                            return Ok(());
+                        }
+                        return Err(e);
+                    }
                     changed = true;
-                    server_ch.send(resp).await?;
                 }
                 _ = interval.tick() => {
                     if changed {
@@ -92,19 +143,30 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
+    async fn handle_request(&mut self, req: Self::Request) -> Result<Self::Response> {
         let mut pieces_map = self.pieces_map.write().await;
-        Ok(match req {
-            Request::Set { piece_index } => {
-                pieces_map.set(*piece_index);
+        let mut response_tx = match req {
+            Request::Set {
+                piece_index,
+                response_tx,
+            } => {
+                pieces_map.set(piece_index);
+                response_tx
             }
-            Request::Clear { piece_index } => {
-                pieces_map.clear(*piece_index);
+            Request::Clear {
+                piece_index,
+                response_tx,
+            } => {
+                pieces_map.clear(piece_index);
+                response_tx
             }
-            Request::Reset => {
+            Request::Reset { response_tx } => {
                 pieces_map.reset();
+                response_tx
             }
-        })
+        };
+        response_tx.send(()).await?;
+        Ok(())
     }
 }
 
@@ -119,7 +181,7 @@ mod tests {
     use veilid_core::TypedKey;
 
     use crate::{
-        actor::{OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         have_announcer::{HaveAnnouncer, Request},
         piece_map::PieceMap,
         tests::StubNode,
@@ -153,9 +215,12 @@ mod tests {
         let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot);
 
         // Send a Set request to announce a piece
-        let req = Request::Set { piece_index: 42 };
-        operator.send(req).await.unwrap();
-        assert_eq!(operator.recv().await.expect("recv"), ());
+        let req = Request::Set {
+            piece_index: 42,
+            response_tx: ResponseChannel::default(),
+        };
+        let resp = operator.call(req).await.expect("call");
+        assert_eq!(resp, ());
 
         // Wait for the announcement to happen
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -177,7 +242,7 @@ mod tests {
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 
     #[tokio::test]
@@ -202,14 +267,20 @@ mod tests {
         let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot);
 
         // First set a piece
-        let req_set = Request::Set { piece_index: 42 };
-        operator.send(req_set).await.unwrap();
-        assert_eq!(operator.recv().await.expect("recv"), ());
+        let req_set = Request::Set {
+            piece_index: 42,
+            response_tx: ResponseChannel::default(),
+        };
+        let resp = operator.call(req_set).await.expect("call");
+        assert_eq!(resp, ());
 
         // Then clear it
-        let req_clear = Request::Clear { piece_index: 42 };
-        operator.send(req_clear).await.unwrap();
-        assert_eq!(operator.recv().await.expect("recv"), ());
+        let req_clear = Request::Clear {
+            piece_index: 42,
+            response_tx: ResponseChannel::default(),
+        };
+        let resp = operator.call(req_clear).await.expect("call");
+        assert_eq!(resp, ());
 
         // Wait for the announcements to happen
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -223,7 +294,7 @@ mod tests {
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 
     #[tokio::test]
@@ -249,14 +320,19 @@ mod tests {
         let mut operator = Operator::new(cancel.clone(), have_announcer, OneShot);
 
         // First set some pieces
-        let req_set = Request::Set { piece_index: 42 };
-        operator.send(req_set).await.unwrap();
-        assert_eq!(operator.recv().await.expect("recv"), ());
+        let req_set = Request::Set {
+            piece_index: 42,
+            response_tx: ResponseChannel::default(),
+        };
+        let resp = operator.call(req_set).await.expect("call");
+        assert_eq!(resp, ());
 
         // Then reset the map
-        let req_reset = Request::Reset;
-        operator.send(req_reset).await.unwrap();
-        assert_eq!(operator.recv().await.expect("recv"), ());
+        let req_reset = Request::Reset {
+            response_tx: ResponseChannel::default(),
+        };
+        let resp = operator.call(req_reset).await.expect("call");
+        assert_eq!(resp, ());
 
         // Wait for the announcements to happen
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -273,6 +349,6 @@ mod tests {
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 }

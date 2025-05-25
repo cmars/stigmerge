@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
-use tokio::{select, sync::broadcast};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
-    actor::{Actor, ChanServer},
+    actor::{Actor, Respondable, ResponseChannel},
     node::TypedKey,
     piece_map::PieceMap,
     Node, Result,
@@ -19,10 +19,13 @@ use crate::{
 /// share DHT header (subkey 0) as haveMapRef.
 pub struct HaveResolver<N: Node> {
     node: N,
-    updates: broadcast::Receiver<VeilidUpdate>,
 
     // Mapping from have-map key to share key, used in watches
     have_to_share_map: HashMap<TypedKey, TypedKey>,
+
+    // Sender for watched have-map updates
+    have_map_tx: flume::Sender<(TypedKey, PieceMap)>,
+    have_map_rx: flume::Receiver<(TypedKey, PieceMap)>,
 }
 
 impl<P> HaveResolver<P>
@@ -31,36 +34,77 @@ where
 {
     /// Create a new have_resolver service with the given peer.
     pub fn new(node: P) -> Self {
-        let updates = node.subscribe_veilid_update();
+        let (have_map_tx, have_map_rx) = flume::unbounded();
         Self {
             node,
-            updates,
             have_to_share_map: HashMap::new(),
+            have_map_tx,
+            have_map_rx,
         }
+    }
+
+    pub fn subscribe_have_map(&self) -> flume::Receiver<(TypedKey, PieceMap)> {
+        self.have_map_rx.clone()
     }
 }
 
 /// Have-map resolver request messages.
-#[derive(Clone, Debug)]
 pub enum Request {
     /// Resolve the have-map for the specified share key, to get a map of which
     /// pieces the remote peer has.
-    Resolve { key: TypedKey },
+    Resolve {
+        response_tx: ResponseChannel<Response>,
+        key: TypedKey,
+    },
 
     /// Watch the have-map for the specified share key for changes.
-    Watch { key: TypedKey },
+    Watch {
+        response_tx: ResponseChannel<Response>,
+        key: TypedKey,
+    },
 
     /// Cancel the watch on the have-map share.
-    CancelWatch { key: TypedKey },
+    CancelWatch {
+        response_tx: ResponseChannel<Response>,
+        key: TypedKey,
+    },
 }
 
-impl Request {
-    /// Get the share key specified in the request.
-    fn key(&self) -> &TypedKey {
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Request::Resolve { key } => key,
-            Request::Watch { key } => key,
-            Request::CancelWatch { key } => key,
+            Self::Resolve {
+                response_tx: _,
+                key,
+            } => f.debug_struct("Resolve").field("key", key).finish(),
+            Self::Watch {
+                response_tx: _,
+                key,
+            } => f.debug_struct("Watch").field("key", key).finish(),
+            Self::CancelWatch {
+                response_tx: _,
+                key,
+            } => f.debug_struct("CancelWatch").field("key", key).finish(),
+        }
+    }
+}
+
+impl Respondable for Request {
+    type Response = Response;
+
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
+        match self {
+            Request::Resolve { response_tx, .. } => *response_tx = ch,
+            Request::Watch { response_tx, .. } => *response_tx = ch,
+            Request::CancelWatch { response_tx, .. } => *response_tx = ch,
+        }
+    }
+
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
+        match self {
+            Request::Resolve { response_tx, .. } => response_tx,
+            Request::Watch { response_tx, .. } => response_tx,
+            Request::CancelWatch { response_tx, .. } => response_tx,
         }
     }
 }
@@ -90,37 +134,29 @@ impl<P: Node> Actor for HaveResolver<P> {
     async fn run(
         &mut self,
         cancel: CancellationToken,
-        mut server_ch: ChanServer<Self::Request, Self::Response>,
+        request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
+        let mut update_rx = self.node.subscribe_veilid_update();
         loop {
             select! {
                 _ = cancel.cancelled() => {
                     return Ok(())
                 }
-                res = server_ch.recv() => {
-                    let req = match res {
-                        None => return Ok(()),
-                        Some(req) => req,
-                    };
-                    match self.handle(&req).await {
-                        Ok(resp) => {
-                            server_ch.send(resp).await?
-                        }
-                        Err(err) => {
-                            server_ch.send(Response::NotAvailable { key: req.key().to_owned(), err_msg: err.to_string() }).await?
-                        }
-                    }
+                res = request_rx.recv_async() => {
+                    let req = res?;
+                    self.handle_request(req).await?;
                 }
-                res = self.updates.recv() => {
+                res = update_rx.recv() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {
-                            let share_key = match self.have_to_share_map.get(&ch.key) {
-                                Some(key) => key,
+                            match self.have_to_share_map.get(&ch.key) {
+                                Some(share_key) => {
+                                    let have_map = self.node.resolve_have_map(&ch.key).await?;
+                                    self.have_map_tx.send_async((share_key.to_owned(), have_map)).await?;
+                                }
                                 None => continue,
-                            };
-                            let have_map = self.node.resolve_have_map(share_key).await?;
-                            server_ch.send(Response::Resolve{ key: share_key.to_owned(), pieces: have_map}).await?;
+                            }
                         }
                         VeilidUpdate::Shutdown => {
                             return Ok(());
@@ -133,45 +169,100 @@ impl<P: Node> Actor for HaveResolver<P> {
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle(&mut self, req: &Request) -> Result<Response> {
-        Ok(match req {
-            Request::Resolve { key } => {
-                let have_map = self.node.resolve_have_map(key).await?;
-                Response::Resolve {
-                    key: key.to_owned(),
-                    pieces: have_map,
-                }
-            }
-            Request::Watch { key } => {
-                let (_, header) = self.node.resolve_route(key, None).await?;
-                if let Some(have_map_ref) = header.have_map() {
-                    self.have_to_share_map
-                        .insert(have_map_ref.key().to_owned(), key.to_owned());
-                    info!("watch: have map key {}", have_map_ref.key());
-                    self.node
-                        .watch(have_map_ref.key().to_owned(), ValueSubkeyRangeSet::full())
-                        .await?;
-                    Response::Watching {
-                        key: key.to_owned(),
-                    }
-                } else {
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
+        let (resp, mut resp_tx) = match req {
+            Request::Resolve { key, response_tx } => match self.node.resolve_have_map(&key).await {
+                Ok(have_map) => (
+                    Response::Resolve {
+                        key: key.clone(),
+                        pieces: have_map,
+                    },
+                    response_tx,
+                ),
+                Err(err) => (
                     Response::NotAvailable {
-                        key: key.to_owned(),
-                        err_msg: format!("peer {key} does not publish a have map"),
+                        key: key.clone(),
+                        err_msg: err.to_string(),
+                    },
+                    response_tx,
+                ),
+            },
+            Request::Watch { key, response_tx } => {
+                match self.node.resolve_route(&key, None).await {
+                    Ok((_, header)) => {
+                        if let Some(have_map_ref) = header.have_map() {
+                            self.have_to_share_map
+                                .insert(have_map_ref.key().to_owned(), key.to_owned());
+                            info!("watch: have map key {}", have_map_ref.key());
+                            match self
+                                .node
+                                .watch(have_map_ref.key().to_owned(), ValueSubkeyRangeSet::full())
+                                .await
+                            {
+                                Ok(_) => (
+                                    Response::Watching {
+                                        key: key.to_owned(),
+                                    },
+                                    response_tx,
+                                ),
+                                Err(err) => (
+                                    Response::NotAvailable {
+                                        key: key.to_owned(),
+                                        err_msg: err.to_string(),
+                                    },
+                                    response_tx,
+                                ),
+                            }
+                        } else {
+                            (
+                                Response::NotAvailable {
+                                    key: key.to_owned(),
+                                    err_msg: format!("peer {key} does not publish a have map"),
+                                },
+                                response_tx,
+                            )
+                        }
+                    }
+                    Err(err) => (
+                        Response::NotAvailable {
+                            key: key.to_owned(),
+                            err_msg: err.to_string(),
+                        },
+                        response_tx,
+                    ),
+                }
+            }
+            Request::CancelWatch { key, response_tx } => {
+                match self.node.resolve_route(&key, None).await {
+                    Ok((_, header)) => {
+                        if let Some(have_map_ref) = header.have_map() {
+                            self.have_to_share_map.remove(have_map_ref.key());
+                            if let Err(e) = self.node.cancel_watch(have_map_ref.key()).await {
+                                warn!("cancel watch: {}", e);
+                            }
+                        }
+                        (
+                            Response::WatchCancelled {
+                                key: key.to_owned(),
+                            },
+                            response_tx,
+                        )
+                    }
+                    Err(_) => {
+                        // Even if we can't resolve the route, we still want to acknowledge the cancel
+                        (
+                            Response::WatchCancelled {
+                                key: key.to_owned(),
+                            },
+                            response_tx,
+                        )
                     }
                 }
             }
-            Request::CancelWatch { key } => {
-                let (_, header) = self.node.resolve_route(key, None).await?;
-                if let Some(have_map_ref) = header.have_map() {
-                    self.have_to_share_map.remove(have_map_ref.key());
-                    self.node.cancel_watch(have_map_ref.key()).await?;
-                }
-                Response::WatchCancelled {
-                    key: key.to_owned(),
-                }
-            }
-        })
+        };
+        resp_tx.send(resp).await?;
+
+        Ok(())
     }
 }
 
@@ -179,8 +270,9 @@ impl<P: Node + 'static> Clone for HaveResolver<P> {
     fn clone(&self) -> Self {
         Self {
             node: self.node.clone(),
-            updates: self.updates.resubscribe(),
             have_to_share_map: self.have_to_share_map.clone(),
+            have_map_tx: self.have_map_tx.clone(),
+            have_map_rx: self.have_map_rx.clone(),
         }
     }
 }
@@ -199,7 +291,7 @@ mod tests {
     };
 
     use crate::{
-        actor::{OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         have_resolver::{HaveResolver, Request, Response},
         node::TypedKey,
         proto::{HaveMapRef, Header},
@@ -228,14 +320,15 @@ mod tests {
         let have_resolver = HaveResolver::new(node.clone());
         let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot);
 
-        // Send a Resolve request
-        let req = Request::Resolve {
-            key: test_key.clone(),
-        };
-        operator.send(req).await.unwrap();
-
-        // Verify the response
-        match operator.recv().await.expect("recv") {
+        // Resolve request
+        match operator
+            .call(Request::Resolve {
+                response_tx: ResponseChannel::default(),
+                key: test_key.clone(),
+            })
+            .await
+            .expect("call")
+        {
             Response::Resolve { key, pieces } => {
                 assert_eq!(key, test_key);
                 assert_eq!(Into::<Vec<u8>>::into(pieces), vec![42]);
@@ -251,7 +344,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 
     #[tokio::test]
@@ -299,14 +392,15 @@ mod tests {
         let have_resolver = HaveResolver::new(node.clone());
         let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot);
 
-        // Send a Watch request
+        // Send a Watch request with a response channel
         let req = Request::Watch {
+            response_tx: ResponseChannel::default(),
             key: test_key.clone(),
         };
-        operator.send(req).await.unwrap();
+        let resp = operator.call(req).await.expect("call");
 
         // Verify the response
-        match operator.recv().await.expect("recv") {
+        match resp {
             Response::Watching { key } => {
                 assert_eq!(key, test_key);
             }
@@ -327,7 +421,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 
     #[tokio::test]
@@ -370,14 +464,15 @@ mod tests {
         let have_resolver = HaveResolver::new(node.clone());
         let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot);
 
-        // Send a CancelWatch request
+        // Send a CancelWatch request with a response channel
         let req = Request::CancelWatch {
+            response_tx: ResponseChannel::default(),
             key: test_key.clone(),
         };
-        operator.send(req).await.unwrap();
+        let resp = operator.call(req).await.expect("call");
 
         // Verify the response
-        match operator.recv().await.expect("recv") {
+        match resp {
             Response::WatchCancelled { key } => {
                 assert_eq!(key, test_key);
             }
@@ -391,7 +486,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 
     #[tokio::test]
@@ -408,14 +503,14 @@ mod tests {
         let have_map_key_clone = have_map_key.clone();
         node.resolve_route_result = Arc::new(Mutex::new(
             move |_key: &TypedKey, _target: Option<Target>| {
-                let peer_map_ref = crate::proto::HaveMapRef::new(have_map_key_clone, 1);
+                let have_map_ref = crate::proto::HaveMapRef::new(have_map_key_clone, 1);
                 let header = crate::proto::Header::new(
                     [0u8; 32],          // payload_digest
                     0,                  // payload_length
                     0,                  // subkeys
                     &[],                // route_data
-                    Some(peer_map_ref), // peer_map
-                    None,               // have_map
+                    Some(have_map_ref), // have_map
+                    None,               // peer_map
                 );
                 Ok((Target::PrivateRoute(CryptoKey::new([0u8; 32])), header))
             },
@@ -437,18 +532,25 @@ mod tests {
         let update_tx = node.update_tx.clone();
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(node);
+        let have_map_rx = have_resolver.subscribe_have_map();
         let mut operator = Operator::new(cancel.clone(), have_resolver, OneShot);
 
         // Send a request and receive a response, to make sure the task is
         // running. That's important: if we're not in the run loop, the update
         // send may fail to broadcast.
-        operator
-            .send(Request::Watch {
+        match operator
+            .call(Request::Watch {
+                response_tx: ResponseChannel::default(),
                 key: test_key.clone(),
             })
             .await
-            .unwrap();
-        assert!(matches!(operator.recv().await, Some(_)));
+            .expect("call")
+        {
+            Response::Watching { key } => {
+                assert_eq!(key, test_key);
+            }
+            other => panic!("Unexpected response: {:?}", other),
+        }
 
         // Simulate a value change notification
         let change = VeilidValueChange {
@@ -464,23 +566,18 @@ mod tests {
             .send(VeilidUpdate::ValueChange(Box::new(change)))
             .expect("send value change");
 
-        // Verify the response
-        match operator.recv().await.expect("recv") {
-            Response::Resolve { key, pieces } => {
-                assert_eq!(key, test_key);
-                assert_eq!(Into::<Vec<u8>>::into(pieces), vec![42]);
-            }
-            other => panic!("Unexpected response: {:?}", other),
-        };
+        // Expect a have_map update
+        let (share_key, _) = have_map_rx.recv_async().await.expect("recv have_map");
+        assert_eq!(share_key, test_key);
 
         // Verify the merge was called correctly
         let recorded_key = recorded_key.read().unwrap();
 
         assert!(recorded_key.is_some(), "Key was not recorded");
-        assert_eq!(recorded_key.as_ref().unwrap(), &test_key);
+        assert_eq!(recorded_key.as_ref().unwrap(), &have_map_key);
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task").expect("run");
+        operator.join().await.expect("task");
     }
 }

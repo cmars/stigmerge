@@ -4,7 +4,7 @@ use std::{
 };
 
 use stigmerge_fileindex::Index;
-use tokio::sync::broadcast::{self, Receiver, Sender};
+use tokio::sync::broadcast;
 use veilid_core::{OperationId, Target, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{error::Result, node::TypedKey, piece_map::PieceMap};
@@ -15,7 +15,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct StubNode {
-    pub update_tx: Sender<VeilidUpdate>,
+    pub update_tx: broadcast::Sender<VeilidUpdate>,
 
     pub reset_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub shutdown_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
@@ -54,7 +54,7 @@ pub struct StubNode {
 
 impl StubNode {
     pub fn new() -> Self {
-        let (update_tx, _) = broadcast::channel(16);
+        let (update_tx, _) = broadcast::channel(1024);
         StubNode {
             update_tx,
             reset_result: Arc::new(Mutex::new(|| panic!("unexpected call to reset"))),
@@ -125,7 +125,7 @@ impl StubNode {
 }
 
 impl Node for StubNode {
-    fn subscribe_veilid_update(&self) -> Receiver<VeilidUpdate> {
+    fn subscribe_veilid_update(&self) -> broadcast::Receiver<VeilidUpdate> {
         self.update_tx.subscribe()
     }
 

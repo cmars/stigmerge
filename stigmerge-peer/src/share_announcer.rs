@@ -1,16 +1,22 @@
+use std::fmt;
+
 use stigmerge_fileindex::Index;
-use tokio::{select, sync::broadcast};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, Level};
 use veilid_core::{Target, VeilidUpdate};
 
-use crate::{actor::Actor, node::TypedKey, proto::Header, Node, Result};
+use crate::{
+    actor::{Actor, Respondable, ResponseChannel},
+    node::TypedKey,
+    proto::Header,
+    Node, Result,
+};
 
 pub struct ShareAnnouncer<N: Node> {
     node: N,
     index: Index,
     share: Option<ShareAnnounce>,
-    update_rx: broadcast::Receiver<VeilidUpdate>,
 }
 
 #[derive(Clone)]
@@ -22,28 +28,26 @@ struct ShareAnnounce {
 
 impl<N: Node> ShareAnnouncer<N> {
     pub fn new(node: N, index: Index) -> ShareAnnouncer<N> {
-        let update_rx = node.subscribe_veilid_update();
         ShareAnnouncer {
             node,
             index,
             share: None,
-            update_rx,
         }
     }
 
+    pub fn share(&self) -> Option<(&TypedKey, &Target)> {
+        self.share.as_ref().map(|share| (&share.key, &share.target))
+    }
+
     #[tracing::instrument(skip_all, err)]
-    async fn announce(&mut self) -> Result<Response> {
+    async fn announce(&mut self) -> Result<()> {
         let (key, target, header) = self.node.announce_index(&self.index).await?;
         self.share = Some(ShareAnnounce {
             key: key.clone(),
             target: target.clone(),
             header: header.clone(),
         });
-        Ok(Response::Announce {
-            key,
-            target,
-            header,
-        })
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, err)]
@@ -69,12 +73,37 @@ impl<N: Node> ShareAnnouncer<N> {
     }
 }
 
-#[derive(Clone)]
 pub enum Request {
-    Announce,
+    Announce {
+        response_tx: ResponseChannel<Response>,
+    },
 }
 
-#[derive(Clone)]
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Announce { .. } => f.debug_struct("Announce").finish(),
+        }
+    }
+}
+
+impl Respondable for Request {
+    type Response = Response;
+
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
+        match self {
+            Request::Announce { response_tx } => *response_tx = ch,
+        }
+    }
+
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
+        match self {
+            Request::Announce { response_tx } => response_tx,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum Response {
     NotAvailable,
     Announce {
@@ -92,26 +121,24 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
     async fn run(
         &mut self,
         cancel: CancellationToken,
-        mut server_ch: crate::actor::ChanServer<Self::Request, Self::Response>,
+        request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
+        let mut update_rx = self.node.subscribe_veilid_update();
         loop {
             match self.share {
                 None => {
-                    let resp = self.announce().await?;
-                    server_ch.send(resp).await?;
+                    self.announce().await?;
                 }
                 Some(ShareAnnounce { target, .. }) => {
                     select! {
                         _ = cancel.cancelled() => {
                             return Ok(());
                         }
-                        res = server_ch.recv() => {
-                            if let Some(req) = res {
-                                let resp = self.handle(&req).await?;
-                                server_ch.send(resp).await?;
-                            }
+                        res = request_rx.recv_async() => {
+                            let req = res?;
+                            self.handle_request(req).await?;
                         }
-                        res = self.update_rx.recv() => {
+                        res = update_rx.recv() => {
                             if let Target::PrivateRoute(ref route_id) = target {
                                 let update = res?;
                                 match update {
@@ -132,22 +159,24 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle(&mut self, req: &Self::Request) -> Result<Self::Response> {
-        match req {
-            Request::Announce => {
-                return self.reannounce().await;
-            }
-        }
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
+        let response = match self.reannounce().await {
+            Ok(resp) => resp,
+            Err(_) => Response::NotAvailable,
+        };
+
+        req.response_tx().send(response).await?;
+
+        Ok(())
     }
 }
 
-impl<N: Node> Clone for ShareAnnouncer<N> {
+impl<N: Node + Clone> Clone for ShareAnnouncer<N> {
     fn clone(&self) -> Self {
         Self {
             node: self.node.clone(),
             index: self.index.clone(),
             share: self.share.clone(),
-            update_rx: self.update_rx.resubscribe(),
         }
     }
 }
@@ -164,7 +193,7 @@ mod tests {
     use veilid_core::{CryptoKey, Target, TypedKey};
 
     use crate::{
-        actor::{Actor, OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         proto::{Encoder, Header},
         share_announcer::{self, ShareAnnouncer},
         tests::{temp_file, StubNode},
@@ -196,28 +225,9 @@ mod tests {
         }));
 
         // Create the service and channels
-        let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareAnnouncer::new(node, index), OneShot);
-
-        // Wait for the initial announce response
-        let announce_resp = operator.recv().await.expect("response");
-        match announce_resp {
-            share_announcer::Response::Announce {
-                key,
-                target,
-                header: _,
-            } => {
-                assert_eq!(key, fake_key);
-                assert_eq!(target, fake_target);
-            }
-            _ => panic!("Expected Announce response"),
-        }
-
-        // Initiate a shutdown
-        cancel.cancel();
-
-        // Service run terminates
-        operator.join().await.expect("svc task").expect("svc run");
+        let mut actor = ShareAnnouncer::new(node, index);
+        actor.announce().await.expect("announce");
+        assert_eq!(actor.share(), Some((&mock_key, &mock_target)));
     }
 
     #[tokio::test]
@@ -259,30 +269,14 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(cancel.clone(), ShareAnnouncer::new(node, index), OneShot);
 
-        // Wait for the initial announce response
-        let announce_resp = operator.recv().await.expect("response");
-        match announce_resp {
-            share_announcer::Response::Announce {
-                key,
-                target,
-                header,
-            } => {
-                assert_eq!(key, fake_key);
-                assert_eq!(target, fake_target);
-                assert_eq!(header.route_data(), &[0xde, 0xad, 0xbe, 0xef])
-            }
-            _ => panic!("Expected Announce response"),
-        }
-
         // Send a reannounce request
-        operator
-            .send(share_announcer::Request::Announce)
+        match operator
+            .call(share_announcer::Request::Announce {
+                response_tx: ResponseChannel::default(),
+            })
             .await
-            .expect("send request");
-
-        // Wait for the reannounce response
-        let reannounce_resp = operator.recv().await.expect("response");
-        match reannounce_resp {
+            .expect("send request")
+        {
             share_announcer::Response::Announce {
                 key,
                 target,
@@ -299,9 +293,10 @@ mod tests {
         cancel.cancel();
 
         // Service run terminates
-        operator.join().await.expect("svc task").expect("svc run");
+        operator.join().await.expect("svc task");
     }
 
+    // This test directly tests the reannounce method without using the Actor trait
     #[tokio::test]
     async fn test_not_available_response() {
         // Create a test file and index
@@ -314,14 +309,11 @@ mod tests {
         // Create a stub peer with mock behavior
         let node = StubNode::new();
 
-        // Create the service and operator with no share announced yet
+        // Create the service directly without using Operator
         let mut announcer = ShareAnnouncer::new(node, index);
 
-        // Test the handle method directly with no share set
-        let response = announcer
-            .handle(&share_announcer::Request::Announce)
-            .await
-            .expect("handle");
+        // Test the reannounce method directly with no share set
+        let response = announcer.reannounce().await.expect("reannounce");
         assert!(matches!(response, share_announcer::Response::NotAvailable));
     }
 }
