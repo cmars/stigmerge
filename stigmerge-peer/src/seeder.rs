@@ -5,39 +5,35 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
-    sync::oneshot,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, Level};
 use veilid_core::VeilidUpdate;
 
 use crate::{
-    actor::{Actor, Respondable},
+    actor::{Actor, Respondable, ResponseChannel},
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
     types::{PieceState, ShareInfo},
     Node, Result,
 };
 
-#[derive(Debug)]
 pub enum Request {
     HaveMap {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
     },
 }
 
 impl Respondable for Request {
     type Response = Response;
 
-    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
-        let (tx, rx) = oneshot::channel();
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
         match self {
-            Request::HaveMap { response_tx } => *response_tx = Some(tx),
+            Request::HaveMap { response_tx } => *response_tx = ch,
         }
-        rx
     }
 
-    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
         match self {
             Request::HaveMap { response_tx } => response_tx,
         }
@@ -147,15 +143,11 @@ impl<P: Node> Actor for Seeder<P> {
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle_request(&mut self, req: Request) -> Result<()> {
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         match req {
-            Request::HaveMap { response_tx } => {
+            Request::HaveMap { mut response_tx } => {
                 let resp = Response::HaveMap(self.piece_map.clone());
-                if let Some(tx) = response_tx {
-                    if let Err(resp) = tx.send(resp) {
-                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-                    }
-                }
+                response_tx.send(resp).await?;
                 Ok(())
             }
         }
@@ -201,7 +193,7 @@ mod tests {
     use veilid_core::{OperationId, VeilidAppCall};
 
     use crate::{
-        actor::{OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         proto::{BlockRequest, Encoder, Header},
         tests::{temp_file, StubNode},
     };
@@ -276,7 +268,9 @@ mod tests {
             .await
             .expect("send verified piece");
 
-        let req = Request::HaveMap { response_tx: None };
+        let req = Request::HaveMap {
+            response_tx: ResponseChannel::default(),
+        };
         let resp = operator.call(req).await.expect("call havemap");
         match resp {
             Response::HaveMap(have_map) => {

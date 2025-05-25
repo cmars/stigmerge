@@ -44,7 +44,7 @@ use tokio::try_join;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
+use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
 use stigmerge_peer::block_fetcher::{self, BlockFetcher};
 use stigmerge_peer::new_routing_context;
 use stigmerge_peer::node::Veilid;
@@ -101,7 +101,7 @@ async fn main() -> std::result::Result<(), Error> {
     // Resolve the header and index
     let (_header, index, target) = match share_resolver_op
         .call(share_resolver::Request::Index {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: key.clone(),
             want_index_digest: None, // We don't verify the index digest
             root: download_dir.clone(),
@@ -147,7 +147,7 @@ async fn main() -> std::result::Result<(), Error> {
         // Fetch the block
         let response = block_fetcher_op
             .call(block_fetcher::Request::Fetch {
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
                 share_key: key.clone(),
                 target,
                 block: block.clone(),

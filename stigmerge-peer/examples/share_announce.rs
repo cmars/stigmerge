@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
+use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
 use stigmerge_peer::new_routing_context;
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
@@ -60,7 +60,9 @@ async fn main() -> std::result::Result<(), Error> {
     );
 
     let (key, target, _header) = match announce_op
-        .call(share_announcer::Request::Announce { response_tx: None })
+        .call(share_announcer::Request::Announce {
+            response_tx: ResponseChannel::default(),
+        })
         .await?
     {
         share_announcer::Response::Announce {

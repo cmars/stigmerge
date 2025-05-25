@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
-use tokio::{select, sync::oneshot};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, Level};
 use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
-    actor::{Actor, Respondable},
+    actor::{Actor, Respondable, ResponseChannel},
     node::TypedKey,
     piece_map::PieceMap,
     Node, Result,
@@ -49,42 +49,58 @@ where
 }
 
 /// Have-map resolver request messages.
-#[derive(Debug)]
 pub enum Request {
     /// Resolve the have-map for the specified share key, to get a map of which
     /// pieces the remote peer has.
     Resolve {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
     },
 
     /// Watch the have-map for the specified share key for changes.
     Watch {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
     },
 
     /// Cancel the watch on the have-map share.
     CancelWatch {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
     },
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Resolve {
+                response_tx: _,
+                key,
+            } => f.debug_struct("Resolve").field("key", key).finish(),
+            Self::Watch {
+                response_tx: _,
+                key,
+            } => f.debug_struct("Watch").field("key", key).finish(),
+            Self::CancelWatch {
+                response_tx: _,
+                key,
+            } => f.debug_struct("CancelWatch").field("key", key).finish(),
+        }
+    }
 }
 
 impl Respondable for Request {
     type Response = Response;
 
-    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
-        let (tx, rx) = oneshot::channel();
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
         match self {
-            Request::Resolve { response_tx, .. } => *response_tx = Some(tx),
-            Request::Watch { response_tx, .. } => *response_tx = Some(tx),
-            Request::CancelWatch { response_tx, .. } => *response_tx = Some(tx),
+            Request::Resolve { response_tx, .. } => *response_tx = ch,
+            Request::Watch { response_tx, .. } => *response_tx = ch,
+            Request::CancelWatch { response_tx, .. } => *response_tx = ch,
         }
-        rx
     }
 
-    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
         match self {
             Request::Resolve { response_tx, .. } => response_tx,
             Request::Watch { response_tx, .. } => response_tx,
@@ -153,8 +169,8 @@ impl<P: Node> Actor for HaveResolver<P> {
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle_request(&mut self, req: Request) -> Result<()> {
-        let (resp, resp_tx) = match req {
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
+        let (resp, mut resp_tx) = match req {
             Request::Resolve { key, response_tx } => match self.node.resolve_have_map(&key).await {
                 Ok(have_map) => (
                     Response::Resolve {
@@ -244,9 +260,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                 }
             }
         };
-        if let Some(Err(resp)) = resp_tx.map(|tx| tx.send(resp)) {
-            return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-        }
+        resp_tx.send(resp).await?;
 
         Ok(())
     }
@@ -277,7 +291,7 @@ mod tests {
     };
 
     use crate::{
-        actor::{OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         have_resolver::{HaveResolver, Request, Response},
         node::TypedKey,
         proto::{HaveMapRef, Header},
@@ -309,7 +323,7 @@ mod tests {
         // Resolve request
         match operator
             .call(Request::Resolve {
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
                 key: test_key.clone(),
             })
             .await
@@ -380,7 +394,7 @@ mod tests {
 
         // Send a Watch request with a response channel
         let req = Request::Watch {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: test_key.clone(),
         };
         let resp = operator.call(req).await.expect("call");
@@ -452,7 +466,7 @@ mod tests {
 
         // Send a CancelWatch request with a response channel
         let req = Request::CancelWatch {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: test_key.clone(),
         };
         let resp = operator.call(req).await.expect("call");
@@ -526,7 +540,7 @@ mod tests {
         // send may fail to broadcast.
         match operator
             .call(Request::Watch {
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
                 key: test_key.clone(),
             })
             .await

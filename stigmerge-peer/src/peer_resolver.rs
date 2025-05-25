@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use tokio::{select, sync::oneshot};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, Level};
 use veilid_core::ValueSubkeyRangeSet;
 
 use crate::{
-    actor::{Actor, Respondable},
+    actor::{Actor, Respondable, ResponseChannel},
     node::TypedKey,
     proto::{Decoder, PeerInfo},
     Node, Result,
@@ -34,26 +34,25 @@ where
     }
 }
 
-#[derive(Debug)]
 pub enum Request {
     /// Resolve the known peers for the peer at the given share key. This will
     /// result in a response containing the peer info, or a "not available"
     /// response.
     Resolve {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
     },
 
     /// Watch for changes in known peers at the given share key. This will
     /// result in a series of resolve responses being sent as the peers change.
     Watch {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
     },
 
     /// Cancel the peer watch on the share key.
     CancelWatch {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
     },
 }
@@ -61,17 +60,15 @@ pub enum Request {
 impl Respondable for Request {
     type Response = Response;
 
-    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
-        let (tx, rx) = oneshot::channel();
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
         match self {
-            Request::Resolve { response_tx, .. } => *response_tx = Some(tx),
-            Request::Watch { response_tx, .. } => *response_tx = Some(tx),
-            Request::CancelWatch { response_tx, .. } => *response_tx = Some(tx),
+            Request::Resolve { response_tx, .. } => *response_tx = ch,
+            Request::Watch { response_tx, .. } => *response_tx = ch,
+            Request::CancelWatch { response_tx, .. } => *response_tx = ch,
         }
-        rx
     }
 
-    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
         match self {
             Request::Resolve { response_tx, .. } => response_tx,
             Request::Watch { response_tx, .. } => response_tx,
@@ -147,9 +144,12 @@ impl<P: Node> Actor for PeerResolver<P> {
 
     /// Handle a peer_resolver request, provide a response.
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle_request(&mut self, req: Request) -> Result<()> {
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         match req {
-            Request::Resolve { key, response_tx } => {
+            Request::Resolve {
+                key,
+                mut response_tx,
+            } => {
                 let resp = match self.node.resolve_peers(&key).await {
                     Ok(peers) => Response::Resolve {
                         key: key.to_owned(),
@@ -164,13 +164,12 @@ impl<P: Node> Actor for PeerResolver<P> {
                     },
                 };
 
-                if let Some(tx) = response_tx {
-                    if let Err(resp) = tx.send(resp) {
-                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-                    }
-                }
+                response_tx.send(resp).await?;
             }
-            Request::Watch { key, response_tx } => {
+            Request::Watch {
+                key,
+                mut response_tx,
+            } => {
                 let resp = match self.node.resolve_route(&key, None).await {
                     Ok((_, header)) => {
                         if let Some(peer_map_ref) = header.peer_map() {
@@ -203,13 +202,12 @@ impl<P: Node> Actor for PeerResolver<P> {
                     },
                 };
 
-                if let Some(tx) = response_tx {
-                    if let Err(resp) = tx.send(resp) {
-                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-                    }
-                }
+                response_tx.send(resp).await?;
             }
-            Request::CancelWatch { key, response_tx } => {
+            Request::CancelWatch {
+                key,
+                mut response_tx,
+            } => {
                 let resp = match self.node.resolve_route(&key, None).await {
                     Ok((_, header)) => {
                         if let Some(peer_map_ref) = header.peer_map() {
@@ -231,11 +229,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                     }
                 };
 
-                if let Some(tx) = response_tx {
-                    if let Err(resp) = tx.send(resp) {
-                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-                    }
-                }
+                response_tx.send(resp).await?;
             }
         }
 
@@ -263,7 +257,7 @@ mod tests {
     use veilid_core::{TypedKey, ValueSubkeyRangeSet};
 
     use crate::{
-        actor::{OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         peer_resolver::{PeerResolver, Request, Response},
         proto::{Encoder, PeerInfo},
         tests::StubNode,
@@ -298,7 +292,7 @@ mod tests {
 
         // Send a Resolve request
         let req = Request::Resolve {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: test_key.clone(),
         };
         let resp = operator.call(req).await.expect("call");
@@ -377,7 +371,7 @@ mod tests {
 
         // Send a Watch request
         let req = Request::Watch {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: test_key.clone(),
         };
         let resp = operator.call(req).await.expect("call");
@@ -452,7 +446,7 @@ mod tests {
 
         // Send a CancelWatch request
         let req = Request::CancelWatch {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: test_key.clone(),
         };
         let resp = operator.call(req).await.expect("call");
@@ -522,7 +516,7 @@ mod tests {
         // running. That's important: if we're not in the run loop, the update
         // send may fail to broadcast.
         let req = Request::Watch {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: test_key.clone(),
         };
         let resp = operator.call(req).await.expect("call");

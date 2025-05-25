@@ -1,13 +1,13 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, fmt, path::PathBuf};
 
 use stigmerge_fileindex::Index;
-use tokio::{select, sync::oneshot};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, warn, Level};
 use veilid_core::{Target, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
-    actor::{Actor, Respondable},
+    actor::{Actor, Respondable, ResponseChannel},
     content_addressable::ContentAddressable,
     node::TypedKey,
     proto::{Digest, Header},
@@ -42,7 +42,6 @@ impl<P: Node> ShareResolver<P> {
 }
 
 /// Share resolver request messages.
-#[derive(Debug)]
 pub enum Request {
     /// Resolve the Index located at a remote share key, with a known index
     /// digest, for merging into a local file share.
@@ -50,7 +49,7 @@ pub enum Request {
     /// If the remote share is valid, the share resolver will set up a
     /// continual, automatically-renewed watch for this share key.
     Index {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
         want_index_digest: Option<Digest>,
         root: PathBuf,
@@ -62,32 +61,61 @@ pub enum Request {
     /// If the remote share is valid, the share resolver will set up a
     /// continual, automatically-renewed watch for this share key.
     Header {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
         prior_target: Option<Target>,
     },
 
     /// Stop watching this share key.
     Remove {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
     },
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Index {
+                response_tx: _,
+                key,
+                want_index_digest,
+                root,
+            } => f
+                .debug_struct("Index")
+                .field("key", key)
+                .field("want_index_digest", want_index_digest)
+                .field("root", root)
+                .finish(),
+            Self::Header {
+                response_tx: _,
+                key,
+                prior_target,
+            } => f
+                .debug_struct("Header")
+                .field("key", key)
+                .field("prior_target", prior_target)
+                .finish(),
+            Self::Remove {
+                response_tx: _,
+                key,
+            } => f.debug_struct("Remove").field("key", key).finish(),
+        }
+    }
 }
 
 impl Respondable for Request {
     type Response = Response;
 
-    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
-        let (tx, rx) = oneshot::channel();
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
         match self {
-            Request::Index { response_tx, .. } => *response_tx = Some(tx),
-            Request::Header { response_tx, .. } => *response_tx = Some(tx),
-            Request::Remove { response_tx, .. } => *response_tx = Some(tx),
+            Request::Index { response_tx, .. } => *response_tx = ch,
+            Request::Header { response_tx, .. } => *response_tx = ch,
+            Request::Remove { response_tx, .. } => *response_tx = ch,
         }
-        rx
     }
 
-    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
         match self {
             Request::Index { response_tx, .. } => response_tx,
             Request::Header { response_tx, .. } => response_tx,
@@ -175,7 +203,6 @@ impl<P: Node> Actor for ShareResolver<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -201,7 +228,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                             // FIXME: this may leak private routes.
                             // TODO: keep track of prior routes and pass them here?
                             if let Err(e) = self.handle_request(Request::Header {
-                                response_tx: None,
+                                response_tx: ResponseChannel::default(),
                                 key: ch.key,
                                 prior_target: None
                             }).await {
@@ -219,10 +246,9 @@ impl<P: Node> Actor for ShareResolver<P> {
     }
 
     /// Handle a share_resolver request, provide a response.
-    #[tracing::instrument(skip(self), err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle_request(&mut self, req: Request) -> Result<()> {
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         let req_key = req.key().clone();
-        let (resp, response_tx) = match req {
+        let (resp, mut response_tx) = match req {
             Request::Index {
                 key,
                 want_index_digest,
@@ -297,9 +323,8 @@ impl<P: Node> Actor for ShareResolver<P> {
             self.node.cancel_watch(&req_key).await?;
         }
         trace!(?resp);
-        if let Some(Err(resp)) = response_tx.map(|tx| tx.send(resp)) {
-            return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-        }
+
+        response_tx.send(resp).await?;
         Ok(())
     }
 }
@@ -328,7 +353,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use veilid_core::{CryptoKey, Target, TypedKey, ValueSubkeyRangeSet};
 
-    use crate::actor::{OneShot, Operator};
+    use crate::actor::{OneShot, Operator, ResponseChannel};
     use crate::{
         proto::{Encoder, HaveMapRef, Header, PeerMapRef},
         share_resolver::{self, ShareResolver},
@@ -377,7 +402,7 @@ mod tests {
         let bad_digest: crate::proto::Digest = [0u8; 32];
         let bad_index_resp = operator
             .call(share_resolver::Request::Index {
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
                 key: fake_key,
                 want_index_digest: Some(bad_digest),
                 root: index.root().to_path_buf(),
@@ -393,7 +418,7 @@ mod tests {
         let digest_array: crate::proto::Digest = index_digest_bytes.into();
         let good_index_resp = operator
             .call(share_resolver::Request::Index {
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
                 key: fake_key,
                 want_index_digest: Some(digest_array),
                 root: index.root().to_path_buf(),
@@ -463,7 +488,7 @@ mod tests {
         // Send a "want index digest" that matches the mock resolved index
         let header_resp = operator
             .call(share_resolver::Request::Header {
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
                 key: fake_key,
                 prior_target: None,
             })

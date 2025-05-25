@@ -13,7 +13,7 @@ use veilid_core::{VeilidAPIError, VeilidUpdate};
 
 use crate::{
     error::{CancelError, Permanent, Transient},
-    Node, Result,
+    Error, Node, Result,
 };
 
 /// Common interface for RPC services that handle requests and responses over channels.
@@ -38,12 +38,70 @@ pub trait Actor {
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
+pub enum ResponseChannel<Resp> {
+    Drop,
+    Call(Option<oneshot::Sender<Resp>>),
+    Defer(Option<flume::Sender<Resp>>),
+}
+
+impl<Resp> Default for ResponseChannel<Resp> {
+    fn default() -> Self {
+        ResponseChannel::Drop
+    }
+}
+
+impl<Resp: Send + Sync + 'static> ResponseChannel<Resp> {
+    pub fn new_call() -> (Self, oneshot::Receiver<Resp>) {
+        let (tx, rx) = oneshot::channel();
+        (Self::Call(Some(tx)), rx)
+    }
+
+    pub async fn send(&mut self, resp: Resp) -> Result<()> {
+        match self {
+            Self::Drop => Ok(()),
+            Self::Call(ch) => {
+                if ch.is_some() {
+                    ch.take()
+                        .unwrap()
+                        .send(resp)
+                        .map_err(|_| Error::msg("failed to respond to call"))
+                } else {
+                    Err(Error::msg("no response or already sent"))
+                }
+            }
+            Self::Defer(ch) => {
+                if ch.is_some() {
+                    ch.take()
+                        .unwrap()
+                        .send_async(resp)
+                        .await
+                        .map_err(|e| e.into())
+                } else {
+                    Err(Error::msg("no response or already sent"))
+                }
+            }
+        }
+    }
+}
+
+impl<Resp> From<oneshot::Sender<Resp>> for ResponseChannel<Resp> {
+    fn from(value: oneshot::Sender<Resp>) -> Self {
+        ResponseChannel::Call(Some(value))
+    }
+}
+
+impl<Resp> From<flume::Sender<Resp>> for ResponseChannel<Resp> {
+    fn from(value: flume::Sender<Resp>) -> Self {
+        ResponseChannel::Defer(Some(value))
+    }
+}
+
 pub trait Respondable {
     type Response: Send + Sync;
 
-    fn with_response(&mut self) -> oneshot::Receiver<Self::Response>;
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>);
 
-    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>>;
+    fn response_tx(self) -> ResponseChannel<Self::Response>;
 }
 
 pub struct Operator<Req> {
@@ -102,7 +160,8 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
     }
 
     pub async fn call(&mut self, mut req: Req) -> Result<Req::Response> {
-        let resp_rx = req.with_response();
+        let (resp_ch, resp_rx) = ResponseChannel::new_call();
+        req.set_response(resp_ch);
         self.request_tx.send_async(req).await?;
         Ok(resp_rx.await?)
     }
@@ -112,11 +171,7 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
         mut req: Req,
         resp_tx: flume::Sender<Req::Response>,
     ) -> Result<()> {
-        let resp_rx = req.with_response();
-        self.tasks.spawn(async move {
-            resp_tx.send_async(resp_rx.await?).await?;
-            Ok(())
-        });
+        req.set_response(resp_tx.into());
         self.request_tx.send_async(req).await?;
         Ok(())
     }

@@ -6,13 +6,13 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
-    sync::{oneshot, RwLock},
+    sync::RwLock,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{warn, Level};
 
 use crate::{
-    actor::{Actor, Respondable},
+    actor::{Actor, Respondable, ResponseChannel},
     error::Result,
     types::PieceState,
 };
@@ -69,26 +69,23 @@ impl PieceVerifier {
     }
 }
 
-#[derive(Debug)]
 pub enum Request {
     Piece {
         piece_state: PieceState,
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
     },
 }
 
 impl Respondable for Request {
     type Response = Response;
 
-    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
-        let (tx, rx) = oneshot::channel();
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
         match self {
-            Request::Piece { response_tx, .. } => *response_tx = Some(tx),
+            Request::Piece { response_tx, .. } => *response_tx = ch,
         }
-        rx
     }
 
-    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
         match self {
             Request::Piece { response_tx, .. } => response_tx,
         }
@@ -206,11 +203,8 @@ impl Actor for PieceVerifier {
             }
         };
 
-        if let Some(tx) = req.response_tx() {
-            if let Err(resp) = tx.send(resp) {
-                return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-            }
-        }
+        let mut response_tx = req.response_tx();
+        response_tx.send(resp).await?;
 
         Ok(())
     }
@@ -223,7 +217,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::{
-        actor::{OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         tests::temp_file,
     };
 
@@ -254,7 +248,7 @@ mod tests {
                     PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
                 let req = Request::Piece {
                     piece_state,
-                    response_tx: None,
+                    response_tx: ResponseChannel::default(),
                 };
                 let resp = operator.call(req).await.expect("call request");
                 assert_eq!(
@@ -270,7 +264,7 @@ mod tests {
                 PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
             let req = Request::Piece {
                 piece_state,
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
             };
             let resp = operator.call(req).await.expect("call request");
             assert_eq!(
@@ -313,7 +307,7 @@ mod tests {
                 PieceState::new(0, CORRUPT_PIECE_INDEX, 0, PIECE_SIZE_BLOCKS, block_index);
             let req = Request::Piece {
                 piece_state,
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
             };
             let resp = operator.call(req).await.expect("call request");
             assert_eq!(
@@ -343,7 +337,7 @@ mod tests {
         );
         let req = Request::Piece {
             piece_state,
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
         };
         let resp = operator.call(req).await.expect("call request");
         assert_eq!(
@@ -360,7 +354,7 @@ mod tests {
                 PieceState::new(0, VALID_PIECE_INDEX, 0, PIECE_SIZE_BLOCKS, block_index);
             let req = Request::Piece {
                 piece_state,
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
             };
             let resp = operator.call(req).await.expect("call request");
             assert_eq!(
@@ -382,7 +376,7 @@ mod tests {
         );
         let req = Request::Piece {
             piece_state,
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
         };
         let resp = operator.call(req).await.expect("call request");
         assert_eq!(
@@ -429,7 +423,7 @@ mod tests {
                     PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
                 let req = Request::Piece {
                     piece_state,
-                    response_tx: None,
+                    response_tx: ResponseChannel::default(),
                 };
                 let resp = operator.call(req).await.expect("call request");
                 assert_eq!(
@@ -446,7 +440,7 @@ mod tests {
                 PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
             let req = Request::Piece {
                 piece_state,
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
             };
             let resp = operator.call(req).await.expect("call request");
             assert_eq!(

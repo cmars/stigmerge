@@ -23,6 +23,7 @@ struct Args {
     download_dir: PathBuf,
 }
 
+use stigmerge_peer::actor::ResponseChannel;
 use stigmerge_peer::actor::UntilCancelled;
 use tokio::select;
 use tokio::sync::Mutex;
@@ -81,7 +82,7 @@ async fn main() -> std::result::Result<(), Error> {
     // Resolve the index
     let (header, index) = match share_resolver_op
         .call(share_resolver::Request::Index {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: key.clone(),
             want_index_digest: Some(want_index_digest),
             root: download_dir.clone(),

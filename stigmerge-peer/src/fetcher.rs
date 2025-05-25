@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn, Level};
 use veilid_core::Target;
 
+use crate::actor::ResponseChannel;
 use crate::error::is_route_invalid;
 use crate::node::TypedKey;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
@@ -134,14 +135,15 @@ impl PeerTracker {
         peers.sort_by(|(_, l_status), (_, r_status)| r_status.score().cmp(&l_status.score()));
         if !peers.is_empty() {
             if peers[0].1.score() < -1024 {
-                return Err(Error::msg("peer score dropped below minimum threshold"))
+                return Err(Error::msg("peer score dropped below minimum threshold"));
             }
             return Ok(self.targets.get_key_value(&peers[0].0));
         }
         if self.targets.is_empty() {
             Ok(None)
         } else {
-            Ok(self.targets
+            Ok(self
+                .targets
                 .iter()
                 .nth(rand::random::<usize>() % self.targets.len()))
         }
@@ -320,7 +322,7 @@ impl Fetcher {
                         self.want_index.payload().pieces()[have_block.piece_index].block_count(),
                         have_block.block_index,
                     ),
-                    response_tx: None,
+                    response_tx: ResponseChannel::default(),
                 }, self.verify_resp_tx.clone()) => {
                     res?;
                     have_length += have_block.block_length;
@@ -371,7 +373,7 @@ impl Fetcher {
                         },
                     };
                     self.clients.block_fetcher.defer(block_fetcher::Request::Fetch{
-                        response_tx: None,
+                        response_tx: ResponseChannel::default(),
                         share_key: share_key.to_owned(),
                         target: target.to_owned(),
                         block,
@@ -406,7 +408,7 @@ impl Fetcher {
                                     self.want_index.payload().pieces()[block.piece_index].block_count(),
                                     block.block_index,
                                 ),
-                                response_tx: None,
+                                response_tx: ResponseChannel::default(),
                             }, self.verify_resp_tx.clone()).await?;
                         }
                         Ok(block_fetcher::Response::FetchFailed { share_key, block, err }) => {
@@ -414,7 +416,7 @@ impl Fetcher {
                             // Update peer stats with failure
                             if let Some(target) = self.peer_tracker.fetch_err(&share_key, err).await {
                                 self.clients.share_resolver.call(share_resolver::Request::Header {
-                                    response_tx: None,
+                                    response_tx: ResponseChannel::default(),
                                     key: share_key,
                                     prior_target: Some(target),
                                 }).await?;
@@ -438,7 +440,7 @@ impl Fetcher {
                             // Update have map
                             self.clients.have_announcer.send(
                                 have_announcer::Request::Set {
-                                    response_tx: None,
+                                    response_tx: ResponseChannel::default(),
                                     piece_index: piece_index.try_into().unwrap(),
                                 }).await?;
 

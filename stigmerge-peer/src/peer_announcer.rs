@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
-use tokio::{select, sync::oneshot};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 
 use crate::{
-    actor::{Actor, Respondable},
+    actor::{Actor, Respondable, ResponseChannel},
     node::TypedKey,
     Node, Result,
 };
@@ -57,41 +57,54 @@ impl<N: Node> PeerAnnouncer<N> {
 }
 
 /// Peer-map announcer request messages.
-#[derive(Debug)]
 pub enum Request {
     /// Announce a known remote peer in good standing.
     Announce {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
     },
 
     /// Redact a known peer, it may be unavailable or defective
     /// from the point of view of this peer.
     Redact {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         key: TypedKey,
     },
 
     /// Clear all peer announcements.
     Reset {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
     },
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Announce {
+                response_tx: _,
+                key,
+            } => f.debug_struct("Announce").field("key", key).finish(),
+            Self::Redact {
+                response_tx: _,
+                key,
+            } => f.debug_struct("Redact").field("key", key).finish(),
+            Self::Reset { response_tx: _ } => f.debug_struct("Reset").finish(),
+        }
+    }
 }
 
 impl Respondable for Request {
     type Response = Response;
 
-    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
-        let (tx, rx) = oneshot::channel();
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
         match self {
-            Request::Announce { response_tx, .. } => *response_tx = Some(tx),
-            Request::Redact { response_tx, .. } => *response_tx = Some(tx),
-            Request::Reset { response_tx } => *response_tx = Some(tx),
+            Request::Announce { response_tx, .. } => *response_tx = ch,
+            Request::Redact { response_tx, .. } => *response_tx = ch,
+            Request::Reset { response_tx } => *response_tx = ch,
         }
-        rx
     }
 
-    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
         match self {
             Request::Announce { response_tx, .. } => response_tx,
             Request::Redact { response_tx, .. } => response_tx,
@@ -136,7 +149,10 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
     #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         match req {
-            Request::Announce { key, response_tx } => {
+            Request::Announce {
+                key,
+                mut response_tx,
+            } => {
                 let resp = if !self.peer_indexes.contains_key(&key) {
                     let index = self.assign_peer_index(key);
                     match self
@@ -153,13 +169,12 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     Response::Ok
                 };
 
-                if let Some(tx) = response_tx {
-                    if let Err(resp) = tx.send(resp) {
-                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-                    }
-                }
+                response_tx.send(resp).await?;
             }
-            Request::Redact { key, response_tx } => {
+            Request::Redact {
+                key,
+                mut response_tx,
+            } => {
                 let resp = if let Some(index) = self.peer_indexes.get(&key) {
                     let subkey = TryInto::<u16>::try_into(*index).unwrap();
                     match self
@@ -180,13 +195,9 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     Response::Ok
                 };
 
-                if let Some(tx) = response_tx {
-                    if let Err(resp) = tx.send(resp) {
-                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-                    }
-                }
+                response_tx.send(resp).await?;
             }
-            Request::Reset { response_tx } => {
+            Request::Reset { mut response_tx } => {
                 let resp = match self
                     .node
                     .reset_peers(&self.payload_digest, self.max_peers)
@@ -202,11 +213,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     },
                 };
 
-                if let Some(tx) = response_tx {
-                    if let Err(resp) = tx.send(resp) {
-                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-                    }
-                }
+                response_tx.send(resp).await?;
             }
         }
 
@@ -225,7 +232,7 @@ mod tests {
     use veilid_core::TypedKey;
 
     use crate::{
-        actor::{OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         peer_announcer::{PeerAnnouncer, Request, DEFAULT_MAX_PEERS},
         tests::StubNode,
     };
@@ -271,7 +278,7 @@ mod tests {
 
         // Send an Announce request
         let req = Request::Announce {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: peer_key.clone(),
         };
         operator.call(req).await.expect("call");
@@ -339,14 +346,14 @@ mod tests {
 
         // First announce a peer
         let req_announce = Request::Announce {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: peer_key.clone(),
         };
         operator.call(req_announce).await.expect("call");
 
         // Then redact it
         let req_redact = Request::Redact {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             key: peer_key.clone(),
         };
         operator.call(req_redact).await.expect("call");
@@ -399,7 +406,9 @@ mod tests {
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send a Reset request
-        let req = Request::Reset { response_tx: None };
+        let req = Request::Reset {
+            response_tx: ResponseChannel::default(),
+        };
         operator.call(req).await.expect("call");
 
         // Verify the peers were reset correctly

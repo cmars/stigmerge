@@ -1,11 +1,13 @@
+use std::fmt;
+
 use stigmerge_fileindex::Index;
-use tokio::{select, sync::oneshot};
+use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, Level};
 use veilid_core::{Target, VeilidUpdate};
 
 use crate::{
-    actor::{Actor, Respondable},
+    actor::{Actor, Respondable, ResponseChannel},
     node::TypedKey,
     proto::Header,
     Node, Result,
@@ -71,25 +73,30 @@ impl<N: Node> ShareAnnouncer<N> {
     }
 }
 
-#[derive(Debug)]
 pub enum Request {
     Announce {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
     },
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Announce { .. } => f.debug_struct("Announce").finish(),
+        }
+    }
 }
 
 impl Respondable for Request {
     type Response = Response;
 
-    fn with_response(&mut self) -> tokio::sync::oneshot::Receiver<Self::Response> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
         match self {
-            Request::Announce { response_tx } => *response_tx = Some(tx),
+            Request::Announce { response_tx } => *response_tx = ch,
         }
-        rx
     }
 
-    fn response_tx(self) -> Option<tokio::sync::oneshot::Sender<Self::Response>> {
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
         match self {
             Request::Announce { response_tx } => response_tx,
         }
@@ -152,17 +159,13 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle_request(&mut self, req: Request) -> Result<()> {
+    async fn handle_request(&mut self, mut req: Self::Request) -> Result<()> {
         let response = match self.reannounce().await {
             Ok(resp) => resp,
             Err(_) => Response::NotAvailable,
         };
 
-        if let Some(tx) = req.response_tx() {
-            if let Err(resp) = tx.send(response) {
-                return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-            }
-        }
+        req.response_tx().send(response).await?;
 
         Ok(())
     }
@@ -190,7 +193,7 @@ mod tests {
     use veilid_core::{CryptoKey, Target, TypedKey};
 
     use crate::{
-        actor::{OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         proto::{Encoder, Header},
         share_announcer::{self, ShareAnnouncer},
         tests::{temp_file, StubNode},
@@ -268,7 +271,9 @@ mod tests {
 
         // Send a reannounce request
         match operator
-            .call(share_announcer::Request::Announce { response_tx: None })
+            .call(share_announcer::Request::Announce {
+                response_tx: ResponseChannel::default(),
+            })
             .await
             .expect("send request")
         {

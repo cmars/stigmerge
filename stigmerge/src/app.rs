@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use veilid_core::TypedKey;
 
 use stigmerge_peer::{
-    actor::{ConnectionState, Operator, UntilCancelled, WithVeilidConnection},
+    actor::{ConnectionState, Operator, ResponseChannel, UntilCancelled, WithVeilidConnection},
     block_fetcher::BlockFetcher,
     content_addressable::ContentAddressable,
     fetcher::{self, Clients as FetcherClients, Fetcher},
@@ -188,7 +188,7 @@ impl App {
                     // Resolve the index from the bootstrap peer
                     let index = match share_resolver_op
                         .call(share_resolver::Request::Index {
-                            response_tx: None,
+                            response_tx: ResponseChannel::default(),
                             key: share_key.clone(),
                             want_index_digest,
                             root: root.clone(),
@@ -221,8 +221,9 @@ impl App {
             }
             c => bail!("unexpected subcommand: {:?}", c),
         };
-        let index = want_index.ok_or(Error::msg("failed to resolve index"))?;
-        debug!("resolved index");
+        let mut index = want_index.ok_or(Error::msg("failed to resolve index"))?;
+        let index_digest = index.digest()?;
+        info!("index digest {}", hex::encode(index_digest));
 
         // Announce our own share of the index
         let mut share_announcer_op = Operator::new(
@@ -231,7 +232,9 @@ impl App {
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
         let (share_key, share_header) = match share_announcer_op
-            .call(share_announcer::Request::Announce { response_tx: None })
+            .call(share_announcer::Request::Announce {
+                response_tx: ResponseChannel::default(),
+            })
             .await?
         {
             share_announcer::Response::Announce { key, header, .. } => (key, header),

@@ -43,7 +43,7 @@ struct Args {
 
 use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::UntilCancelled;
+use stigmerge_peer::actor::{ResponseChannel, UntilCancelled};
 use stigmerge_peer::content_addressable::ContentAddressable;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
 use tokio::select;
@@ -126,7 +126,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             // Resolve the index from the bootstrap peer
             let index = match share_resolver_op
                 .call(share_resolver::Request::Index {
-                    response_tx: None,
+                    response_tx: ResponseChannel::default(),
                     key: share_key.clone(),
                     want_index_digest: Some(want_index_digest),
                     root: root.clone(),
@@ -168,7 +168,9 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
     let (share_key, share_header) = match share_announce_op
-        .call(share_announcer::Request::Announce { response_tx: None })
+        .call(share_announcer::Request::Announce {
+            response_tx: ResponseChannel::default(),
+        })
         .await?
     {
         share_announcer::Response::Announce {

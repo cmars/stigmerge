@@ -23,7 +23,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ConnectionState, OneShot, Operator, WithVeilidConnection};
+use stigmerge_peer::actor::{
+    ConnectionState, OneShot, Operator, ResponseChannel, WithVeilidConnection,
+};
 use stigmerge_peer::content_addressable::ContentAddressable;
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
@@ -64,7 +66,9 @@ async fn main() -> std::result::Result<(), Error> {
     );
 
     let (key, target, header) = match announce_op
-        .call(share_announcer::Request::Announce { response_tx: None })
+        .call(share_announcer::Request::Announce {
+            response_tx: ResponseChannel::default(),
+        })
         .await?
     {
         share_announcer::Response::Announce {
@@ -104,7 +108,7 @@ async fn main() -> std::result::Result<(), Error> {
     for (piece_index, piece) in index.payload().pieces().iter().enumerate() {
         for block_index in 0..piece.block_count() {
             let req = piece_verifier::Request::Piece {
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
                 piece_state: PieceState::new(0, piece_index, 0, piece.block_count(), block_index),
             };
             let resp = verifier_op.call(req).await?;
@@ -114,7 +118,9 @@ async fn main() -> std::result::Result<(), Error> {
 
     // Query the seeder's have map
     let seeder::Response::HaveMap(have_map) = seeder_op
-        .call(seeder::Request::HaveMap { response_tx: None })
+        .call(seeder::Request::HaveMap {
+            response_tx: ResponseChannel::default(),
+        })
         .await?;
 
     info!(

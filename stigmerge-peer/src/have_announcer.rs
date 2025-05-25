@@ -1,15 +1,11 @@
-use std::{ops::Deref, sync::Arc, time::Duration};
+use std::{fmt, ops::Deref, sync::Arc, time::Duration};
 
-use anyhow::anyhow;
-use tokio::{
-    select,
-    sync::{oneshot, RwLock},
-};
+use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{warn, Level};
 
 use crate::{
-    actor::{Actor, Respondable},
+    actor::{Actor, Respondable, ResponseChannel},
     error::Result,
     is_cancelled,
     node::TypedKey,
@@ -44,40 +40,59 @@ impl<N: Node> HaveAnnouncer<N> {
 }
 
 /// Have-map announcer request messages.
-#[derive(Debug)]
 pub enum Request {
     /// Announce that this peer has a given piece.
     Set {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         piece_index: u32,
     },
 
     /// Announce that this peer does not have a given piece.
     Clear {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         piece_index: u32,
     },
 
     /// Announce that this peer has no pieces.
     Reset {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
     },
+}
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Set {
+                response_tx: _,
+                piece_index,
+            } => f
+                .debug_struct("Set")
+                .field("piece_index", piece_index)
+                .finish(),
+            Self::Clear {
+                response_tx: _,
+                piece_index,
+            } => f
+                .debug_struct("Clear")
+                .field("piece_index", piece_index)
+                .finish(),
+            Self::Reset { response_tx: _ } => f.debug_struct("Reset").finish(),
+        }
+    }
 }
 
 impl Respondable for Request {
     type Response = Response;
 
-    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
-        let (tx, rx) = oneshot::channel();
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
         match self {
-            Request::Set { response_tx, .. } => *response_tx = Some(tx),
-            Request::Clear { response_tx, .. } => *response_tx = Some(tx),
-            Request::Reset { response_tx, .. } => *response_tx = Some(tx),
+            Request::Set { response_tx, .. } => *response_tx = ch,
+            Request::Clear { response_tx, .. } => *response_tx = ch,
+            Request::Reset { response_tx, .. } => *response_tx = ch,
         }
-        rx
     }
 
-    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
         match self {
             Request::Set { response_tx, .. } => response_tx,
             Request::Clear { response_tx, .. } => response_tx,
@@ -130,7 +145,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<Self::Response> {
         let mut pieces_map = self.pieces_map.write().await;
-        let response_tx = match req {
+        let mut response_tx = match req {
             Request::Set {
                 piece_index,
                 response_tx,
@@ -150,9 +165,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
                 response_tx
             }
         };
-        if let Some(Err(resp)) = response_tx.map(|tx| tx.send(())) {
-            return Err(anyhow!("failed to send response: {:?}", resp));
-        }
+        response_tx.send(()).await?;
         Ok(())
     }
 }
@@ -168,7 +181,7 @@ mod tests {
     use veilid_core::TypedKey;
 
     use crate::{
-        actor::{OneShot, Operator},
+        actor::{OneShot, Operator, ResponseChannel},
         have_announcer::{HaveAnnouncer, Request},
         piece_map::PieceMap,
         tests::StubNode,
@@ -204,7 +217,7 @@ mod tests {
         // Send a Set request to announce a piece
         let req = Request::Set {
             piece_index: 42,
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
         };
         let resp = operator.call(req).await.expect("call");
         assert_eq!(resp, ());
@@ -256,7 +269,7 @@ mod tests {
         // First set a piece
         let req_set = Request::Set {
             piece_index: 42,
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
         };
         let resp = operator.call(req_set).await.expect("call");
         assert_eq!(resp, ());
@@ -264,7 +277,7 @@ mod tests {
         // Then clear it
         let req_clear = Request::Clear {
             piece_index: 42,
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
         };
         let resp = operator.call(req_clear).await.expect("call");
         assert_eq!(resp, ());
@@ -309,13 +322,15 @@ mod tests {
         // First set some pieces
         let req_set = Request::Set {
             piece_index: 42,
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
         };
         let resp = operator.call(req_set).await.expect("call");
         assert_eq!(resp, ());
 
         // Then reset the map
-        let req_reset = Request::Reset { response_tx: None };
+        let req_reset = Request::Reset {
+            response_tx: ResponseChannel::default(),
+        };
         let resp = operator.call(req_reset).await.expect("call");
         assert_eq!(resp, ());
 

@@ -29,7 +29,7 @@ use tracing::{info, warn};
 use veilid_core::{TypedKey, VeilidUpdate};
 
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
+use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
 use stigmerge_peer::node::Veilid;
 use stigmerge_peer::peer_announcer::{self, PeerAnnouncer};
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
@@ -72,7 +72,9 @@ async fn main() -> std::result::Result<(), Error> {
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
     let (share_key, target, header) = match share_announcer_op
-        .call(share_announcer::Request::Announce { response_tx: None })
+        .call(share_announcer::Request::Announce {
+            response_tx: ResponseChannel::default(),
+        })
         .await?
     {
         share_announcer::Response::Announce {
@@ -108,7 +110,7 @@ async fn main() -> std::result::Result<(), Error> {
 
         match peer_announcer_op
             .call(peer_announcer::Request::Announce {
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
                 key: peer_share_key.clone(),
             })
             .await?
@@ -125,7 +127,7 @@ async fn main() -> std::result::Result<(), Error> {
         peer_resolver_op
             .defer(
                 peer_resolver::Request::Watch {
-                    response_tx: None,
+                    response_tx: ResponseChannel::default(),
                     key: peer_share_key.clone(),
                 },
                 peer_resolver_tx.clone(),
@@ -136,7 +138,7 @@ async fn main() -> std::result::Result<(), Error> {
         share_resolver_op
             .defer(
                 share_resolver::Request::Header {
-                    response_tx: None,
+                    response_tx: ResponseChannel::default(),
                     key: peer_share_key,
                     prior_target: None,
                 },
@@ -158,7 +160,10 @@ async fn main() -> std::result::Result<(), Error> {
                 res = share_resolver_rx.recv_async() => {
                     match res {
                         Ok(share_resolver::Response::Header{ key, header: _, target }) => {
-                            match peer_announcer_op.call(peer_announcer::Request::Announce { response_tx: None, key: key.clone() }).await? {
+                            match peer_announcer_op.call(peer_announcer::Request::Announce {
+                                response_tx: ResponseChannel::default(),
+                                key: key.clone(),
+                            }).await? {
                                 peer_announcer::Response::Ok => {
                                     info!("announce peer: {key}: ok");
                                 }
@@ -169,7 +174,10 @@ async fn main() -> std::result::Result<(), Error> {
                             advertise_tx.send_async((target, key, 0)).await?;
                         }
                         Ok(share_resolver::Response::Index{ key, header: _, index: _, target }) => {
-                            match peer_announcer_op.call(peer_announcer::Request::Announce { response_tx: None, key: key.clone() }).await? {
+                            match peer_announcer_op.call(peer_announcer::Request::Announce {
+                                response_tx: ResponseChannel::default(),
+                                key: key.clone(),
+                            }).await? {
                                 peer_announcer::Response::Ok => {
                                     info!("announce peer: {key}: ok");
                                 }
@@ -201,7 +209,10 @@ async fn main() -> std::result::Result<(), Error> {
                         Ok(peer_resolver::Response::Resolve{ key, peers }) => {
                             for (peer_key, info) in peers.iter() {
                                 info!("peer resolver: {key} updated with {peer_key} {info:?}");
-                                match peer_announcer_op.call(peer_announcer::Request::Announce { response_tx: None, key: peer_key.to_owned()}).await? {
+                                match peer_announcer_op.call(peer_announcer::Request::Announce {
+                                    response_tx: ResponseChannel::default(),
+                                    key: peer_key.to_owned(),
+                                }).await? {
                                     peer_announcer::Response::Ok => {
                                         info!("announce peer: {key}: ok");
                                     }
@@ -225,7 +236,7 @@ async fn main() -> std::result::Result<(), Error> {
                                 proto::Request::AdvertisePeer(AdvertisePeerRequest{ key }) => {
                                     info!("received advertise request from {key}");
                                     share_resolver_op.defer(share_resolver::Request::Index {
-                                        response_tx: None,
+                                        response_tx: ResponseChannel::default(),
                                         key, want_index_digest: Some(want_index_digest), root: index.root().to_path_buf(),
                                     }, share_resolver_tx.clone()).await?;
                                 }

@@ -1,5 +1,6 @@
 use std::cmp::min;
 use std::collections::HashMap;
+use std::fmt;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,12 +9,12 @@ use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::select;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, Level};
 use veilid_core::Target;
 
-use crate::actor::{Actor, Respondable};
+use crate::actor::{Actor, Respondable, ResponseChannel};
 use crate::error::{is_io, is_proto, is_route_invalid, Result, Transient};
 use crate::is_cancelled;
 use crate::node::{Node, TypedKey};
@@ -80,10 +81,9 @@ impl<N: Node> BlockFetcher<N> {
     }
 }
 
-#[derive(Debug)]
 pub enum Request {
     Fetch {
-        response_tx: Option<oneshot::Sender<Response>>,
+        response_tx: ResponseChannel<Response>,
         share_key: TypedKey,
         target: Target,
         block: FileBlockFetch,
@@ -91,18 +91,36 @@ pub enum Request {
     },
 }
 
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fetch {
+                share_key,
+                target,
+                block,
+                flush,
+                ..
+            } => f
+                .debug_struct("Fetch")
+                .field("share_key", share_key)
+                .field("target", target)
+                .field("block", block)
+                .field("flush", flush)
+                .finish(),
+        }
+    }
+}
+
 impl Respondable for Request {
     type Response = Response;
 
-    fn with_response(&mut self) -> oneshot::Receiver<Self::Response> {
-        let (tx, rx) = oneshot::channel();
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
         match self {
-            Request::Fetch { response_tx, .. } => *response_tx = Some(tx),
+            Request::Fetch { response_tx, .. } => *response_tx = ch,
         }
-        rx
     }
 
-    fn response_tx(self) -> Option<oneshot::Sender<Self::Response>> {
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
         match self {
             Request::Fetch { response_tx, .. } => response_tx,
         }
@@ -156,7 +174,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
-        let (resp, resp_tx) = match req {
+        let (resp, mut resp_tx) = match req {
             Request::Fetch {
                 share_key,
                 target,
@@ -193,9 +211,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                 }
             }
         };
-        if let Some(Err(resp)) = resp_tx.map(|tx| tx.send(resp)) {
-            return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
-        }
+        resp_tx.send(resp).await?;
         Ok(())
     }
 }
@@ -278,7 +294,7 @@ mod tests {
             piece_offset: 0,
         };
         let req = Request::Fetch {
-            response_tx: None,
+            response_tx: ResponseChannel::default(),
             share_key: CryptoTyped::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xbe; 32])),
             target: Target::PrivateRoute(CryptoKey::new([0xbe; 32])),
             block: block.clone(),
@@ -365,7 +381,7 @@ mod tests {
         // Verify we get a FetchFailed response with our error
         let resp = operator
             .call(Request::Fetch {
-                response_tx: None,
+                response_tx: ResponseChannel::default(),
                 share_key: CryptoTyped::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xbe; 32])),
                 target: Target::PrivateRoute(CryptoKey::new([0xbe; 32])),
                 block: block.clone(),
