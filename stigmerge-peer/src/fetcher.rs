@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::f64::MAX_EXP;
 use std::ops::Deref;
 use std::time::Duration;
-use std::u64::MAX;
 
 use backoff::backoff::Backoff;
 use moka::future::Cache;
@@ -97,11 +95,13 @@ impl PeerTracker {
             Some(status) => status,
             None => PeerStatus::default(),
         };
+        status.fetch_err_count = 0;
+        status.is_invalid_target = false;
         status.fetch_ok_count += 1;
         self.peer_status.insert(key.clone(), status).await;
     }
 
-    pub async fn fetch_err(&mut self, key: &TypedKey, err: Error) -> bool {
+    pub async fn fetch_err(&mut self, key: &TypedKey, err: Error) -> Option<Target> {
         let mut status = match self.peer_status.get(&key).await {
             Some(status) => status,
             None => PeerStatus::default(),
@@ -109,18 +109,22 @@ impl PeerTracker {
         let is_invalid_target = is_route_invalid(&err);
         let is_newly_invalid = status.is_invalid_target != is_invalid_target;
 
-        status.fetch_ok_count += 1;
+        status.fetch_err_count += 1;
         status.is_invalid_target = is_invalid_target;
         self.peer_status.insert(key.clone(), status).await;
 
-        is_newly_invalid
+        if is_newly_invalid {
+            self.targets.get(key).map(|target| target.to_owned())
+        } else {
+            None
+        }
     }
 
     pub async fn reset(&mut self, key: &TypedKey) {
         self.peer_status.remove(key).await;
     }
 
-    pub fn share_target(&self, _block: &FileBlockFetch) -> Option<(&TypedKey, &Target)> {
+    pub fn share_target(&self, _block: &FileBlockFetch) -> Result<Option<(&TypedKey, &Target)>> {
         // TODO: factor in have_map and block
         let mut peers: Vec<(TypedKey, PeerStatus)> = self
             .peer_status
@@ -129,14 +133,17 @@ impl PeerTracker {
             .collect();
         peers.sort_by(|(_, l_status), (_, r_status)| r_status.score().cmp(&l_status.score()));
         if !peers.is_empty() {
-            return self.targets.get_key_value(&peers[0].0);
+            if peers[0].1.score() < -1024 {
+                return Err(Error::msg("peer score dropped below minimum threshold"))
+            }
+            return Ok(self.targets.get_key_value(&peers[0].0));
         }
         if self.targets.is_empty() {
-            None
+            Ok(None)
         } else {
-            self.targets
+            Ok(self.targets
                 .iter()
-                .nth(rand::random::<usize>() % self.targets.len())
+                .nth(rand::random::<usize>() % self.targets.len()))
         }
     }
 }
@@ -348,7 +355,7 @@ impl Fetcher {
                 }
                 res = self.pending_fetch_rx.recv_async() => {
                     let block = res?;
-                    let (share_key, target) = match self.peer_tracker.share_target(&block) {
+                    let (share_key, target) = match self.peer_tracker.share_target(&block)? {
                         Some((share_key, target)) => (share_key, target),
                         None => {
                             match no_peers_backoff.next_backoff() {
@@ -405,12 +412,11 @@ impl Fetcher {
                         Ok(block_fetcher::Response::FetchFailed { share_key, block, err }) => {
                             warn!("failed to fetch block: {:?}", err);
                             // Update peer stats with failure
-                            if self.peer_tracker.fetch_err(&share_key, err).await {
+                            if let Some(target) = self.peer_tracker.fetch_err(&share_key, err).await {
                                 self.clients.share_resolver.call(share_resolver::Request::Header {
                                     response_tx: None,
                                     key: share_key,
-                                    // TODO: pass prior target through here?
-                                    prior_target: None,
+                                    prior_target: Some(target),
                                 }).await?;
                             }
                             self.pending_fetch_tx.send_async(block).await?;

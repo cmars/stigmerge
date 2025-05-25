@@ -162,12 +162,15 @@ impl App {
 
         // Resolve bootstrap share keys and want_index_digest
         let mut want_index = None;
+        let mut n_fetchers = 1;
         match &self.cli.commands {
             Commands::Fetch {
                 share_keys,
                 index_digest,
+                fetchers,
                 ..
             } => {
+                n_fetchers = *fetchers;
                 for share_key_str in share_keys.iter() {
                     debug!("resolving share key: {share_key_str}");
                     let share_key: TypedKey = share_key_str.parse()?;
@@ -266,7 +269,7 @@ impl App {
                 index.root().to_path_buf(),
             ),
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
-            self.cli.fetchers,
+            n_fetchers,
         );
 
         let fetcher_clients = FetcherClients {

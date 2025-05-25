@@ -8,7 +8,7 @@ use tokio::{
     sync::oneshot,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::Level;
+use tracing::{trace, Level};
 use veilid_core::VeilidUpdate;
 
 use crate::{
@@ -109,7 +109,7 @@ impl<P: Node> Actor for Seeder<P> {
     ) -> Result<()> {
         let mut buf = [0u8; BLOCK_SIZE_BYTES];
         loop {
-            select! { biased;
+            select! {
                 _ = cancel.cancelled() => {
                     return Ok(());
                 }
@@ -125,6 +125,7 @@ impl<P: Node> Actor for Seeder<P> {
                     let update = res?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
+                            trace!("app_call: {:?}", veilid_app_call);
                             let req = proto::Request::decode(veilid_app_call.message())?;
                             match req {
                                 proto::Request::BlockRequest(block_req) => {
@@ -151,8 +152,8 @@ impl<P: Node> Actor for Seeder<P> {
             Request::HaveMap { response_tx } => {
                 let resp = Response::HaveMap(self.piece_map.clone());
                 if let Some(tx) = response_tx {
-                    if let Err(e) = tx.send(resp) {
-                        tracing::warn!("failed to send response: {:?}", e);
+                    if let Err(resp) = tx.send(resp) {
+                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
                     }
                 }
                 Ok(())
@@ -270,7 +271,10 @@ mod tests {
 
         // First, send a verified piece notification with confirmation it's applied
         let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
-        verified_tx.send(piece_state).expect("send verified piece");
+        verified_tx
+            .send_async(piece_state)
+            .await
+            .expect("send verified piece");
 
         let req = Request::HaveMap { response_tx: None };
         let resp = operator.call(req).await.expect("call havemap");
@@ -286,7 +290,8 @@ mod tests {
         let encoded_req = req.encode().expect("encode request");
         let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
         update_tx
-            .send(VeilidUpdate::AppCall(Box::new(app_call)))
+            .send_async(VeilidUpdate::AppCall(Box::new(app_call)))
+            .await
             .expect("send app call");
 
         time::timeout(Duration::from_secs(1), replied_rx.recv())
@@ -382,7 +387,8 @@ mod tests {
         let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
 
         update_tx
-            .send(VeilidUpdate::AppCall(Box::new(app_call)))
+            .send_async(VeilidUpdate::AppCall(Box::new(app_call)))
+            .await
             .expect("send app call");
 
         time::timeout(Duration::from_secs(1), replied_rx.recv())

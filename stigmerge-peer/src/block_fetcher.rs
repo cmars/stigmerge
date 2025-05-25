@@ -4,7 +4,6 @@ use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -195,7 +194,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
             }
         };
         if let Some(Err(resp)) = resp_tx.map(|tx| tx.send(resp)) {
-            return Err(anyhow!("failed to send response: {:?}", resp));
+            return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
         }
         Ok(())
     }

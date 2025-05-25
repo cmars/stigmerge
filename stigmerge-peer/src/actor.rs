@@ -259,6 +259,10 @@ impl<N: Node> WithVeilidConnection<N> {
                         _ => {}
                     }
                 }
+                _ = tokio::time::sleep(Duration::from_secs(90)) => {
+                    warn!("timeout waiting for connection, resetting");
+                    self.node.reset().await?;
+                }
             }
         }
     }

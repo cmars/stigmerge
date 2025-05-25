@@ -15,9 +15,6 @@ pub struct Cli {
     #[arg(long, env)]
     pub state_dir: Option<String>,
 
-    #[arg(long = "fetchers", short = 'n', default_value = "50")]
-    pub fetchers: usize,
-
     #[command(subcommand)]
     pub commands: Commands,
 }
@@ -94,6 +91,9 @@ pub enum Commands {
 
         #[arg(long = "output-path", short = 'o', default_value = ".")]
         output_path: PathBuf,
+
+        #[arg(long = "fetchers", short = 'n', default_value = "50")]
+        fetchers: usize,
     },
     Seed {
         path: PathBuf,

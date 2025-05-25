@@ -165,8 +165,8 @@ impl<P: Node> Actor for PeerResolver<P> {
                 };
 
                 if let Some(tx) = response_tx {
-                    if let Err(e) = tx.send(resp) {
-                        tracing::warn!("failed to send response: {:?}", e);
+                    if let Err(resp) = tx.send(resp) {
+                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
                     }
                 }
             }
@@ -204,8 +204,8 @@ impl<P: Node> Actor for PeerResolver<P> {
                 };
 
                 if let Some(tx) = response_tx {
-                    if let Err(e) = tx.send(resp) {
-                        tracing::warn!("failed to send response: {:?}", e);
+                    if let Err(resp) = tx.send(resp) {
+                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
                     }
                 }
             }
@@ -232,8 +232,8 @@ impl<P: Node> Actor for PeerResolver<P> {
                 };
 
                 if let Some(tx) = response_tx {
-                    if let Err(e) = tx.send(resp) {
-                        tracing::warn!("failed to send response: {:?}", e);
+                    if let Err(resp) = tx.send(resp) {
+                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
                     }
                 }
             }
@@ -552,7 +552,8 @@ mod tests {
         };
 
         update_tx
-            .send(veilid_core::VeilidUpdate::ValueChange(Box::new(change)))
+            .send_async(veilid_core::VeilidUpdate::ValueChange(Box::new(change)))
+            .await
             .expect("send value change");
 
         // We can't verify the response since we're using call() now

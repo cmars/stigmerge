@@ -207,8 +207,8 @@ impl Actor for PieceVerifier {
         };
 
         if let Some(tx) = req.response_tx() {
-            if let Err(e) = tx.send(resp) {
-                warn!("failed to send response: {:?}", e);
+            if let Err(resp) = tx.send(resp) {
+                return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
             }
         }
 

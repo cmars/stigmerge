@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use anyhow::anyhow;
 use tokio::{select, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, Level};
@@ -246,7 +245,7 @@ impl<P: Node> Actor for HaveResolver<P> {
             }
         };
         if let Some(Err(resp)) = resp_tx.map(|tx| tx.send(resp)) {
-            return Err(anyhow!("failed to send response: {:?}", resp));
+            return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
         }
 
         Ok(())

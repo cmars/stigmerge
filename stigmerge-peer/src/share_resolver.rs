@@ -1,6 +1,5 @@
 use std::{collections::HashSet, path::PathBuf};
 
-use anyhow::anyhow;
 use stigmerge_fileindex::Index;
 use tokio::{select, sync::oneshot};
 use tokio_util::sync::CancellationToken;
@@ -299,7 +298,7 @@ impl<P: Node> Actor for ShareResolver<P> {
         }
         trace!(?resp);
         if let Some(Err(resp)) = response_tx.map(|tx| tx.send(resp)) {
-            return Err(anyhow!("failed to send response: {:?}", resp));
+            return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
         }
         Ok(())
     }

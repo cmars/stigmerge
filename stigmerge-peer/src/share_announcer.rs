@@ -159,8 +159,8 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
         };
 
         if let Some(tx) = req.response_tx() {
-            if let Err(e) = tx.send(response) {
-                tracing::warn!("failed to send response: {:?}", e);
+            if let Err(resp) = tx.send(response) {
+                return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
             }
         }
 

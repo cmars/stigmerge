@@ -150,8 +150,8 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
                 response_tx
             }
         };
-        if let Some(Err(_)) = response_tx.map(|tx| tx.send(())) {
-            return Err(anyhow!("failed to send response"));
+        if let Some(Err(resp)) = response_tx.map(|tx| tx.send(())) {
+            return Err(anyhow!("failed to send response: {:?}", resp));
         }
         Ok(())
     }

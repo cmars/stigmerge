@@ -154,8 +154,8 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 };
 
                 if let Some(tx) = response_tx {
-                    if let Err(e) = tx.send(resp) {
-                        tracing::warn!("failed to send response: {:?}", e);
+                    if let Err(resp) = tx.send(resp) {
+                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
                     }
                 }
             }
@@ -181,8 +181,8 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 };
 
                 if let Some(tx) = response_tx {
-                    if let Err(e) = tx.send(resp) {
-                        tracing::warn!("failed to send response: {:?}", e);
+                    if let Err(resp) = tx.send(resp) {
+                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
                     }
                 }
             }
@@ -203,8 +203,8 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 };
 
                 if let Some(tx) = response_tx {
-                    if let Err(e) = tx.send(resp) {
-                        tracing::warn!("failed to send response: {:?}", e);
+                    if let Err(resp) = tx.send(resp) {
+                        return Err(anyhow::anyhow!("failed to send response: {:?}", resp));
                     }
                 }
             }
