@@ -56,9 +56,9 @@ async fn main() -> std::result::Result<(), Error> {
     let state_dir = tempfile::tempdir()?;
 
     // Set up Veilid node
-    let (routing_context, update_tx, update_rx) =
+    let (routing_context, update_rx) =
         new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let node = Veilid::new(routing_context, update_tx, update_rx).await?;
+    let node = Veilid::new(routing_context, update_rx).await?;
 
     let cancel = CancellationToken::new();
     let conn_state = Arc::new(Mutex::new(ConnectionState::new()));

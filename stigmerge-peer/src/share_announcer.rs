@@ -123,7 +123,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
         cancel: CancellationToken,
         request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
-        let update_rx = self.node.subscribe_veilid_update();
+        let mut update_rx = self.node.subscribe_veilid_update();
         loop {
             match self.share {
                 None => {
@@ -138,7 +138,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                             let req = res?;
                             self.handle_request(req).await?;
                         }
-                        res = update_rx.recv_async() => {
+                        res = update_rx.recv() => {
                             if let Target::PrivateRoute(ref route_id) = target {
                                 let update = res?;
                                 match update {
@@ -159,7 +159,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
     }
 
     #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
-    async fn handle_request(&mut self, mut req: Self::Request) -> Result<()> {
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         let response = match self.reannounce().await {
             Ok(resp) => resp,
             Err(_) => Response::NotAvailable,

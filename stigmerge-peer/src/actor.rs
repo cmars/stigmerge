@@ -3,9 +3,9 @@ use std::{sync::Arc, time::Duration};
 use backoff::backoff::Backoff;
 use tokio::{
     select, spawn,
-    sync::{oneshot, watch, Mutex, MutexGuard},
+    sync::{broadcast, oneshot, watch, Mutex, MutexGuard},
     task::{self, JoinSet},
-    time::sleep,
+    time::{interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -256,7 +256,7 @@ impl<
 
 pub struct WithVeilidConnection<N> {
     node: N,
-    update_rx: flume::Receiver<VeilidUpdate>,
+    update_rx: broadcast::Receiver<VeilidUpdate>,
     state: Arc<Mutex<ConnectionState>>,
 }
 
@@ -290,12 +290,13 @@ impl<N: Node> WithVeilidConnection<N> {
         cancel: CancellationToken,
         state: MutexGuard<'a, ConnectionState>,
     ) -> Result<()> {
+        let mut reset_interval = interval(Duration::from_secs(120));
         loop {
             select! {
                 _ = cancel.cancelled() => {
                     return Err(CancelError.into())
                 }
-                res = self.update_rx.recv_async() => {
+                res = self.update_rx.recv() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
@@ -314,8 +315,8 @@ impl<N: Node> WithVeilidConnection<N> {
                         _ => {}
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(90)) => {
-                    warn!("timeout waiting for connection, resetting");
+                _ = reset_interval.tick() => {
+                    warn!("resetting connection");
                     self.node.reset().await?;
                 }
             }
@@ -392,7 +393,6 @@ impl<
                             {
                                 if let Ok(st) = state.try_lock() {
                                     info!("marking disconnected");
-                                    self.node.reset().await?;
                                     st.connected.send_if_modified(|val| if *val { *val = false; true } else { false });
                                     exp_backoff.reset();
                                     retries = 0;
@@ -401,7 +401,7 @@ impl<
                         }
                     }
                 }
-                res = self.update_rx.recv_async() => {
+                res = self.update_rx.recv() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
@@ -409,6 +409,8 @@ impl<
                                 if let Ok(st) = state.try_lock() {
                                     info!("marking disconnected: {:?}", veilid_state_attachment);
                                     st.connected.send_if_modified(|val| if *val { *val = false; true } else { false });
+                                    exp_backoff.reset();
+                                    retries = 0;
                                 }
                             }
                         }
@@ -429,7 +431,7 @@ impl<N: Clone> Clone for WithVeilidConnection<N> {
     fn clone(&self) -> Self {
         Self {
             node: self.node.clone(),
-            update_rx: self.update_rx.clone(),
+            update_rx: self.update_rx.resubscribe(),
             state: self.state.clone(),
         }
     }

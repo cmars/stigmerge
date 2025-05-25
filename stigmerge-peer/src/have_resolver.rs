@@ -136,7 +136,7 @@ impl<P: Node> Actor for HaveResolver<P> {
         cancel: CancellationToken,
         request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
-        let update_rx = self.node.subscribe_veilid_update();
+        let mut update_rx = self.node.subscribe_veilid_update();
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -146,7 +146,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                     let req = res?;
                     self.handle_request(req).await?;
                 }
-                res = update_rx.recv_async() => {
+                res = update_rx.recv() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {
@@ -563,8 +563,7 @@ mod tests {
             count: 1,
         };
         update_tx
-            .send_async(VeilidUpdate::ValueChange(Box::new(change)))
-            .await
+            .send(VeilidUpdate::ValueChange(Box::new(change)))
             .expect("send value change");
 
         // Expect a have_map update

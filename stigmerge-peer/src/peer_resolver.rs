@@ -106,7 +106,7 @@ impl<P: Node> Actor for PeerResolver<P> {
         cancel: CancellationToken,
         request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
-        let update_rx = self.node.subscribe_veilid_update();
+        let mut update_rx = self.node.subscribe_veilid_update();
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -116,17 +116,17 @@ impl<P: Node> Actor for PeerResolver<P> {
                     let req = res?;
                     self.handle_request(req).await?;
                 }
-                res = update_rx.recv_async() => {
+                res = update_rx.recv() => {
                     let update = res?;
                     match update {
                         veilid_core::VeilidUpdate::ValueChange(ch) => {
                             if let Some(data) = ch.value {
-                                let share_key = match self.peer_to_share_map.get(&ch.key) {
+                                let _share_key = match self.peer_to_share_map.get(&ch.key) {
                                     Some(key) => key,
                                     None => continue,
                                 };
                                 if data.data_size() > 0 {
-                                    if let Ok(peer_info) = PeerInfo::decode(data.data()) {
+                                    if let Ok(_peer_info) = PeerInfo::decode(data.data()) {
                                         // TODO: send peer updates to some channel
                                     }
                                 }
@@ -546,8 +546,7 @@ mod tests {
         };
 
         update_tx
-            .send_async(veilid_core::VeilidUpdate::ValueChange(Box::new(change)))
-            .await
+            .send(veilid_core::VeilidUpdate::ValueChange(Box::new(change)))
             .expect("send value change");
 
         // We can't verify the response since we're using call() now

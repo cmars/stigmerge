@@ -5,6 +5,7 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
+    sync::broadcast,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, Level};
@@ -117,7 +118,7 @@ impl<P: Node> Actor for Seeder<P> {
                     let piece_state = res?;
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }
-                res = self.clients.update_rx.recv_async() => {
+                res = self.clients.update_rx.recv() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
@@ -169,14 +170,14 @@ impl<P: Node> Clone for Seeder<P> {
 
 pub struct Clients {
     pub verified_rx: flume::Receiver<PieceState>,
-    pub update_rx: flume::Receiver<VeilidUpdate>,
+    pub update_rx: broadcast::Receiver<VeilidUpdate>,
 }
 
 impl Clone for Clients {
     fn clone(&self) -> Self {
         Self {
             verified_rx: self.verified_rx.clone(),
-            update_rx: self.update_rx.clone(),
+            update_rx: self.update_rx.resubscribe(),
         }
     }
 }
@@ -250,7 +251,7 @@ mod tests {
         // Create clients
         let clients = Clients {
             verified_rx: verified_rx,
-            update_rx: node.update_rx.clone(),
+            update_rx: node.update_tx.subscribe(),
         };
 
         // Create cancellation token
@@ -284,8 +285,7 @@ mod tests {
         let encoded_req = req.encode().expect("encode request");
         let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
         update_tx
-            .send_async(VeilidUpdate::AppCall(Box::new(app_call)))
-            .await
+            .send(VeilidUpdate::AppCall(Box::new(app_call)))
             .expect("send app call");
 
         time::timeout(Duration::from_secs(1), replied_rx.recv())
@@ -362,7 +362,7 @@ mod tests {
         // Create clients
         let clients = Clients {
             verified_rx,
-            update_rx: node.update_rx.clone(),
+            update_rx: node.update_tx.subscribe(),
         };
 
         // Create seeder
@@ -381,8 +381,7 @@ mod tests {
         let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
 
         update_tx
-            .send_async(VeilidUpdate::AppCall(Box::new(app_call)))
-            .await
+            .send(VeilidUpdate::AppCall(Box::new(app_call)))
             .expect("send app call");
 
         time::timeout(Duration::from_secs(1), replied_rx.recv())

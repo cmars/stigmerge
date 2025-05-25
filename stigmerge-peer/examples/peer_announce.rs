@@ -51,9 +51,9 @@ async fn main() -> std::result::Result<(), Error> {
     let state_dir = tempfile::tempdir()?;
 
     // Set up Veilid peer
-    let (routing_context, update_tx, update_rx) =
+    let (routing_context, update_rx) =
         new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let mut node = Veilid::new(routing_context, update_tx, update_rx).await?;
+    let mut node = Veilid::new(routing_context, update_rx).await?;
 
     let cancel = CancellationToken::new();
     let conn_state = std::sync::Arc::new(Mutex::new(ConnectionState::new()));
@@ -147,7 +147,7 @@ async fn main() -> std::result::Result<(), Error> {
             .await?;
     }
 
-    let update_rx = node.subscribe_veilid_update();
+    let mut update_rx = node.subscribe_veilid_update();
 
     let (advertise_tx, advertise_rx) = flume::unbounded();
     const MAX_ADVERTISE_ATTEMPTS: u8 = 3;
@@ -227,7 +227,7 @@ async fn main() -> std::result::Result<(), Error> {
                         }
                     }
                 }
-                res = update_rx.recv_async() => {
+                res = update_rx.recv() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::AppMessage(app_msg) => {

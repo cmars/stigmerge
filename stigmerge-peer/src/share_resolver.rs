@@ -3,7 +3,7 @@ use std::{collections::HashSet, fmt, path::PathBuf};
 use stigmerge_fileindex::Index;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, trace, warn, Level};
+use tracing::{info, trace, warn};
 use veilid_core::{Target, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -208,7 +208,7 @@ impl<P: Node> Actor for ShareResolver<P> {
         cancel: CancellationToken,
         request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
-        let update_rx = self.node.subscribe_veilid_update();
+        let mut update_rx = self.node.subscribe_veilid_update();
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -218,7 +218,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                     let req = res?;
                     self.handle_request(req).await?;
                 }
-                res = update_rx.recv_async() => {
+                res = update_rx.recv() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {

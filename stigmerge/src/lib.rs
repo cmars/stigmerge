@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 use indicatif::MultiProgress;
+use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 pub mod app;
@@ -38,9 +39,8 @@ pub fn initialize_ui_logging(multi_progress: MultiProgress) {
         )
         .with(
             EnvFilter::builder()
-                .with_default_directive("stigmerge=debug".parse().unwrap())
-                .with_default_directive("stigmerge_peer=debug".parse().unwrap())
-                .from_env_lossy(),
+                .with_default_directive(LevelFilter::INFO.into())
+                .parse_lossy("stigmerge=debug,stigmerge_peer=debug"),
         )
         .init();
 }

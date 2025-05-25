@@ -66,8 +66,8 @@ impl App {
 
         // Set up Veilid node
         let state_dir = self.cli.state_dir()?;
-        let (routing_context, update_tx, update_rx) = new_routing_context(&state_dir, None).await?;
-        let node = Veilid::new(routing_context, update_tx, update_rx).await?;
+        let (routing_context, update_rx) = new_routing_context(&state_dir, None).await?;
+        let node = Veilid::new(routing_context, update_rx).await?;
 
         let res = self.run_with_node(node.clone()).await;
         let _ = node.shutdown().await;
@@ -215,15 +215,13 @@ impl App {
                     indexer.subscribe_index_progress(),
                     indexer.subscribe_digest_progress(),
                 )?;
-                let mut index = indexer.index().await?;
-                info!(index_digest = hex::encode(index.digest()?));
+                let index = indexer.index().await?;
                 want_index.get_or_insert(index);
             }
             c => bail!("unexpected subcommand: {:?}", c),
         };
         let mut index = want_index.ok_or(Error::msg("failed to resolve index"))?;
-        let index_digest = index.digest()?;
-        info!("index digest {}", hex::encode(index_digest));
+        info!(index_digest = hex::encode(index.digest()?));
 
         // Announce our own share of the index
         let mut share_announcer_op = Operator::new(

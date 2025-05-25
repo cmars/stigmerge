@@ -113,10 +113,10 @@ impl Transient for VeilidAPIError {
             &VeilidAPIError::NoConnection { .. } => true,
             &VeilidAPIError::NotInitialized => true,
             &VeilidAPIError::KeyNotFound { .. } => true,
-            &VeilidAPIError::Generic { .. } => true,
             &VeilidAPIError::Internal { .. } => true,
 
             // These errors are not likely to be transient in nature.
+            &VeilidAPIError::Generic { .. } => false,
             &VeilidAPIError::Unimplemented { .. } => false,
             &VeilidAPIError::ParseError { .. } => false,
             &VeilidAPIError::InvalidArgument { .. } => false,
