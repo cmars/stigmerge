@@ -2,11 +2,13 @@ use std::{collections::HashMap, fmt};
 
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::Level;
+use tracing::{debug, trace, Level};
+use veilid_core::VeilidUpdate;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     node::TypedKey,
+    proto::{self, Decoder},
     Node, Result,
 };
 
@@ -130,6 +132,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
         cancel: CancellationToken,
         request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
+        let mut update_rx = self.node.subscribe_veilid_update();
         self.node
             .reset_peers(&self.payload_digest, self.max_peers)
             .await?;
@@ -141,6 +144,26 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 res = request_rx.recv_async() => {
                     let req = res?;
                     self.handle_request(req).await?;
+                }
+                res = update_rx.recv() => {
+                    let update = res?;
+                    match update {
+                        VeilidUpdate::AppCall(veilid_app_call) => {
+                            trace!("app_call: {:?}", veilid_app_call);
+                            let req = proto::Request::decode(veilid_app_call.message())?;
+                            match req {
+                                proto::Request::AdvertisePeer(peer_req) => {
+                                    self.handle_request(Request::Announce {
+                                        response_tx: ResponseChannel::Drop,
+                                        key: peer_req.key,
+                                    }).await?;
+                                    debug!("announced peer: {}", peer_req.key);
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
         }

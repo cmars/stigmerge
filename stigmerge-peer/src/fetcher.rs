@@ -16,13 +16,16 @@ use crate::error::is_route_invalid;
 use crate::node::TypedKey;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
-use crate::{block_fetcher, piece_verifier, share_resolver, Error, Result};
+use crate::{
+    block_fetcher, peer_resolver, piece_verifier, proto, share_resolver, Error, Node, Result,
+};
 
-pub struct Fetcher {
+pub struct Fetcher<N: Node> {
+    node: N,
     clients: Clients,
 
-    want_index: Index,
     have_index: Index,
+    share: ShareInfo,
 
     state: State,
     status_tx: watch::Sender<Status>,
@@ -86,9 +89,13 @@ impl PeerTracker {
         }
     }
 
-    pub async fn update(&mut self, key: TypedKey, target: Target) {
+    pub async fn update(&mut self, key: TypedKey, target: Target) -> Option<Target> {
         self.reset(&key).await;
-        self.targets.insert(key, target);
+        self.targets.insert(key, target)
+    }
+
+    pub fn contains(&self, key: &TypedKey) -> bool {
+        self.targets.contains_key(key)
     }
 
     pub async fn fetch_ok(&mut self, key: &TypedKey) {
@@ -156,6 +163,8 @@ pub struct Clients {
     pub have_announcer: Operator<have_announcer::Request>,
     pub share_resolver: Operator<share_resolver::Request>,
     pub share_target_rx: flume::Receiver<(TypedKey, Target)>,
+    pub peer_resolver: Operator<peer_resolver::Request>,
+    pub discovered_peers_rx: flume::Receiver<(TypedKey, proto::PeerInfo)>,
 }
 
 #[derive(Debug)]
@@ -189,17 +198,18 @@ impl Status {
     }
 }
 
-impl Fetcher {
+impl<N: Node> Fetcher<N> {
     #[tracing::instrument(skip_all, fields(share))]
-    pub fn new(share: ShareInfo, clients: Clients) -> Fetcher {
+    pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
         let (status_tx, status_rx) = watch::channel(Status::NotStarted);
         let (pending_fetch_tx, pending_fetch_rx) = flume::unbounded();
         let (fetch_resp_tx, fetch_resp_rx) = flume::unbounded();
         let (verify_resp_tx, verify_resp_rx) = flume::unbounded();
         Fetcher {
+            node,
             clients,
             have_index: share.want_index.empty(),
-            want_index: share.want_index,
+            share,
             state: State::Indexing,
 
             status_tx,
@@ -237,7 +247,7 @@ impl Fetcher {
 
     #[tracing::instrument(skip_all, err, ret)]
     async fn index(&mut self, cancel: CancellationToken) -> Result<State> {
-        let indexer = Indexer::from_wanted(&self.want_index).await?;
+        let indexer = Indexer::from_wanted(&self.share.want_index).await?;
 
         // Set status updates while indexing
         let mut index_progress = indexer.subscribe_index_progress();
@@ -287,9 +297,9 @@ impl Fetcher {
 
     #[tracing::instrument(skip_all, err, ret)]
     async fn plan(&mut self, cancel: CancellationToken) -> Result<State> {
-        let diff = self.want_index.diff(&self.have_index);
+        let diff = self.share.want_index.diff(&self.have_index);
         let mut want_length = 0;
-        let total_length = self.want_index.payload().length();
+        let total_length = self.share.want_index.payload().length();
         for want_block in diff.want {
             select! {
                 _ = cancel.cancelled() => {
@@ -319,7 +329,7 @@ impl Fetcher {
                         have_block.file_index,
                         have_block.piece_index,
                         have_block.piece_offset,
-                        self.want_index.payload().pieces()[have_block.piece_index].block_count(),
+                        self.share.want_index.payload().pieces()[have_block.piece_index].block_count(),
                         have_block.block_index,
                     ),
                     response_tx: ResponseChannel::default(),
@@ -345,8 +355,15 @@ impl Fetcher {
     async fn fetch(&mut self, cancel: CancellationToken) -> Result<State> {
         let mut verified_pieces = 0u64;
         let mut fetched_bytes = self.status_tx.borrow().deref().position().unwrap_or(0);
-        let total_pieces = self.want_index.payload().pieces().len().try_into().unwrap();
-        let total_length = self.want_index.payload().length();
+        let total_pieces = self
+            .share
+            .want_index
+            .payload()
+            .pieces()
+            .len()
+            .try_into()
+            .unwrap();
+        let total_length = self.share.want_index.payload().length();
         let mut no_peers_backoff = backoff::ExponentialBackoffBuilder::new()
             .with_max_interval(Duration::from_secs(5))
             .build();
@@ -405,7 +422,7 @@ impl Fetcher {
                                     block.file_index,
                                     block.piece_index,
                                     block.piece_offset,
-                                    self.want_index.payload().pieces()[block.piece_index].block_count(),
+                                    self.share.want_index.payload().pieces()[block.piece_index].block_count(),
                                     block.block_index,
                                 ),
                                 response_tx: ResponseChannel::default(),
@@ -450,7 +467,7 @@ impl Fetcher {
                             }
                         }
                         piece_verifier::Response::InvalidPiece { file_index, piece_index } => {
-                            let piece_length = self.want_index.payload().pieces()[piece_index].length();
+                            let piece_length = self.share.want_index.payload().pieces()[piece_index].length();
                             warn!(file_index, piece_index, piece_length, "invalid piece");
 
                             fetched_bytes -= TryInto::<u64>::try_into(piece_length).unwrap();
@@ -482,7 +499,31 @@ impl Fetcher {
                 res = self.clients.share_target_rx.recv_async() => {
                     let (key, target) = res?;
                     debug!("share target update for {key}: {target:?}");
-                    self.peer_tracker.update(key, target).await;
+                    if let None = self.peer_tracker.update(key, target.to_owned()).await {
+                        // Never seen this peer before, advertise ourselves to it
+                        self.node.request_advertise_peer(&target, &self.share.key).await?;
+                    }
+                }
+
+                // Resolve newly discovered peers
+                res = self.clients.discovered_peers_rx.recv_async() => {
+                    let (key, peer_info) = res?;
+                    if !self.peer_tracker.contains(peer_info.key()) {
+                        self.clients.share_resolver.call(share_resolver::Request::Index{
+                            response_tx: ResponseChannel::default(),
+                            key,
+                            want_index_digest: Some(self.share.want_index_digest),
+                            root: self.share.root.to_owned(),
+                        }).await.err().map(|e| {
+                            warn!("failed to resolve share for discovered peer {} at {key}: {e}", peer_info.key());
+                        });
+                        self.clients.peer_resolver.call(peer_resolver::Request::Watch{
+                            response_tx: ResponseChannel::default(),
+                            key: peer_info.key().to_owned(),
+                        }).await.err().map(|e| {
+                            warn!("failed to watch peers of discovered peer {} at {key}: {e}", peer_info.key());
+                        });
+                    }
                 }
             }
         }
@@ -495,6 +536,7 @@ impl Fetcher {
             self.clients.block_fetcher.join(),
             self.clients.have_announcer.join(),
             self.clients.share_resolver.join(),
+            self.clients.peer_resolver.join(),
         )?;
         Ok(())
     }
