@@ -45,6 +45,7 @@ use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
 use stigmerge_peer::actor::{ResponseChannel, UntilCancelled};
 use stigmerge_peer::content_addressable::ContentAddressable;
+use stigmerge_peer::peer_resolver::PeerResolver;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
 use tokio::select;
 use tokio::spawn;
@@ -143,7 +144,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             want_index.get_or_insert(index);
         }
     }
-    let index = match want_index {
+    let mut index = match want_index {
         Some(index) => index,
         None => {
             // If an index wasn't resolved, and we didn't bail on an error,
@@ -155,11 +156,11 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
                     .as_path(),
             )
             .await?;
-            let mut index = indexer.index().await?;
-            info!(index_digest = hex::encode(index.digest()?));
-            index
+            indexer.index().await?
         }
     };
+    let index_digest = index.digest()?;
+    info!(index_digest = hex::encode(index_digest));
 
     // Announce our own share of the index
     let mut share_announce_op = Operator::new(
@@ -208,10 +209,20 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     );
 
     let share = ShareInfo {
+        key: share_key,
         want_index: index.clone(),
+        want_index_digest: index_digest,
         root,
         header: share_header.clone(),
     };
+
+    let peer_resolver = PeerResolver::new(node.clone());
+    let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
+    let peer_resolver_op = Operator::new(
+        cancel.clone(),
+        peer_resolver,
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
+    );
 
     let fetcher_clients = FetcherClients {
         block_fetcher,
@@ -219,6 +230,8 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         have_announcer,
         share_resolver: share_resolver_op,
         share_target_rx,
+        peer_resolver: peer_resolver_op,
+        discovered_peers_rx,
     };
 
     // Set up seeder
@@ -235,7 +248,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     );
 
     // Create and run fetcher
-    let fetcher = Fetcher::new(share.clone(), fetcher_clients);
+    let fetcher = Fetcher::new(node.clone(), share.clone(), fetcher_clients);
 
     info!("Starting fetch...");
 

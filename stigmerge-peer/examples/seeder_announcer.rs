@@ -89,7 +89,9 @@ async fn main() -> std::result::Result<(), Error> {
 
     // Set up the seeder
     let share = ShareInfo {
+        key,
         header: header.clone(),
+        want_index_digest: index_digest,
         want_index: index.clone(),
         root: root.clone(),
     };

@@ -21,6 +21,7 @@ use stigmerge_peer::{
     have_announcer::HaveAnnouncer,
     new_routing_context,
     node::{Node, Veilid},
+    peer_resolver::PeerResolver,
     piece_verifier::PieceVerifier,
     seeder::{self, Seeder},
     share_announcer::{self, ShareAnnouncer},
@@ -221,7 +222,8 @@ impl App {
             c => bail!("unexpected subcommand: {:?}", c),
         };
         let mut index = want_index.ok_or(Error::msg("failed to resolve index"))?;
-        info!(index_digest = hex::encode(index.digest()?));
+        let index_digest = index.digest()?;
+        info!(index_digest = hex::encode(index_digest));
 
         // Announce our own share of the index
         let mut share_announcer_op = Operator::new(
@@ -256,7 +258,9 @@ impl App {
         );
 
         let share = ShareInfo {
+            key: share_key,
             want_index: index.clone(),
+            want_index_digest: index_digest,
             root,
             header: share_header.clone(),
         };
@@ -273,18 +277,28 @@ impl App {
             n_fetchers,
         );
 
+        let peer_resolver = PeerResolver::new(node.clone());
+        let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
+        let peer_resolver_op = Operator::new(
+            cancel.clone(),
+            peer_resolver,
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        );
+
         let fetcher_clients = FetcherClients {
             block_fetcher,
             piece_verifier: piece_verifier_op,
             have_announcer,
             share_resolver: share_resolver_op,
             share_target_rx,
+            peer_resolver: peer_resolver_op,
+            discovered_peers_rx,
         };
 
         // Create and run fetcher
         info!("Starting fetch...");
 
-        let fetcher = Fetcher::new(share.clone(), fetcher_clients);
+        let fetcher = Fetcher::new(node.clone(), share.clone(), fetcher_clients);
         self.add_fetch_progress(&cancel, &mut tasks, fetcher.subscribe_fetcher_status())?;
         tasks.spawn(fetcher.run(cancel.clone()));
 

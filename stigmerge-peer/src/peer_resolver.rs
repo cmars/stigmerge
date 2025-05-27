@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, Level};
-use veilid_core::ValueSubkeyRangeSet;
+use tracing::{debug, info, trace, Level};
+use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     node::TypedKey,
-    proto::{Decoder, PeerInfo},
+    proto::{self, Decoder, PeerInfo},
     Node, Result,
 };
 
@@ -19,6 +19,9 @@ pub struct PeerResolver<N: Node> {
 
     // Mapping from peer-map key to share key, used in watches
     peer_to_share_map: HashMap<TypedKey, TypedKey>,
+
+    discovered_peer_tx: flume::Sender<(TypedKey, PeerInfo)>,
+    discovered_peer_rx: flume::Receiver<(TypedKey, PeerInfo)>,
 }
 
 impl<P> PeerResolver<P>
@@ -27,10 +30,17 @@ where
 {
     /// Create a new peer_resolver service.
     pub fn new(node: P) -> Self {
+        let (discovered_peer_tx, discovered_peer_rx) = flume::unbounded();
         Self {
             node,
             peer_to_share_map: HashMap::new(),
+            discovered_peer_tx,
+            discovered_peer_rx,
         }
+    }
+
+    pub fn subscribe_discovered_peers(&self) -> flume::Receiver<(TypedKey, PeerInfo)> {
+        self.discovered_peer_rx.clone()
     }
 }
 
@@ -119,20 +129,34 @@ impl<P: Node> Actor for PeerResolver<P> {
                 res = update_rx.recv() => {
                     let update = res?;
                     match update {
-                        veilid_core::VeilidUpdate::ValueChange(ch) => {
+                        VeilidUpdate::AppCall(veilid_app_call) => {
+                            trace!("app_call: {:?}", veilid_app_call);
+                            let req = proto::Request::decode(veilid_app_call.message())?;
+                            match req {
+                                proto::Request::AdvertisePeer(peer_req) => {
+                                    self.handle_request(Request::Watch {
+                                        response_tx: ResponseChannel::Drop,
+                                        key: peer_req.key,
+                                    }).await?;
+                                    debug!("watching advertised peer: {}", peer_req.key);
+                                }
+                                _ => {}
+                            }
+                        }
+                        VeilidUpdate::ValueChange(ch) => {
                             if let Some(data) = ch.value {
-                                let _share_key = match self.peer_to_share_map.get(&ch.key) {
+                                let share_key = match self.peer_to_share_map.get(&ch.key) {
                                     Some(key) => key,
                                     None => continue,
                                 };
                                 if data.data_size() > 0 {
-                                    if let Ok(_peer_info) = PeerInfo::decode(data.data()) {
-                                        // TODO: send peer updates to some channel
+                                    if let Ok(peer_info) = PeerInfo::decode(data.data()) {
+                                        self.discovered_peer_tx.send_async((share_key.to_owned(), peer_info)).await?;
                                     }
                                 }
                             }
                         }
-                        veilid_core::VeilidUpdate::Shutdown => {
+                        VeilidUpdate::Shutdown => {
                             return Ok(());
                         }
                         _ => {}
@@ -242,6 +266,8 @@ impl<P: Node> Clone for PeerResolver<P> {
         Self {
             node: self.node.clone(),
             peer_to_share_map: self.peer_to_share_map.clone(),
+            discovered_peer_tx: self.discovered_peer_tx.clone(),
+            discovered_peer_rx: self.discovered_peer_rx.clone(),
         }
     }
 }

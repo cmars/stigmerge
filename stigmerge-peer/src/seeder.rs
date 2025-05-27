@@ -107,6 +107,7 @@ impl<P: Node> Actor for Seeder<P> {
         let mut buf = [0u8; BLOCK_SIZE_BYTES];
         loop {
             select! {
+                biased;
                 _ = cancel.cancelled() => {
                     return Ok(());
                 }
@@ -185,13 +186,14 @@ impl Clone for Clients {
 #[cfg(test)]
 mod tests {
     use std::{
+        str::FromStr,
         sync::{Arc, Mutex},
         time::Duration,
     };
 
     use tokio::{sync::mpsc, time};
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{OperationId, VeilidAppCall};
+    use veilid_core::{OperationId, TypedKey, VeilidAppCall};
 
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
@@ -241,16 +243,21 @@ mod tests {
             },
         ));
 
+        let fake_key =
+            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+
         // Create share info
         let share_info = ShareInfo {
+            key: fake_key,
             header: test_header(),
             want_index: index,
+            want_index_digest: [0u8; 32],
             root: root_dir,
         };
 
         // Create clients
         let clients = Clients {
-            verified_rx: verified_rx,
+            verified_rx,
             update_rx: node.update_tx.subscribe(),
         };
 
@@ -269,6 +276,8 @@ mod tests {
             .await
             .expect("send verified piece");
 
+        // Have map should be updated. This should be a certainty with biased
+        // select! behavior.
         let req = Request::HaveMap {
             response_tx: ResponseChannel::default(),
         };
@@ -352,10 +361,15 @@ mod tests {
             },
         ));
 
+        let fake_key =
+            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+
         // Create share info
         let share_info = ShareInfo {
+            key: fake_key,
             header: test_header(),
             want_index: index,
+            want_index_digest: [0u8; 32],
             root: root_dir,
         };
 
