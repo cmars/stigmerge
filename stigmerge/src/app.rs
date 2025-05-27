@@ -1,9 +1,21 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{bail, Error, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
+use tokio::{
+    fs::File,
+    io::AsyncWriteExt,
+    select, spawn,
+    sync::{watch, RwLock},
+    task::JoinSet,
+    time::sleep,
+};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace, warn};
+use veilid_core::TypedRecordKey;
+
 use stigmerge_peer::{
     actor::{ConnectionState, Operator, ResponseChannel, UntilCancelled, WithVeilidConnection},
     block_fetcher::BlockFetcher,
@@ -20,15 +32,6 @@ use stigmerge_peer::{
     types::ShareInfo,
     CancelError,
 };
-use tokio::{
-    select, spawn,
-    sync::{watch, RwLock},
-    task::JoinSet,
-    time::sleep,
-};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
-use veilid_core::TypedRecordKey;
 
 use crate::{cli::Commands, initialize_stdout_logging, initialize_ui_logging, Cli};
 
@@ -66,6 +69,7 @@ impl App {
 
         // Set up Veilid node
         let state_dir = self.cli.state_dir()?;
+        debug!(state_dir);
         let (routing_context, update_rx) = new_routing_context(&state_dir, None).await?;
         let node = Veilid::new(routing_context, update_rx).await?;
 
@@ -251,6 +255,10 @@ impl App {
         };
 
         info!("announced share, key: {share_key}");
+        self.write_state_file("index_digest", hex::encode(index_digest))
+            .await?;
+        self.write_state_file("share_key", share_key.to_string())
+            .await?;
 
         let piece_verifier = PieceVerifier::new(Arc::new(RwLock::new(index.clone()))).await;
         let verified_rx = piece_verifier.subscribe_verified();
@@ -476,6 +484,16 @@ impl App {
                 sleep(Duration::from_millis(250)).await;
             }
         });
+        Ok(())
+    }
+
+    async fn write_state_file(&self, key: &str, value: String) -> Result<()> {
+        let state_dir = self.cli.state_dir()?;
+        let state_file = PathBuf::from(state_dir).join(key);
+        File::create(state_file)
+            .await?
+            .write_all(value.as_bytes())
+            .await?;
         Ok(())
     }
 }
