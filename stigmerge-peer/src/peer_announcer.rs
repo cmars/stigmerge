@@ -24,6 +24,7 @@ pub struct PeerAnnouncer<N: Node> {
     peer_indexes: HashMap<TypedKey, usize>,
     peers: Vec<Option<TypedKey>>,
     max_peers: u16,
+    discovered_peers_rx: flume::Receiver<(TypedKey, proto::PeerInfo)>,
 }
 
 pub const DEFAULT_MAX_PEERS: u16 = 32;
@@ -31,13 +32,18 @@ pub const DEFAULT_MAX_PEERS: u16 = 32;
 impl<N: Node> PeerAnnouncer<N> {
     /// Create a new peer_announcer service.
     #[tracing::instrument(skip_all)]
-    pub fn new(node: N, payload_digest: &[u8]) -> Self {
+    pub fn new(
+        node: N,
+        payload_digest: &[u8],
+        discovered_peers_rx: flume::Receiver<(TypedKey, proto::PeerInfo)>,
+    ) -> Self {
         Self {
             node,
             payload_digest: payload_digest.to_vec(),
             peer_indexes: HashMap::new(),
             peers: vec![],
             max_peers: DEFAULT_MAX_PEERS,
+            discovered_peers_rx,
         }
     }
 
@@ -126,7 +132,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -165,11 +171,19 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                         _ => {}
                     }
                 }
+                res = self.discovered_peers_rx.recv_async() => {
+                    let (key, peer_info) = res?;
+                    self.handle_request(Request::Announce {
+                        response_tx: ResponseChannel::Drop,
+                        key: peer_info.key().to_owned(),
+                    }).await?;
+                    debug!("announced discovered peer {} from {}", peer_info.key(), key);
+                }
             }
         }
     }
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         match req {
             Request::Announce {
@@ -296,7 +310,8 @@ mod tests {
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest);
+        let (_discovered_peer_tx, discovered_peer_rx) = flume::unbounded();
+        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest, discovered_peer_rx);
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send an Announce request
@@ -364,7 +379,8 @@ mod tests {
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest);
+        let (_discovered_peer_tx, discovered_peer_rx) = flume::unbounded();
+        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest, discovered_peer_rx);
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // First announce a peer
@@ -425,7 +441,8 @@ mod tests {
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest);
+        let (_discovered_peer_tx, discovered_peer_rx) = flume::unbounded();
+        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest, discovered_peer_rx);
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send a Reset request

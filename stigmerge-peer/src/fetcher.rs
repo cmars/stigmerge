@@ -502,13 +502,16 @@ impl<N: Node> Fetcher<N> {
                     if let None = self.peer_tracker.update(key, target.to_owned()).await {
                         // Never seen this peer before, advertise ourselves to it
                         self.node.request_advertise_peer(&target, &self.share.key).await?;
+                        debug!("advertised our share {} to target {:?}", self.share.key, target);
                     }
                 }
 
                 // Resolve newly discovered peers
+                // TODO: this needs to be in the seeder, if we're done fetching we won't execute this
                 res = self.clients.discovered_peers_rx.recv_async() => {
                     let (key, peer_info) = res?;
                     if !self.peer_tracker.contains(peer_info.key()) {
+                        debug!("discovered peer {} at {key}", peer_info.key());
                         self.clients.share_resolver.call(share_resolver::Request::Index{
                             response_tx: ResponseChannel::default(),
                             key,
