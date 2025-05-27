@@ -52,7 +52,7 @@ pub struct Clients {
     pub share_resolver: Operator<share_resolver::Request>,
     pub share_target_rx: flume::Receiver<(TypedRecordKey, Target)>,
     pub peer_resolver: Operator<peer_resolver::Request>,
-    pub discovered_peers_rx: flume::Receiver<(TypedRecordKey, proto::PeerInfo)>,
+    pub discovered_peers_rx: broadcast::Receiver<(TypedRecordKey, proto::PeerInfo)>,
 }
 
 #[derive(Debug)]
@@ -473,10 +473,12 @@ impl<N: Node> Fetcher<N> {
                 }
 
                 // Resolve newly discovered peers
-                res = self.clients.discovered_peers_rx.recv_async() => {
+                // TODO: this needs to be in the seeder, if we're done fetching we won't execute this
+                res = self.clients.discovered_peers_rx.recv() => {
                     let (key, peer_info) = res.context(Unrecoverable::new("receive discovered peer"))?;
                     debug!("discovered peer {} from {}", peer_info.key(), key);
                     if !self.peer_tracker.contains(peer_info.key()) {
+                        debug!("discovered peer {} at {key}", peer_info.key());
                         self.clients.share_resolver.call(share_resolver::Request::Index{
                             response_tx: ResponseChannel::default(),
                             key,

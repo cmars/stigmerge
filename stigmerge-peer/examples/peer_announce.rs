@@ -86,17 +86,19 @@ async fn main() -> std::result::Result<(), Error> {
     };
     info!("announced share: key={share_key}, target={target:?}");
 
-    // Create peer announcer for our share
-    let mut peer_announcer_op = Operator::new(
+    // Create peer resolver to watch other shares
+    let peer_resolver = peer_resolver::PeerResolver::new(node.clone());
+    let discovered_peer_rx = peer_resolver.subscribe_discovered_peers();
+    let mut peer_resolver_op = Operator::new(
         cancel.clone(),
-        PeerAnnouncer::new(node.clone(), &header.payload_digest()),
+        peer_resolver,
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
-    // Create peer resolver to watch other shares
-    let mut peer_resolver_op = Operator::new(
+    // Create peer announcer for our share
+    let mut peer_announcer_op = Operator::new(
         cancel.clone(),
-        peer_resolver::PeerResolver::new(node.clone()),
+        PeerAnnouncer::new(node.clone(), &header.payload_digest(), discovered_peer_rx),
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
