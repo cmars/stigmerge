@@ -15,7 +15,10 @@ struct Args {
     file: PathBuf,
 }
 
+use stigmerge_peer::peer_resolver::PeerResolver;
+use stigmerge_peer::peer_tracker::PeerTracker;
 use stigmerge_peer::seeder::{self, Seeder};
+use stigmerge_peer::share_resolver::ShareResolver;
 use stigmerge_peer::types::{PieceState, ShareInfo};
 use tokio::select;
 use tokio::sync::{Mutex, RwLock};
@@ -87,6 +90,12 @@ async fn main() -> std::result::Result<(), Error> {
     let verified_rx = verifier.subscribe_verified();
     let mut verifier_op = Operator::new(cancel.clone(), verifier, OneShot);
 
+    let peer_resolver = PeerResolver::new(node.clone());
+    let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
+    let peer_resolver_op = Operator::new(cancel.clone(), peer_resolver, OneShot);
+    let share_resolver_op =
+        Operator::new(cancel.clone(), ShareResolver::new(node.clone()), OneShot);
+
     // Set up the seeder
     let share = ShareInfo {
         key,
@@ -95,9 +104,14 @@ async fn main() -> std::result::Result<(), Error> {
         want_index: index.clone(),
         root: root.clone(),
     };
+    let peer_tracker = Arc::new(Mutex::new(PeerTracker::new()));
     let seeder_clients = seeder::Clients {
         update_rx: node.subscribe_veilid_update(),
         verified_rx,
+        peer_tracker,
+        discovered_peers_rx,
+        share_resolver_tx: share_resolver_op.client(),
+        peer_resolver_tx: peer_resolver_op.client(),
     };
 
     let mut seeder_op = Operator::new(

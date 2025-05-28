@@ -26,6 +26,7 @@ struct Args {
 use stigmerge_peer::actor::ResponseChannel;
 use stigmerge_peer::actor::UntilCancelled;
 use stigmerge_peer::peer_resolver::PeerResolver;
+use stigmerge_peer::peer_tracker::PeerTracker;
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -126,12 +127,12 @@ async fn main() -> std::result::Result<(), Error> {
     };
 
     let peer_resolver = PeerResolver::new(node.clone());
-    let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
     let peer_resolver_op = Operator::new(
         cancel.clone(),
         peer_resolver,
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
+    let peer_tracker = Arc::new(tokio::sync::Mutex::new(PeerTracker::new()));
 
     let clients = Clients {
         block_fetcher,
@@ -140,7 +141,7 @@ async fn main() -> std::result::Result<(), Error> {
         share_resolver: share_resolver_op,
         share_target_rx,
         peer_resolver: peer_resolver_op,
-        discovered_peers_rx,
+        peer_tracker,
     };
 
     // Create and run fetcher

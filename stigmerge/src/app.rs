@@ -8,7 +8,7 @@ use tokio::{
     fs::File,
     io::AsyncWriteExt,
     select,
-    sync::{watch, RwLock},
+    sync::{watch, Mutex, RwLock},
     task::JoinSet,
     time::sleep,
 };
@@ -25,6 +25,7 @@ use stigmerge_peer::{
     node::{Node, Veilid},
     peer_announcer::PeerAnnouncer,
     peer_resolver::PeerResolver,
+    peer_tracker::PeerTracker,
     piece_verifier::PieceVerifier,
     seeder::{self, Seeder},
     share_announcer::{self, ShareAnnouncer},
@@ -305,6 +306,17 @@ impl App {
         );
         tasks.spawn(peer_announcer_op.join());
 
+        let peer_tracker = Arc::new(Mutex::new(PeerTracker::new()));
+
+        let seeder_clients = seeder::Clients {
+            update_rx: node.subscribe_veilid_update(),
+            verified_rx,
+            discovered_peers_rx,
+            peer_tracker: peer_tracker.clone(),
+            share_resolver_tx: share_resolver_op.client(),
+            peer_resolver_tx: peer_resolver_op.client(),
+        };
+
         let fetcher_clients = FetcherClients {
             block_fetcher,
             piece_verifier: piece_verifier_op,
@@ -312,7 +324,7 @@ impl App {
             share_resolver: share_resolver_op,
             share_target_rx,
             peer_resolver: peer_resolver_op,
-            discovered_peers_rx,
+            peer_tracker,
         };
 
         // Create and run fetcher
@@ -323,11 +335,6 @@ impl App {
         tasks.spawn(fetcher.run(cancel.clone()));
 
         // Set up seeder
-        let seeder_clients = seeder::Clients {
-            update_rx: node.subscribe_veilid_update(),
-            verified_rx,
-        };
-
         let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
         let seeder_op = Operator::new(
             cancel.clone(),

@@ -46,6 +46,7 @@ use stigmerge_fileindex::Indexer;
 use stigmerge_peer::actor::{ResponseChannel, UntilCancelled};
 use stigmerge_peer::content_addressable::ContentAddressable;
 use stigmerge_peer::peer_resolver::PeerResolver;
+use stigmerge_peer::peer_tracker::PeerTracker;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
 use tokio::select;
 use tokio::spawn;
@@ -224,6 +225,17 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
+    let peer_tracker = Arc::new(Mutex::new(PeerTracker::new()));
+
+    let seeder_clients = seeder::Clients {
+        update_rx: node.subscribe_veilid_update(),
+        verified_rx,
+        peer_tracker: peer_tracker.clone(),
+        discovered_peers_rx,
+        share_resolver_tx: share_resolver_op.client(),
+        peer_resolver_tx: peer_resolver_op.client(),
+    };
+
     let fetcher_clients = FetcherClients {
         block_fetcher,
         piece_verifier: piece_verifier_op,
@@ -231,15 +243,10 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         share_resolver: share_resolver_op,
         share_target_rx,
         peer_resolver: peer_resolver_op,
-        discovered_peers_rx,
+        peer_tracker,
     };
 
     // Set up seeder
-    let seeder_clients = seeder::Clients {
-        update_rx: node.subscribe_veilid_update(),
-        verified_rx,
-    };
-
     let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
     let seeder_op = Operator::new(
         cancel.clone(),

@@ -1,24 +1,21 @@
-use std::collections::HashMap;
 use std::ops::Deref;
+use std::sync::Arc;
 use std::time::Duration;
 
 use backoff::backoff::Backoff;
-use moka::future::Cache;
 use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex};
 use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn, Level};
 use veilid_core::Target;
 
 use crate::actor::ResponseChannel;
-use crate::error::is_route_invalid;
 use crate::node::TypedKey;
+use crate::peer_tracker::PeerTracker;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
-use crate::{
-    block_fetcher, peer_resolver, piece_verifier, proto, share_resolver, Error, Node, Result,
-};
+use crate::{block_fetcher, peer_resolver, piece_verifier, share_resolver, Error, Node, Result};
 
 pub struct Fetcher<N: Node> {
     node: N,
@@ -39,122 +36,6 @@ pub struct Fetcher<N: Node> {
 
     verify_resp_tx: flume::Sender<piece_verifier::Response>,
     verify_resp_rx: flume::Receiver<piece_verifier::Response>,
-
-    peer_tracker: PeerTracker,
-}
-
-#[derive(Debug, Clone)]
-struct PeerStatus {
-    fetch_ok_count: u32,
-    fetch_err_count: u32,
-    is_invalid_target: bool,
-}
-
-impl PeerStatus {
-    fn score(&self) -> i32 {
-        if self.is_invalid_target {
-            i32::MIN
-        } else {
-            TryInto::<i32>::try_into(self.fetch_ok_count).unwrap()
-                - TryInto::<i32>::try_into(self.fetch_err_count).unwrap()
-        }
-    }
-}
-
-impl Default for PeerStatus {
-    fn default() -> Self {
-        PeerStatus {
-            fetch_ok_count: 0,
-            fetch_err_count: 0,
-            is_invalid_target: false,
-        }
-    }
-}
-
-pub struct PeerTracker {
-    targets: HashMap<TypedKey, Target>,
-    peer_status: Cache<TypedKey, PeerStatus>,
-}
-
-const MAX_TRACKED_PEERS: u64 = 64;
-
-impl PeerTracker {
-    pub fn new() -> Self {
-        PeerTracker {
-            targets: HashMap::new(),
-            peer_status: Cache::builder()
-                .time_to_idle(Duration::from_secs(60))
-                .max_capacity(MAX_TRACKED_PEERS)
-                .build(),
-        }
-    }
-
-    pub async fn update(&mut self, key: TypedKey, target: Target) -> Option<Target> {
-        self.reset(&key).await;
-        self.targets.insert(key, target)
-    }
-
-    pub fn contains(&self, key: &TypedKey) -> bool {
-        self.targets.contains_key(key)
-    }
-
-    pub async fn fetch_ok(&mut self, key: &TypedKey) {
-        let mut status = match self.peer_status.get(&key).await {
-            Some(status) => status,
-            None => PeerStatus::default(),
-        };
-        status.fetch_err_count = 0;
-        status.is_invalid_target = false;
-        status.fetch_ok_count += 1;
-        self.peer_status.insert(key.clone(), status).await;
-    }
-
-    pub async fn fetch_err(&mut self, key: &TypedKey, err: Error) -> Option<Target> {
-        let mut status = match self.peer_status.get(&key).await {
-            Some(status) => status,
-            None => PeerStatus::default(),
-        };
-        let is_invalid_target = is_route_invalid(&err);
-        let is_newly_invalid = status.is_invalid_target != is_invalid_target;
-
-        status.fetch_err_count += 1;
-        status.is_invalid_target = is_invalid_target;
-        self.peer_status.insert(key.clone(), status).await;
-
-        if is_newly_invalid {
-            self.targets.get(key).map(|target| target.to_owned())
-        } else {
-            None
-        }
-    }
-
-    pub async fn reset(&mut self, key: &TypedKey) {
-        self.peer_status.remove(key).await;
-    }
-
-    pub fn share_target(&self, _block: &FileBlockFetch) -> Result<Option<(&TypedKey, &Target)>> {
-        // TODO: factor in have_map and block
-        let mut peers: Vec<(TypedKey, PeerStatus)> = self
-            .peer_status
-            .iter()
-            .map(|(key, status)| (*key, status))
-            .collect();
-        peers.sort_by(|(_, l_status), (_, r_status)| r_status.score().cmp(&l_status.score()));
-        if !peers.is_empty() {
-            if peers[0].1.score() < -1024 {
-                return Err(Error::msg("peer score dropped below minimum threshold"));
-            }
-            return Ok(self.targets.get_key_value(&peers[0].0));
-        }
-        if self.targets.is_empty() {
-            Ok(None)
-        } else {
-            Ok(self
-                .targets
-                .iter()
-                .nth(rand::random::<usize>() % self.targets.len()))
-        }
-    }
 }
 
 pub struct Clients {
@@ -164,7 +45,7 @@ pub struct Clients {
     pub share_resolver: Operator<share_resolver::Request>,
     pub share_target_rx: flume::Receiver<(TypedKey, Target)>,
     pub peer_resolver: Operator<peer_resolver::Request>,
-    pub discovered_peers_rx: flume::Receiver<(TypedKey, proto::PeerInfo)>,
+    pub peer_tracker: Arc<Mutex<PeerTracker>>,
 }
 
 #[derive(Debug)]
@@ -223,8 +104,6 @@ impl<N: Node> Fetcher<N> {
 
             verify_resp_tx,
             verify_resp_rx,
-
-            peer_tracker: PeerTracker::new(),
         }
     }
 
@@ -374,7 +253,8 @@ impl<N: Node> Fetcher<N> {
                 }
                 res = self.pending_fetch_rx.recv_async() => {
                     let block = res?;
-                    let (share_key, target) = match self.peer_tracker.share_target(&block)? {
+                    let peer_tracker = self.clients.peer_tracker.lock().await;
+                    let (share_key, target) = match peer_tracker.share_target(&block)? {
                         Some((share_key, target)) => (share_key, target),
                         None => {
                             match no_peers_backoff.next_backoff() {
@@ -398,6 +278,7 @@ impl<N: Node> Fetcher<N> {
                     }, self.fetch_resp_tx.clone()).await?;
                 }
                 res = self.fetch_resp_rx.recv_async() => {
+                    let mut peer_tracker = self.clients.peer_tracker.lock().await;
                     match res {
                         // An empty fetcher channel means we've received a
                         // response for all block requests. However, some of
@@ -405,7 +286,7 @@ impl<N: Node> Fetcher<N> {
                         Err(_) => continue,
                         Ok(block_fetcher::Response::Fetched { share_key, block, length }) => {
                             // Update peer stats with success
-                            self.peer_tracker.fetch_ok(&share_key).await;
+                            peer_tracker.fetch_ok(&share_key).await;
 
                             fetched_bytes += TryInto::<u64>::try_into(length).unwrap();
 
@@ -431,7 +312,7 @@ impl<N: Node> Fetcher<N> {
                         Ok(block_fetcher::Response::FetchFailed { share_key, block, err }) => {
                             warn!("failed to fetch block: {:?}", err);
                             // Update peer stats with failure
-                            if let Some(target) = self.peer_tracker.fetch_err(&share_key, err).await {
+                            if let Some(target) = peer_tracker.fetch_err(&share_key, err).await {
                                 self.clients.share_resolver.call(share_resolver::Request::Header {
                                     response_tx: ResponseChannel::default(),
                                     key: share_key,
@@ -499,7 +380,7 @@ impl<N: Node> Fetcher<N> {
                 res = self.clients.share_target_rx.recv_async() => {
                     let (key, target) = res?;
                     debug!("share target update for {key}: {target:?}");
-                    if let None = self.peer_tracker.update(key, target.to_owned()).await {
+                    if let None = self.clients.peer_tracker.lock().await.update(key, target.to_owned()).await {
                         // Never seen this peer before, advertise ourselves to it
                         self.node.request_advertise_peer(&target, &self.share.key).await?;
                         debug!("advertised our share {} to target {:?}", self.share.key, target);
@@ -507,27 +388,6 @@ impl<N: Node> Fetcher<N> {
                 }
 
                 // Resolve newly discovered peers
-                // TODO: this needs to be in the seeder, if we're done fetching we won't execute this
-                res = self.clients.discovered_peers_rx.recv_async() => {
-                    let (key, peer_info) = res?;
-                    if !self.peer_tracker.contains(peer_info.key()) {
-                        debug!("discovered peer {} at {key}", peer_info.key());
-                        self.clients.share_resolver.call(share_resolver::Request::Index{
-                            response_tx: ResponseChannel::default(),
-                            key,
-                            want_index_digest: Some(self.share.want_index_digest),
-                            root: self.share.root.to_owned(),
-                        }).await.err().map(|e| {
-                            warn!("failed to resolve share for discovered peer {} at {key}: {e}", peer_info.key());
-                        });
-                        self.clients.peer_resolver.call(peer_resolver::Request::Watch{
-                            response_tx: ResponseChannel::default(),
-                            key: peer_info.key().to_owned(),
-                        }).await.err().map(|e| {
-                            warn!("failed to watch peers of discovered peer {} at {key}: {e}", peer_info.key());
-                        });
-                    }
-                }
             }
         }
     }
