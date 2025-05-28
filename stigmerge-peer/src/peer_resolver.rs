@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, Level};
+use tracing::{debug, info, trace, warn, Level};
 use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -110,7 +110,7 @@ impl<P: Node> Actor for PeerResolver<P> {
     type Response = Response;
 
     /// Run the service until cancelled.
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
+    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -144,15 +144,31 @@ impl<P: Node> Actor for PeerResolver<P> {
                             }
                         }
                         VeilidUpdate::ValueChange(ch) => {
-                            if let Some(data) = ch.value {
-                                let share_key = match self.peer_to_share_map.get(&ch.key) {
-                                    Some(key) => key,
-                                    None => continue,
-                                };
-                                if data.data_size() > 0 {
-                                    if let Ok(peer_info) = PeerInfo::decode(data.data()) {
-                                        self.discovered_peer_tx.send_async((share_key.to_owned(), peer_info)).await?;
+                            match ch.value {
+                                Some(data) => {
+                                    let share_key = match self.peer_to_share_map.get(&ch.key) {
+                                        Some(key) => key,
+                                        None => {
+                                            warn!("received value change for unknown key: {}", ch.key);
+                                            continue;
+                                        },
+                                    };
+                                    if data.data_size() > 0 {
+                                        match PeerInfo::decode(data.data()) {
+                                            Ok(peer_info) => {
+                                                debug!("discovered peer at {share_key}: {}", peer_info.key());
+                                                self.discovered_peer_tx.send_async((share_key.to_owned(), peer_info)).await?;
+                                            }
+                                            Err(err) => {
+                                                warn!("failed to decode peer info from {share_key}: {}", err);
+                                            }
+                                        }
+                                    } else {
+                                        warn!("received empty value change from {share_key}");
                                     }
+                                }
+                                None => {
+                                    warn!("missing value data for key: {}", ch.key);
                                 }
                             }
                         }

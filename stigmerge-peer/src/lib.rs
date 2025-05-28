@@ -9,6 +9,7 @@ pub mod have_resolver;
 pub mod node;
 pub mod peer_announcer;
 pub mod peer_resolver;
+pub mod peer_tracker;
 mod piece_map;
 pub mod piece_verifier;
 pub mod proto;

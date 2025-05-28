@@ -1,12 +1,14 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{bail, Error, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
 use tokio::{
+    fs::File,
+    io::AsyncWriteExt,
     select,
-    sync::{watch, RwLock},
+    sync::{watch, Mutex, RwLock},
     task::JoinSet,
     time::sleep,
 };
@@ -21,7 +23,9 @@ use stigmerge_peer::{
     have_announcer::HaveAnnouncer,
     new_routing_context,
     node::{Node, Veilid},
+    peer_announcer::PeerAnnouncer,
     peer_resolver::PeerResolver,
+    peer_tracker::PeerTracker,
     piece_verifier::PieceVerifier,
     seeder::{self, Seeder},
     share_announcer::{self, ShareAnnouncer},
@@ -67,6 +71,7 @@ impl App {
 
         // Set up Veilid node
         let state_dir = self.cli.state_dir()?;
+        debug!(state_dir);
         let (routing_context, update_rx) = new_routing_context(&state_dir, None).await?;
         let node = Veilid::new(routing_context, update_rx).await?;
 
@@ -244,6 +249,10 @@ impl App {
         };
 
         info!("announced share, key: {share_key}");
+        self.write_state_file("index_digest", hex::encode(index_digest))
+            .await?;
+        self.write_state_file("share_key", share_key.to_string())
+            .await?;
 
         let piece_verifier = PieceVerifier::new(Arc::new(RwLock::new(index.clone())));
         let verified_rx = piece_verifier.subscribe_verified();
@@ -285,6 +294,29 @@ impl App {
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
 
+        // Create peer announcer for our share
+        let peer_announcer_op = Operator::new(
+            cancel.clone(),
+            PeerAnnouncer::new(
+                node.clone(),
+                &share_header.payload_digest(),
+                discovered_peers_rx.clone(),
+            ),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        );
+        tasks.spawn(peer_announcer_op.join());
+
+        let peer_tracker = Arc::new(Mutex::new(PeerTracker::new()));
+
+        let seeder_clients = seeder::Clients {
+            update_rx: node.subscribe_veilid_update(),
+            verified_rx,
+            discovered_peers_rx,
+            peer_tracker: peer_tracker.clone(),
+            share_resolver_tx: share_resolver_op.client(),
+            peer_resolver_tx: peer_resolver_op.client(),
+        };
+
         let fetcher_clients = FetcherClients {
             block_fetcher,
             piece_verifier: piece_verifier_op,
@@ -292,7 +324,7 @@ impl App {
             share_resolver: share_resolver_op,
             share_target_rx,
             peer_resolver: peer_resolver_op,
-            discovered_peers_rx,
+            peer_tracker,
         };
 
         // Create and run fetcher
@@ -303,18 +335,13 @@ impl App {
         tasks.spawn(fetcher.run(cancel.clone()));
 
         // Set up seeder
-        let seeder_clients = seeder::Clients {
-            update_rx: node.subscribe_veilid_update(),
-            verified_rx,
-        };
-
         let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
         let seeder_op = Operator::new(
             cancel.clone(),
             seeder,
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
-        tasks.spawn(async move { seeder_op.join().await });
+        tasks.spawn(seeder_op.join());
 
         info!("Seeding until ctrl-c...");
         let seed_progress = self.multi_progress.add(ProgressBar::new_spinner());
@@ -457,6 +484,16 @@ impl App {
                 sleep(Duration::from_millis(250)).await;
             }
         });
+        Ok(())
+    }
+
+    async fn write_state_file(&self, key: &str, value: String) -> Result<()> {
+        let state_dir = self.cli.state_dir()?;
+        let state_file = PathBuf::from(state_dir).join(key);
+        File::create(state_file)
+            .await?
+            .write_all(value.as_bytes())
+            .await?;
         Ok(())
     }
 }

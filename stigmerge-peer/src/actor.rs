@@ -181,6 +181,10 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
         Ok(())
     }
 
+    pub fn client(&self) -> flume::Sender<Req> {
+        self.request_tx.clone()
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn cancel(&self) {
         self.cancel.cancel();
