@@ -50,7 +50,6 @@ impl App {
         })
     }
 
-    #[tracing::instrument(skip_all)]
     pub async fn run(&mut self) -> Result<()> {
         self.multi_progress
             .println(format!("🐝 stigmerge {}", env!("CARGO_PKG_VERSION")))?;
@@ -79,7 +78,6 @@ impl App {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
     async fn run_with_node<T: Node + Sync + Send + 'static>(&self, node: T) -> Result<()> {
         let mut tasks = JoinSet::new();
 

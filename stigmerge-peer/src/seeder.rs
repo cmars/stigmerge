@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
+use anyhow::Context;
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
 use tokio::{
     fs::File,
@@ -8,7 +9,7 @@ use tokio::{
     sync::broadcast,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, Level};
+use tracing::trace;
 use veilid_core::VeilidUpdate;
 
 use crate::{
@@ -56,7 +57,6 @@ pub struct Seeder<N: Node> {
 }
 
 impl<N: Node> Seeder<N> {
-    #[tracing::instrument(skip_all)]
     pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
         Seeder {
             node,
@@ -98,7 +98,6 @@ impl<P: Node> Actor for Seeder<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -112,15 +111,15 @@ impl<P: Node> Actor for Seeder<P> {
                     return Ok(());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res?;
+                    let req = res.with_context(|| format!("seeder: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = self.clients.verified_rx.recv_async() => {
-                    let piece_state = res?;
+                    let piece_state = res.with_context(|| format!("seeder: receive verified piece update"))?;
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }
                 res = self.clients.update_rx.recv() => {
-                    let update = res?;
+                    let update = res.with_context(|| format!("seeder: receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
                             trace!("app_call: {:?}", veilid_app_call);
@@ -144,12 +143,11 @@ impl<P: Node> Actor for Seeder<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         match req {
             Request::HaveMap { mut response_tx } => {
                 let resp = Response::HaveMap(self.piece_map.clone());
-                response_tx.send(resp).await?;
+                response_tx.send(resp).await.with_context(|| "seeder: send response")?;
                 Ok(())
             }
         }

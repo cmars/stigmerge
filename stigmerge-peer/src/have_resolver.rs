@@ -1,8 +1,9 @@
 use std::{collections::HashMap, fmt};
 
+use anyhow::Context;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn, Level};
+use tracing::{info, warn};
 use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -130,7 +131,6 @@ impl<P: Node> Actor for HaveResolver<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -143,17 +143,18 @@ impl<P: Node> Actor for HaveResolver<P> {
                     return Ok(())
                 }
                 res = request_rx.recv_async() => {
-                    let req = res?;
+                    let req = res.with_context(|| format!("have_resolver: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    let update = res?;
+                    let update = res.with_context(|| format!("have_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {
                             match self.have_to_share_map.get(&ch.key) {
                                 Some(share_key) => {
                                     let have_map = self.node.resolve_have_map(&ch.key).await?;
-                                    self.have_map_tx.send_async((share_key.to_owned(), have_map)).await?;
+                                    self.have_map_tx.send_async((share_key.to_owned(), have_map)).await.with_context(
+                                        || format!("have_resolver: send have map"))?;
                                 }
                                 None => continue,
                             }
@@ -168,7 +169,6 @@ impl<P: Node> Actor for HaveResolver<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         let (resp, mut resp_tx) = match req {
             Request::Resolve { key, response_tx } => match self.node.resolve_have_map(&key).await {
@@ -260,7 +260,10 @@ impl<P: Node> Actor for HaveResolver<P> {
                 }
             }
         };
-        resp_tx.send(resp).await?;
+        resp_tx
+            .send(resp)
+            .await
+            .with_context(|| "have_resolver: send response")?;
 
         Ok(())
     }

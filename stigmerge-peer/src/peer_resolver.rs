@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use anyhow::Context;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, Level};
+use tracing::{debug, info, trace};
 use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -110,7 +111,6 @@ impl<P: Node> Actor for PeerResolver<P> {
     type Response = Response;
 
     /// Run the service until cancelled.
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -123,11 +123,11 @@ impl<P: Node> Actor for PeerResolver<P> {
                     return Ok(())
                 }
                 res = request_rx.recv_async() => {
-                    let req = res?;
+                    let req = res.with_context(|| format!("peer_resolver: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    let update = res?;
+                    let update = res.with_context(|| format!("peer_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
                             trace!("app_call: {:?}", veilid_app_call);
@@ -151,7 +151,8 @@ impl<P: Node> Actor for PeerResolver<P> {
                                 };
                                 if data.data_size() > 0 {
                                     if let Ok(peer_info) = PeerInfo::decode(data.data()) {
-                                        self.discovered_peer_tx.send_async((share_key.to_owned(), peer_info)).await?;
+                                        self.discovered_peer_tx.send_async((share_key.to_owned(), peer_info)).await
+                                            .with_context(|| format!("peer_resolver: send discovered peer"))?;
                                     }
                                 }
                             }
@@ -167,7 +168,6 @@ impl<P: Node> Actor for PeerResolver<P> {
     }
 
     /// Handle a peer_resolver request, provide a response.
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         match req {
             Request::Resolve {
@@ -188,7 +188,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                     },
                 };
 
-                response_tx.send(resp).await?;
+                response_tx.send(resp).await.with_context(|| "peer_resolver: send response")?;
             }
             Request::Watch {
                 key,
@@ -226,7 +226,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                     },
                 };
 
-                response_tx.send(resp).await?;
+                response_tx.send(resp).await.with_context(|| "peer_resolver: send response")?;
             }
             Request::CancelWatch {
                 key,
@@ -253,7 +253,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                     }
                 };
 
-                response_tx.send(resp).await?;
+                response_tx.send(resp).await.with_context(|| "peer_resolver: send response")?;
             }
         }
 

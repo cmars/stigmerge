@@ -33,7 +33,6 @@ pub use node::{Node, Veilid};
 #[cfg(test)]
 pub mod tests;
 
-#[tracing::instrument(skip_all, fields(state_dir, ns), err)]
 pub async fn new_routing_context(
     state_dir: &str,
     ns: Option<String>,

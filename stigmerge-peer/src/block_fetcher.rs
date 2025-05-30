@@ -5,13 +5,14 @@ use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::select;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, Level};
+use tracing::trace;
 use veilid_core::Target;
 
 use crate::actor::{Actor, Respondable, ResponseChannel};
@@ -40,7 +41,6 @@ impl<N: Node> BlockFetcher<N> {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
     async fn fetch_block(
         &mut self,
         target: &Target,
@@ -145,7 +145,6 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -157,7 +156,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                     return Ok(())
                 }
                 res = request_rx.recv_async() => {
-                    let req = res?;
+                    let req = res.with_context(|| format!("block_fetcher: receive request"))?;
                     if let Err(e) = self.handle_request(req).await {
                         if is_cancelled(&e) {
                             return Ok(());
@@ -172,7 +171,6 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         let (resp, mut resp_tx) = match req {
             Request::Fetch {

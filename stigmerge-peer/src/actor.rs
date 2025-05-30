@@ -111,7 +111,6 @@ pub struct Operator<Req> {
 }
 
 impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
-    #[tracing::instrument(skip_all)]
     pub fn new<A: Actor<Request = Req> + Clone + Send + 'static, R: Runner<A> + Send + 'static>(
         cancel: CancellationToken,
         actor: A,
@@ -129,7 +128,6 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
         }
     }
 
-    #[tracing::instrument(skip_all)]
     pub fn new_clone_pool<
         A: Actor<Request = Req> + Clone + Send + 'static,
         R: Runner<A> + Clone + Send + 'static,
@@ -181,7 +179,6 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
     pub async fn cancel(&self) {
         self.cancel.cancel();
     }

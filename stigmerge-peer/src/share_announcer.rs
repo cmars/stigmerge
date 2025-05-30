@@ -1,9 +1,10 @@
 use std::fmt;
 
+use anyhow::Context;
 use stigmerge_fileindex::Index;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, Level};
+use tracing::info;
 use veilid_core::{Target, VeilidUpdate};
 
 use crate::{
@@ -39,7 +40,6 @@ impl<N: Node> ShareAnnouncer<N> {
         self.share.as_ref().map(|share| (&share.key, &share.target))
     }
 
-    #[tracing::instrument(skip_all, err)]
     async fn announce(&mut self) -> Result<()> {
         let (key, target, header) = self.node.announce_index(&self.index).await?;
         self.share = Some(ShareAnnounce {
@@ -50,7 +50,6 @@ impl<N: Node> ShareAnnouncer<N> {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
     async fn reannounce(&mut self) -> Result<Response> {
         match self.share.as_mut() {
             Some(ShareAnnounce {
@@ -117,7 +116,6 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -135,17 +133,17 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                             return Ok(());
                         }
                         res = request_rx.recv_async() => {
-                            let req = res?;
+                            let req = res.with_context(|| format!("share_announcer: receive request"))?;
                             self.handle_request(req).await?;
                         }
                         res = update_rx.recv() => {
                             if let Target::PrivateRoute(ref route_id) = target {
-                                let update = res?;
+                                let update = res.with_context(|| format!("share_announcer: receive veilid update"))?;
                                 match update {
                                     VeilidUpdate::RouteChange(route_change) => {
                                         if route_change.dead_routes.contains(route_id) {
                                             info!("route changed, reannouncing");
-                                            self.reannounce().await?;
+                                            self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
                                         }
                                     },
                                     _ => {}
@@ -158,14 +156,13 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         let response = match self.reannounce().await {
             Ok(resp) => resp,
             Err(_) => Response::NotAvailable,
         };
 
-        req.response_tx().send(response).await?;
+        req.response_tx().send(response).await.with_context(|| "share_announcer: send response")?;
 
         Ok(())
     }
