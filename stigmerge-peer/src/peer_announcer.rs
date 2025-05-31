@@ -1,8 +1,9 @@
 use std::{collections::HashMap, fmt};
 
+use anyhow::Context;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, Level};
+use tracing::{debug, trace};
 use veilid_core::VeilidUpdate;
 
 use crate::{
@@ -30,7 +31,6 @@ pub const DEFAULT_MAX_PEERS: u16 = 32;
 
 impl<N: Node> PeerAnnouncer<N> {
     /// Create a new peer_announcer service.
-    #[tracing::instrument(skip_all)]
     pub fn new(node: N, payload_digest: &[u8]) -> Self {
         Self {
             node,
@@ -41,7 +41,6 @@ impl<N: Node> PeerAnnouncer<N> {
         }
     }
 
-    #[tracing::instrument(skip_all, ret)]
     fn assign_peer_index(&mut self, key: TypedKey) -> u16 {
         for (i, maybe_key) in self.peers.iter_mut().enumerate() {
             if let None = maybe_key {
@@ -126,7 +125,6 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -142,11 +140,11 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     return Ok(())
                 }
                 res = request_rx.recv_async() => {
-                    let req = res?;
+                    let req = res.with_context(|| format!("peer_announcer: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    let update = res?;
+                    let update = res.with_context(|| format!("peer_announcer: receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
                             trace!("app_call: {:?}", veilid_app_call);
@@ -169,7 +167,6 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err, level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         match req {
             Request::Announce {
@@ -192,7 +189,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     Response::Ok
                 };
 
-                response_tx.send(resp).await?;
+                response_tx.send(resp).await.with_context(|| "peer_announcer: send response")?;
             }
             Request::Redact {
                 key,
@@ -218,7 +215,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     Response::Ok
                 };
 
-                response_tx.send(resp).await?;
+                response_tx.send(resp).await.with_context(|| "peer_announcer: send response")?;
             }
             Request::Reset { mut response_tx } => {
                 let resp = match self
@@ -236,7 +233,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     },
                 };
 
-                response_tx.send(resp).await?;
+                response_tx.send(resp).await.with_context(|| "peer_announcer: send response")?;
             }
         }
 

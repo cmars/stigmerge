@@ -1,8 +1,8 @@
 use std::{fmt, ops::Deref, sync::Arc, time::Duration};
 
+use anyhow::Context;
 use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{warn, Level};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
@@ -28,7 +28,6 @@ pub struct HaveAnnouncer<N: Node> {
 
 impl<N: Node> HaveAnnouncer<N> {
     /// Create a new have_announcer service.
-    #[tracing::instrument(skip_all)]
     pub fn new(node: N, key: TypedKey) -> Self {
         Self {
             node,
@@ -108,7 +107,6 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -122,7 +120,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
                     return Ok(())
                 }
                 res = request_rx.recv_async() => {
-                    let req = res?;
+                    let req = res.with_context(|| format!("have_announcer: receive request"))?;
                     if let Err(e) = self.handle_request(req).await {
                         if is_cancelled(&e) {
                             return Ok(());
@@ -134,7 +132,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
                 _ = interval.tick() => {
                     if changed {
                         let have_map = self.pieces_map.read().await;
-                        self.node.announce_have_map(self.key.to_owned(), have_map.deref()).await?;
+                        self.node.announce_have_map(self.key.to_owned(), have_map.deref()).await.with_context(|| format!("have_announcer: announce have map"))?;
                         changed = false;
                     }
                 }
@@ -142,7 +140,6 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
         }
     }
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<Self::Response> {
         let mut pieces_map = self.pieces_map.write().await;
         let mut response_tx = match req {
@@ -165,7 +162,10 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
                 response_tx
             }
         };
-        response_tx.send(()).await?;
+        response_tx
+            .send(())
+            .await
+            .with_context(|| format!("have_announcer: send response"))?;
         Ok(())
     }
 }

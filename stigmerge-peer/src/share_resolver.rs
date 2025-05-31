@@ -1,5 +1,6 @@
 use std::{collections::HashSet, fmt, path::PathBuf};
 
+use anyhow::Context;
 use stigmerge_fileindex::Index;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
@@ -215,11 +216,11 @@ impl<P: Node> Actor for ShareResolver<P> {
                     return Ok(())
                 }
                 res = request_rx.recv_async() => {
-                    let req = res?;
+                    let req = res.with_context(|| format!("share_resolver: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    let update = res?;
+                    let update = res.with_context(|| format!("share_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {
                             if !self.watching.contains(&ch.key) {
@@ -324,7 +325,7 @@ impl<P: Node> Actor for ShareResolver<P> {
         }
         trace!(?resp);
 
-        response_tx.send(resp).await?;
+        response_tx.send(resp).await.with_context(|| "share_resolver: send response")?;
         Ok(())
     }
 }

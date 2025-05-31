@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::time::Duration;
 
+use anyhow::Context;
 use backoff::backoff::Backoff;
 use moka::future::Cache;
 use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
 use tokio::sync::watch;
 use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn, Level};
+use tracing::{debug, warn};
 use veilid_core::Target;
 
 use crate::actor::ResponseChannel;
@@ -199,7 +200,6 @@ impl Status {
 }
 
 impl<N: Node> Fetcher<N> {
-    #[tracing::instrument(skip_all, fields(share))]
     pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
         let (status_tx, status_rx) = watch::channel(Status::NotStarted);
         let (pending_fetch_tx, pending_fetch_rx) = flume::unbounded();
@@ -228,12 +228,10 @@ impl<N: Node> Fetcher<N> {
         }
     }
 
-    #[tracing::instrument(skip_all)]
     pub fn subscribe_fetcher_status(&self) -> watch::Receiver<Status> {
         self.status_rx.clone()
     }
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         loop {
             self.state = match self.state {
@@ -245,7 +243,6 @@ impl<N: Node> Fetcher<N> {
         }
     }
 
-    #[tracing::instrument(skip_all, err, ret)]
     async fn index(&mut self, cancel: CancellationToken) -> Result<State> {
         let indexer = Indexer::from_wanted(&self.share.want_index).await?;
 
@@ -295,7 +292,6 @@ impl<N: Node> Fetcher<N> {
         Ok(State::Planning)
     }
 
-    #[tracing::instrument(skip_all, err, ret)]
     async fn plan(&mut self, cancel: CancellationToken) -> Result<State> {
         let diff = self.share.want_index.diff(&self.have_index);
         let mut want_length = 0;
@@ -313,7 +309,7 @@ impl<N: Node> Fetcher<N> {
                             piece_offset: want_block.piece_offset,
                             block_index: want_block.block_index,
                         }) => {
-                    res?;
+                    res.with_context(|| format!("fetcher: enqueue block fetch"))?;
                     want_length += want_block.block_length;
                 }
             }
@@ -334,7 +330,7 @@ impl<N: Node> Fetcher<N> {
                     ),
                     response_tx: ResponseChannel::default(),
                 }, self.verify_resp_tx.clone()) => {
-                    res?;
+                    res.with_context(|| format!("fetcher: defer verify piece"))?;
                     have_length += have_block.block_length;
                 }
             }
@@ -351,7 +347,6 @@ impl<N: Node> Fetcher<N> {
         })
     }
 
-    #[tracing::instrument(skip_all, err, ret)]
     async fn fetch(&mut self, cancel: CancellationToken) -> Result<State> {
         let mut verified_pieces = 0u64;
         let mut fetched_bytes = self.status_tx.borrow().deref().position().unwrap_or(0);
@@ -373,8 +368,9 @@ impl<N: Node> Fetcher<N> {
                     return Ok(State::Done)
                 }
                 res = self.pending_fetch_rx.recv_async() => {
-                    let block = res?;
-                    let (share_key, target) = match self.peer_tracker.share_target(&block)? {
+                    let block = res.with_context(|| format!("fetcher: receive pending block fetch"))?;
+                    let (share_key, target) = match self.peer_tracker.share_target(&block).with_context(
+                            || format!("fetcher: choose share target"))? {
                         Some((share_key, target)) => (share_key, target),
                         None => {
                             match no_peers_backoff.next_backoff() {
@@ -395,10 +391,10 @@ impl<N: Node> Fetcher<N> {
                         target: target.to_owned(),
                         block,
                         flush: self.pending_fetch_rx.is_empty(),
-                    }, self.fetch_resp_tx.clone()).await?;
+                    }, self.fetch_resp_tx.clone()).await.with_context(|| format!("fetcher: defer block fetch"))?;
                 }
                 res = self.fetch_resp_rx.recv_async() => {
-                    match res {
+                    match res.with_context(|| format!("fetcher: receive block fetch response")) {
                         // An empty fetcher channel means we've received a
                         // response for all block requests. However, some of
                         // these might fail to validate.
@@ -426,7 +422,8 @@ impl<N: Node> Fetcher<N> {
                                     block.block_index,
                                 ),
                                 response_tx: ResponseChannel::default(),
-                            }, self.verify_resp_tx.clone()).await?;
+                            }, self.verify_resp_tx.clone()).await.with_context(
+                                || format!("fetcher: defer verifying piece for fetched block"))?;
                         }
                         Ok(block_fetcher::Response::FetchFailed { share_key, block, err }) => {
                             warn!("failed to fetch block: {:?}", err);
@@ -436,9 +433,10 @@ impl<N: Node> Fetcher<N> {
                                     response_tx: ResponseChannel::default(),
                                     key: share_key,
                                     prior_target: Some(target),
-                                }).await?;
+                                }).await.with_context(|| format!("fetcher: re-resolve share target"))?;
                             }
-                            self.pending_fetch_tx.send_async(block).await?;
+                            self.pending_fetch_tx.send_async(block).await.with_context(
+                                || format!("fetcher: requeue failed block fetch"))?;
                         }
                     }
                 }
@@ -459,7 +457,7 @@ impl<N: Node> Fetcher<N> {
                                 have_announcer::Request::Set {
                                     response_tx: ResponseChannel::default(),
                                     piece_index: piece_index.try_into().unwrap(),
-                                }).await?;
+                                }).await.with_context(|| format!("fetcher: update have_map with verified piece"))?;
 
                             if index_complete {
                                 self.status_tx.send_replace(Status::Done);
@@ -490,24 +488,24 @@ impl<N: Node> Fetcher<N> {
                                         piece_index,
                                         piece_offset: 0,
                                         block_index
-                                    }).await?;
+                                    }).await.with_context(|| format!("fetcher: re-fetch block for invalid piece"))?;
                             }
                         }
                         piece_verifier::Response::IncompletePiece { .. } => {}
                     }
                 }
                 res = self.clients.share_target_rx.recv_async() => {
-                    let (key, target) = res?;
+                    let (key, target) = res.with_context(|| format!("fetcher: receive share target update"))?;
                     debug!("share target update for {key}: {target:?}");
                     if let None = self.peer_tracker.update(key, target.to_owned()).await {
                         // Never seen this peer before, advertise ourselves to it
-                        self.node.request_advertise_peer(&target, &self.share.key).await?;
+                        self.node.request_advertise_peer(&target, &self.share.key).await.with_context(|| format!("fetch: advertising ourselves to new peer"))?;
                     }
                 }
 
                 // Resolve newly discovered peers
                 res = self.clients.discovered_peers_rx.recv_async() => {
-                    let (key, peer_info) = res?;
+                    let (key, peer_info) = res.with_context(|| format!("fetcher: receive discovered peer"))?;
                     if !self.peer_tracker.contains(peer_info.key()) {
                         self.clients.share_resolver.call(share_resolver::Request::Index{
                             response_tx: ResponseChannel::default(),
@@ -529,7 +527,6 @@ impl<N: Node> Fetcher<N> {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
     async fn join(self) -> Result<()> {
         try_join!(
             self.clients.piece_verifier.join(),
@@ -537,7 +534,8 @@ impl<N: Node> Fetcher<N> {
             self.clients.have_announcer.join(),
             self.clients.share_resolver.join(),
             self.clients.peer_resolver.join(),
-        )?;
+        )
+        .with_context(|| format!("fetcher: join operators"))?;
         Ok(())
     }
 }

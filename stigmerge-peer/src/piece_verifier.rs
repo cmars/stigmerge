@@ -1,5 +1,6 @@
 use std::{cmp::Ordering, collections::HashMap, io::SeekFrom, sync::Arc};
 
+use anyhow::Context;
 use sha2::{Digest, Sha256};
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS, PIECE_SIZE_BYTES};
 use tokio::{
@@ -9,7 +10,6 @@ use tokio::{
     sync::RwLock,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{warn, Level};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
@@ -27,7 +27,6 @@ pub struct PieceVerifier {
 }
 
 impl PieceVerifier {
-    #[tracing::instrument(skip_all)]
     pub fn new(index: Arc<RwLock<Index>>) -> PieceVerifier {
         let (verified_tx, verified_rx) = flume::unbounded();
         PieceVerifier {
@@ -142,7 +141,6 @@ impl Actor for PieceVerifier {
     type Request = Request;
     type Response = Response;
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn run(
         &mut self,
         cancel: CancellationToken,
@@ -154,14 +152,13 @@ impl Actor for PieceVerifier {
                     return Ok(());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res?;
+                    let req = res.with_context(|| format!("piece_verifier: receive request"))?;
                     self.handle_request(req).await?;
                 }
             }
         }
     }
 
-    #[tracing::instrument(skip_all, err(level = Level::TRACE), level = Level::TRACE)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         // update piece state
         let prior_state = match self.piece_states.get_mut(&req.key()) {
@@ -182,7 +179,7 @@ impl Actor for PieceVerifier {
                 .await?
             {
                 self.verified_pieces += 1;
-                self.verified_tx.send_async(req.piece_state()).await?;
+                self.verified_tx.send_async(req.piece_state()).await.with_context(|| "piece_verifier: notify verified piece")?;
                 Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
@@ -204,7 +201,7 @@ impl Actor for PieceVerifier {
         };
 
         let mut response_tx = req.response_tx();
-        response_tx.send(resp).await?;
+        response_tx.send(resp).await.with_context(|| "piece_verifier: send response")?;
 
         Ok(())
     }
