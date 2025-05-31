@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use veilid_core::Target;
 
-use crate::actor::ResponseChannel;
+use crate::actor::{Actor, Respondable, ResponseChannel};
 use crate::error::is_route_invalid;
 use crate::node::TypedKey;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
@@ -168,7 +168,7 @@ pub struct Clients {
     pub discovered_peers_rx: flume::Receiver<(TypedKey, proto::PeerInfo)>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum State {
     Indexing,
     Planning,
@@ -230,17 +230,6 @@ impl<N: Node> Fetcher<N> {
 
     pub fn subscribe_fetcher_status(&self) -> watch::Receiver<Status> {
         self.status_rx.clone()
-    }
-
-    pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
-        loop {
-            self.state = match self.state {
-                State::Indexing => self.index(cancel.clone()).await?,
-                State::Planning => self.plan(cancel.clone()).await?,
-                State::Fetching => self.fetch(cancel.clone()).await?,
-                State::Done => return self.join().await,
-            }
-        }
     }
 
     async fn index(&mut self, cancel: CancellationToken) -> Result<State> {
@@ -525,6 +514,109 @@ impl<N: Node> Fetcher<N> {
                 }
             }
         }
+    }
+
+    async fn next(&mut self, cancel: CancellationToken) -> Result<State> {
+        let state = match self.state {
+            State::Indexing => self
+                .index(cancel.clone())
+                .await
+                .with_context(|| format!("indexing"))?,
+            State::Planning => self
+                .plan(cancel.clone())
+                .await
+                .with_context(|| format!("planning"))?,
+            State::Fetching => self
+                .fetch(cancel.clone())
+                .await
+                .with_context(|| format!("fetching"))?,
+            State::Done => {
+                cancel.cancelled().await;
+                State::Done
+            }
+        };
+        Ok(state)
+    }
+}
+
+pub enum Request {
+    State {
+        response_tx: ResponseChannel<Response>,
+    },
+    ShareInfo {
+        response_tx: ResponseChannel<Response>,
+    },
+}
+
+impl Respondable for Request {
+    type Response = Response;
+
+    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
+        match self {
+            Request::State { response_tx, .. } => *response_tx = ch,
+            Request::ShareInfo { response_tx, .. } => *response_tx = ch,
+        }
+    }
+
+    fn response_tx(self) -> ResponseChannel<Self::Response> {
+        match self {
+            Request::State { response_tx, .. } => response_tx,
+            Request::ShareInfo { response_tx, .. } => response_tx,
+        }
+    }
+}
+
+pub enum Response {
+    State { state: State },
+    ShareInfo { share_info: ShareInfo },
+}
+
+impl<N: Node> Actor for Fetcher<N> {
+    type Request = Request;
+
+    type Response = Response;
+
+    async fn run(
+        &mut self,
+        cancel: CancellationToken,
+        request_rx: flume::Receiver<Self::Request>,
+    ) -> Result<()> {
+        loop {
+            select! {
+                _ = cancel.cancelled() => {
+                    return Ok(())
+                }
+                res = self.next(cancel.child_token()) => {
+                    let state = res?;
+                    self.state = state;
+                }
+                res = request_rx.recv_async() => {
+                    let req = res.with_context(|| format!("receive request"))?;
+                    self.handle_request(req).await?;
+                }
+            }
+        }
+    }
+
+    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
+        let (resp, mut response_tx) = match req {
+            Request::State { response_tx } => (
+                Response::State {
+                    state: self.state.clone(),
+                },
+                response_tx,
+            ),
+            Request::ShareInfo { response_tx } => (
+                Response::ShareInfo {
+                    share_info: self.share.clone(),
+                },
+                response_tx,
+            ),
+        };
+        response_tx
+            .send(resp)
+            .await
+            .with_context(|| format!("fetcher: send response"))
     }
 
     async fn join(self) -> Result<()> {

@@ -6,6 +6,20 @@ use std::sync::Arc;
 
 use backoff::backoff::Backoff;
 use clap::Parser;
+use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
+use stigmerge_peer::block_fetcher::{self, BlockFetcher};
+use stigmerge_peer::new_routing_context;
+use stigmerge_peer::node::Veilid;
+use stigmerge_peer::share_resolver::{self, ShareResolver};
+use stigmerge_peer::types::FileBlockFetch;
+use stigmerge_peer::Error;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
+use tokio::try_join;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+use veilid_core::TypedKey;
 
 /// Fetch block CLI arguments
 #[derive(Parser, Debug)]
@@ -35,23 +49,6 @@ struct Args {
     #[arg(short, long, help = "Output file path")]
     output: Option<PathBuf>,
 }
-
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
-
-use tokio::sync::Mutex;
-use tokio::try_join;
-use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
-
-use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
-use stigmerge_peer::block_fetcher::{self, BlockFetcher};
-use stigmerge_peer::new_routing_context;
-use stigmerge_peer::node::Veilid;
-use stigmerge_peer::share_resolver::{self, ShareResolver};
-use stigmerge_peer::types::FileBlockFetch;
-use stigmerge_peer::Error;
-use veilid_core::TypedKey;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {

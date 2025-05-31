@@ -267,6 +267,10 @@ impl<P: Node> Actor for HaveResolver<P> {
 
         Ok(())
     }
+
+    async fn join(self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl<P: Node + 'static> Clone for HaveResolver<P> {

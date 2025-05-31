@@ -36,6 +36,9 @@ pub trait Actor {
         &mut self,
         req: Self::Request,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    /// Join any background tasks managed by the actor.
+    fn join(self) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 pub enum ResponseChannel<Resp> {
@@ -111,16 +114,15 @@ pub struct Operator<Req> {
 }
 
 impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
-    pub fn new<A: Actor<Request = Req> + Clone + Send + 'static, R: Runner<A> + Send + 'static>(
+    pub fn new<A: Actor<Request = Req> + Send + 'static, R: Runner<A> + Send + 'static>(
         cancel: CancellationToken,
         actor: A,
         mut runner: R,
     ) -> Self {
         let (request_tx, request_rx) = flume::unbounded();
-        let task_actor = actor.clone();
         let task_cancel = cancel.child_token();
         let mut tasks = JoinSet::new();
-        tasks.spawn(async move { runner.run(task_actor, task_cancel, request_rx).await });
+        tasks.spawn(async move { runner.run(actor, task_cancel, request_rx).await });
         Self {
             cancel,
             request_tx,
@@ -218,7 +220,9 @@ impl<
         cancel: CancellationToken,
         request_rx: flume::Receiver<A::Request>,
     ) -> Result<()> {
-        actor.run(cancel, request_rx).await
+        let res = actor.run(cancel, request_rx).await;
+        actor.join().await?;
+        res
     }
 }
 
@@ -241,6 +245,7 @@ impl<
         loop {
             select! {
                 _ = cancel.cancelled() => {
+                    actor.join().await?;
                     return Err(CancelError.into())
                 }
                 _ = actor.run(cancel.child_token(), request_rx.clone()) => {
@@ -364,6 +369,10 @@ impl<
             });
             select! {
                 _ = cancel.cancelled() => {
+                    match Arc::<Mutex<A>>::try_unwrap(actor).ok() {
+                        Some(a) => a.into_inner().join().await?,
+                        None => warn!("failed to join actor tasks"),
+                    };
                     return Err(CancelError.into())
                 }
                 join_res = actor_task => {

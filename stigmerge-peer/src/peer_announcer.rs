@@ -189,7 +189,10 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     Response::Ok
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_announcer: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "peer_announcer: send response")?;
             }
             Request::Redact {
                 key,
@@ -215,7 +218,10 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     Response::Ok
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_announcer: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "peer_announcer: send response")?;
             }
             Request::Reset { mut response_tx } => {
                 let resp = match self
@@ -233,10 +239,17 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     },
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_announcer: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "peer_announcer: send response")?;
             }
         }
 
+        Ok(())
+    }
+
+    async fn join(self) -> Result<()> {
         Ok(())
     }
 }

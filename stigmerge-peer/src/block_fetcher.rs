@@ -212,6 +212,10 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         resp_tx.send(resp).await?;
         Ok(())
     }
+
+    async fn join(self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl<P: Node> Clone for BlockFetcher<P> {

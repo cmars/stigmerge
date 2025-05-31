@@ -5,6 +5,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use stigmerge_peer::actor::ResponseChannel;
+use stigmerge_peer::actor::UntilCancelled;
+use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
+use stigmerge_peer::block_fetcher::BlockFetcher;
+use stigmerge_peer::fetcher::{Clients, Fetcher};
+use stigmerge_peer::have_announcer::HaveAnnouncer;
+use stigmerge_peer::new_routing_context;
+use stigmerge_peer::node::Veilid;
+use stigmerge_peer::peer_resolver::PeerResolver;
+use stigmerge_peer::piece_verifier::PieceVerifier;
+use stigmerge_peer::share_resolver::{self, ShareResolver};
+use stigmerge_peer::types::ShareInfo;
+use stigmerge_peer::Error;
+use tokio::select;
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+use veilid_core::TypedKey;
 
 /// Fetcher resolver CLI arguments
 #[derive(Parser, Debug)]
@@ -22,27 +41,6 @@ struct Args {
     #[arg(default_value = ".", help = "Directory to download files to")]
     download_dir: PathBuf,
 }
-
-use stigmerge_peer::actor::ResponseChannel;
-use stigmerge_peer::actor::UntilCancelled;
-use stigmerge_peer::peer_resolver::PeerResolver;
-use tokio::select;
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
-use tracing::info;
-
-use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
-use stigmerge_peer::block_fetcher::BlockFetcher;
-use stigmerge_peer::fetcher::{Clients, Fetcher};
-use stigmerge_peer::have_announcer::HaveAnnouncer;
-use stigmerge_peer::new_routing_context;
-use stigmerge_peer::node::Veilid;
-use stigmerge_peer::piece_verifier::PieceVerifier;
-use stigmerge_peer::share_resolver::{self, ShareResolver};
-use stigmerge_peer::types::ShareInfo;
-use stigmerge_peer::Error;
-use veilid_core::TypedKey;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {
@@ -144,21 +142,21 @@ async fn main() -> std::result::Result<(), Error> {
     };
 
     // Create and run fetcher
-    let fetcher = Fetcher::new(node.clone(), share, clients);
-
     info!("Starting fetch...");
+    let fetcher_op = Operator::new(
+        cancel.clone(),
+        Fetcher::new(node.clone(), share, clients),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
+    );
 
     select! {
-        res = fetcher.run(cancel.clone()) => {
-            res?;
-            info!("Fetch complete!");
-            cancel.cancel();
-        }
         _ = tokio::signal::ctrl_c() => {
             info!("Cancelled");
             cancel.cancel();
         }
     }
+
+    fetcher_op.join().await?;
 
     Ok(())
 }

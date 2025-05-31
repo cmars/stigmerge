@@ -5,6 +5,21 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::Parser;
+use stigmerge_fileindex::Indexer;
+use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
+use stigmerge_peer::content_addressable::ContentAddressable;
+use stigmerge_peer::node::Veilid;
+use stigmerge_peer::peer_announcer::{self, PeerAnnouncer};
+use stigmerge_peer::proto::{AdvertisePeerRequest, Decoder};
+use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
+use stigmerge_peer::share_resolver::{self, ShareResolver};
+use stigmerge_peer::{new_routing_context, peer_resolver};
+use stigmerge_peer::{proto, Error, Node};
+use tokio::select;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+use veilid_core::{TypedKey, VeilidUpdate};
 
 /// Peer announce CLI arguments
 #[derive(Parser, Debug)]
@@ -18,23 +33,6 @@ struct Args {
     #[arg(help = "List of peer share keys to announce")]
     peer_keys: Vec<String>,
 }
-
-use stigmerge_peer::content_addressable::ContentAddressable;
-use stigmerge_peer::proto::{AdvertisePeerRequest, Decoder};
-use stigmerge_peer::share_resolver::{self, ShareResolver};
-use tokio::select;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
-use veilid_core::{TypedKey, VeilidUpdate};
-
-use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
-use stigmerge_peer::node::Veilid;
-use stigmerge_peer::peer_announcer::{self, PeerAnnouncer};
-use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
-use stigmerge_peer::{new_routing_context, peer_resolver};
-use stigmerge_peer::{proto, Error, Node};
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {

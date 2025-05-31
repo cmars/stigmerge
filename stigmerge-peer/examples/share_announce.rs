@@ -5,6 +5,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use stigmerge_fileindex::Indexer;
+use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
+use stigmerge_peer::new_routing_context;
+use stigmerge_peer::node::Veilid;
+use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
+use stigmerge_peer::Error;
+use tokio::select;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 /// Share announce CLI arguments
 #[derive(Parser, Debug)]
@@ -14,18 +24,6 @@ struct Args {
     #[arg(help = "Path to the file to announce")]
     file: PathBuf,
 }
-
-use tokio::select;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
-use tracing::info;
-
-use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
-use stigmerge_peer::new_routing_context;
-use stigmerge_peer::node::Veilid;
-use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
-use stigmerge_peer::Error;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {

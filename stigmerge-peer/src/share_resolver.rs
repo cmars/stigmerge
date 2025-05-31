@@ -325,7 +325,14 @@ impl<P: Node> Actor for ShareResolver<P> {
         }
         trace!(?resp);
 
-        response_tx.send(resp).await.with_context(|| "share_resolver: send response")?;
+        response_tx
+            .send(resp)
+            .await
+            .with_context(|| "share_resolver: send response")?;
+        Ok(())
+    }
+
+    async fn join(self) -> Result<()> {
         Ok(())
     }
 }
