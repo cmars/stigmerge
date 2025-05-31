@@ -5,6 +5,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use stigmerge_fileindex::Indexer;
+use stigmerge_peer::actor::{
+    ConnectionState, OneShot, Operator, ResponseChannel, WithVeilidConnection,
+};
+use stigmerge_peer::content_addressable::ContentAddressable;
+use stigmerge_peer::node::Veilid;
+use stigmerge_peer::seeder::{self, Seeder};
+use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
+use stigmerge_peer::types::{PieceState, ShareInfo};
+use stigmerge_peer::Error;
+use stigmerge_peer::{new_routing_context, piece_verifier, Node};
+use tokio::select;
+use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 /// Seeder announcer CLI arguments
 #[derive(Parser, Debug)]
@@ -14,23 +29,6 @@ struct Args {
     #[arg(help = "Path to the file to seed")]
     file: PathBuf,
 }
-
-use stigmerge_peer::seeder::{self, Seeder};
-use stigmerge_peer::types::{PieceState, ShareInfo};
-use tokio::select;
-use tokio::sync::{Mutex, RwLock};
-use tokio_util::sync::CancellationToken;
-use tracing::info;
-
-use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{
-    ConnectionState, OneShot, Operator, ResponseChannel, WithVeilidConnection,
-};
-use stigmerge_peer::content_addressable::ContentAddressable;
-use stigmerge_peer::node::Veilid;
-use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
-use stigmerge_peer::Error;
-use stigmerge_peer::{new_routing_context, piece_verifier, Node};
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {

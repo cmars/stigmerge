@@ -188,7 +188,10 @@ impl<P: Node> Actor for PeerResolver<P> {
                     },
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_resolver: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "peer_resolver: send response")?;
             }
             Request::Watch {
                 key,
@@ -226,7 +229,10 @@ impl<P: Node> Actor for PeerResolver<P> {
                     },
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_resolver: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "peer_resolver: send response")?;
             }
             Request::CancelWatch {
                 key,
@@ -253,10 +259,17 @@ impl<P: Node> Actor for PeerResolver<P> {
                     }
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_resolver: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "peer_resolver: send response")?;
             }
         }
 
+        Ok(())
+    }
+
+    async fn join(self) -> Result<()> {
         Ok(())
     }
 }

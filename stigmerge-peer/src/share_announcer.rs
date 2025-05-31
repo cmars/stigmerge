@@ -162,8 +162,15 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
             Err(_) => Response::NotAvailable,
         };
 
-        req.response_tx().send(response).await.with_context(|| "share_announcer: send response")?;
+        req.response_tx()
+            .send(response)
+            .await
+            .with_context(|| "share_announcer: send response")?;
 
+        Ok(())
+    }
+
+    async fn join(self) -> Result<()> {
         Ok(())
     }
 }

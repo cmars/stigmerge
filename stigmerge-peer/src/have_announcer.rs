@@ -168,6 +168,10 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
             .with_context(|| format!("have_announcer: send response"))?;
         Ok(())
     }
+
+    async fn join(self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

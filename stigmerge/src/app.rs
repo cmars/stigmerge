@@ -4,15 +4,6 @@ use anyhow::{bail, Error, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
-use tokio::{
-    select,
-    sync::{watch, RwLock},
-    task::JoinSet,
-    time::sleep,
-};
-use tokio_util::sync::CancellationToken;
-use veilid_core::TypedKey;
-
 use stigmerge_peer::{
     actor::{ConnectionState, Operator, ResponseChannel, UntilCancelled, WithVeilidConnection},
     block_fetcher::BlockFetcher,
@@ -28,7 +19,15 @@ use stigmerge_peer::{
     share_resolver::{self, ShareResolver},
     types::ShareInfo,
 };
+use tokio::{
+    select,
+    sync::{watch, RwLock},
+    task::JoinSet,
+    time::sleep,
+};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
+use veilid_core::TypedKey;
 
 use crate::{cli::Commands, initialize_stdout_logging, initialize_ui_logging, Cli};
 
@@ -298,7 +297,12 @@ impl App {
 
         let fetcher = Fetcher::new(node.clone(), share.clone(), fetcher_clients);
         self.add_fetch_progress(&cancel, &mut tasks, fetcher.subscribe_fetcher_status())?;
-        tasks.spawn(fetcher.run(cancel.clone()));
+        let fetcher_op = Operator::new(
+            cancel.clone(),
+            fetcher,
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        );
+        tasks.spawn(fetcher_op.join());
 
         // Set up seeder
         let seeder_clients = seeder::Clients {
@@ -312,7 +316,7 @@ impl App {
             seeder,
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
-        tasks.spawn(async move { seeder_op.join().await });
+        tasks.spawn(seeder_op.join());
 
         info!("Seeding until ctrl-c...");
         let seed_progress = self.multi_progress.add(ProgressBar::new_spinner());
