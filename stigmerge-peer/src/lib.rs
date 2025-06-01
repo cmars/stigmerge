@@ -9,6 +9,7 @@ pub mod have_resolver;
 pub mod node;
 pub mod peer_announcer;
 pub mod peer_resolver;
+mod peer_tracker;
 mod piece_map;
 pub mod piece_verifier;
 pub mod proto;
@@ -27,7 +28,7 @@ use tokio::sync::broadcast;
 use tracing::warn;
 use veilid_core::{RoutingContext, VeilidUpdate};
 
-pub use error::{is_cancelled, is_hangup, Error, Result};
+pub use error::{is_cancelled, is_unrecoverable, Error, Result};
 pub use node::{Node, Veilid};
 
 #[cfg(test)]

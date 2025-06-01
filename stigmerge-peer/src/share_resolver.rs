@@ -10,6 +10,7 @@ use veilid_core::{Target, ValueSubkeyRangeSet, VeilidUpdate};
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     content_addressable::ContentAddressable,
+    error::Unrecoverable,
     node::TypedKey,
     proto::{Digest, Header},
     Node, Result,
@@ -198,6 +199,16 @@ impl Response {
             Response::Remove { key: _ } => None,
         }
     }
+
+    pub fn target(&self) -> Option<&Target> {
+        match self {
+            Response::NotAvailable { .. } => None,
+            Response::BadIndex { .. } => None,
+            Response::Index { target, .. } => Some(target),
+            Response::Header { target, .. } => Some(target),
+            Response::Remove { .. } => None,
+        }
+    }
 }
 
 impl<P: Node> Actor for ShareResolver<P> {
@@ -325,7 +336,10 @@ impl<P: Node> Actor for ShareResolver<P> {
         }
         trace!(?resp);
 
-        response_tx.send(resp).await.with_context(|| "share_resolver: send response")?;
+        response_tx
+            .send(resp)
+            .await
+            .context(Unrecoverable::new("send response from share resolver"))?;
         Ok(())
     }
 }

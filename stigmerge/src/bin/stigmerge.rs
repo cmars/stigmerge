@@ -7,6 +7,7 @@ use stigmerge::{App, Cli};
 
 #[cfg(target_os = "android")]
 use jni::{objects::JObject, InitArgsBuilder, JNIVersion, JavaVM};
+use stigmerge_peer::is_cancelled;
 
 /// Initialize native platform-specific stuff.
 ///
@@ -68,11 +69,16 @@ fn init_native() -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_native()?;
-    if let Err(e) = tokio_main().await {
-        eprintln!("{} error: Something went wrong", env!("CARGO_PKG_NAME"));
-        Err(e)
-    } else {
-        Ok(())
+    match tokio_main().await {
+        Err(e) => {
+            if !is_cancelled(&e) {
+                eprintln!("{} error: Something went wrong", env!("CARGO_PKG_NAME"));
+                Err(e)
+            } else {
+                Ok(())
+            }
+        }
+        ok => ok,
     }
 }
 

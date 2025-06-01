@@ -9,6 +9,7 @@ use veilid_core::{Target, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
+    error::Unrecoverable,
     node::TypedKey,
     proto::Header,
     Node, Result,
@@ -162,7 +163,10 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
             Err(_) => Response::NotAvailable,
         };
 
-        req.response_tx().send(response).await.with_context(|| "share_announcer: send response")?;
+        req.response_tx()
+            .send(response)
+            .await
+            .context(Unrecoverable::new("send response from share announcer"))?;
 
         Ok(())
     }

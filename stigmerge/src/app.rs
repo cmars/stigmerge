@@ -4,15 +4,6 @@ use anyhow::{bail, Error, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
-use tokio::{
-    select,
-    sync::{watch, RwLock},
-    task::JoinSet,
-    time::sleep,
-};
-use tokio_util::sync::CancellationToken;
-use veilid_core::TypedKey;
-
 use stigmerge_peer::{
     actor::{ConnectionState, Operator, ResponseChannel, UntilCancelled, WithVeilidConnection},
     block_fetcher::BlockFetcher,
@@ -28,7 +19,15 @@ use stigmerge_peer::{
     share_resolver::{self, ShareResolver},
     types::ShareInfo,
 };
+use tokio::{
+    select, spawn,
+    sync::{watch, RwLock},
+    task::JoinSet,
+    time::sleep,
+};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
+use veilid_core::TypedKey;
 
 use crate::{cli::Commands, initialize_stdout_logging, initialize_ui_logging, Cli};
 
@@ -105,7 +104,7 @@ impl App {
                     }
                     res = conn_state_rx.changed() => {
                         res?;
-                        if *conn_state_rx.borrow() {
+                        if *conn_state_rx.borrow_and_update() {
                             conn_progress_bar.disable_steady_tick();
                             conn_progress_bar.set_style(ProgressStyle::with_template("{prefix} {msg}")?);
                             conn_progress_bar.set_message("Connected to Veilid network");
@@ -298,7 +297,7 @@ impl App {
 
         let fetcher = Fetcher::new(node.clone(), share.clone(), fetcher_clients);
         self.add_fetch_progress(&cancel, &mut tasks, fetcher.subscribe_fetcher_status())?;
-        tasks.spawn(fetcher.run(cancel.clone()));
+        let fetcher_task = spawn(fetcher.run(cancel.clone()));
 
         // Set up seeder
         let seeder_clients = seeder::Clients {
@@ -310,7 +309,7 @@ impl App {
         let seeder_op = Operator::new(
             cancel.clone(),
             seeder,
-            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+            WithVeilidConnection::new(node.clone(), conn_state),
         );
         tasks.spawn(async move { seeder_op.join().await });
 
@@ -329,18 +328,34 @@ impl App {
             share_key.to_string()
         ));
 
-        // Keep seeding until ctrl-c
-        select! {
+        // Keep seeding until ctrl-c or fetcher exits
+        let res = select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("Received ctrl-c, shutting down...");
                 cancel.cancel();
+                Ok(())
             }
-            _ = tasks.join_all() => {
-                info!("tasks complete");
+            join_res = fetcher_task => {
+                cancel.cancel();
+                match join_res {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => {
+                        error!("fetcher: {}", e);
+                        Err(e)
+                    }
+                    Err(e) => {
+                        error!("join fetcher: {}", e);
+                        Err(e.into())
+                    }
+                }
             }
-        }
-
-        Ok(())
+        };
+        tasks
+            .join_all()
+            .await
+            .into_iter()
+            .collect::<Result<(), _>>()?;
+        res
     }
 
     fn add_fetch_progress(

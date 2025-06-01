@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::Result,
+    error::{Result, Unrecoverable},
     types::PieceState,
 };
 
@@ -179,7 +179,10 @@ impl Actor for PieceVerifier {
                 .await?
             {
                 self.verified_pieces += 1;
-                self.verified_tx.send_async(req.piece_state()).await.with_context(|| "piece_verifier: notify verified piece")?;
+                self.verified_tx
+                    .send_async(req.piece_state())
+                    .await
+                    .with_context(|| "piece_verifier: notify verified piece")?;
                 Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
@@ -201,7 +204,10 @@ impl Actor for PieceVerifier {
         };
 
         let mut response_tx = req.response_tx();
-        response_tx.send(resp).await.with_context(|| "piece_verifier: send response")?;
+        response_tx
+            .send(resp)
+            .await
+            .context(Unrecoverable::new("send response from piece verifier"))?;
 
         Ok(())
     }

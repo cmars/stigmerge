@@ -1,6 +1,5 @@
 use std::{fmt, io};
 
-use tokio::sync::broadcast;
 use veilid_core::VeilidAPIError;
 
 use crate::proto;
@@ -54,7 +53,11 @@ pub fn as_io(e: &Error) -> Option<&io::Error> {
 
 pub fn is_route_invalid(e: &Error) -> bool {
     match as_veilid(e) {
-        Some(VeilidAPIError::InvalidTarget { .. }) => true,
+        Some(&VeilidAPIError::InvalidTarget { .. }) => true,
+        Some(e) => {
+            let msg = e.to_string();
+            msg.contains("could not get remote private route") || msg.contains("Invalid target")
+        }
         _ => false,
     }
 }
@@ -68,19 +71,37 @@ pub fn is_cancelled(e: &Error) -> bool {
     false
 }
 
-pub fn is_hangup<T: 'static + fmt::Debug>(e: &Error) -> bool {
+#[derive(Debug)]
+pub struct Unrecoverable(String);
+
+impl Unrecoverable {
+    pub fn new(msg: &str) -> Unrecoverable {
+        Unrecoverable(msg.to_owned())
+    }
+}
+
+impl std::error::Error for Unrecoverable {}
+
+impl fmt::Display for Unrecoverable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+pub fn is_unrecoverable(e: &Error) -> bool {
     for cause in e.chain() {
-        if cause.downcast_ref::<flume::SendError<T>>().is_some() {
-            return true;
-        }
-        if cause
-            .downcast_ref::<broadcast::error::SendError<T>>()
-            .is_some()
-        {
+        if cause.downcast_ref::<Unrecoverable>().is_some() {
             return true;
         }
     }
-    false
+    match as_veilid(e) {
+        Some(err) => match err {
+            &VeilidAPIError::Unimplemented { .. } => true,
+            &VeilidAPIError::Shutdown => true,
+            _ => false,
+        },
+        None => false,
+    }
 }
 
 pub fn is_proto(e: &Error) -> bool {
@@ -134,31 +155,6 @@ impl Transient for Error {
             // Some veilid errexamples/share_announce.rsors are retryable
             Some(err) => err.is_transient(),
             None => false,
-        }
-    }
-}
-
-/// Trait for errors that may be permanent.
-pub trait Permanent {
-    fn is_permanent(&self) -> bool;
-}
-
-impl Permanent for Error {
-    fn is_permanent(&self) -> bool {
-        match as_veilid(self) {
-            Some(err) => return err.is_permanent(),
-            None => {}
-        };
-        is_cancelled(self)
-    }
-}
-
-impl Permanent for VeilidAPIError {
-    fn is_permanent(&self) -> bool {
-        match self {
-            &VeilidAPIError::Unimplemented { .. } => true,
-            &VeilidAPIError::Shutdown => true,
-            _ => false,
         }
     }
 }

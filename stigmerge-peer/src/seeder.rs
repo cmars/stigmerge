@@ -14,6 +14,7 @@ use veilid_core::VeilidUpdate;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
+    error::Unrecoverable,
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
     types::{PieceState, ShareInfo},
@@ -147,7 +148,10 @@ impl<P: Node> Actor for Seeder<P> {
         match req {
             Request::HaveMap { mut response_tx } => {
                 let resp = Response::HaveMap(self.piece_map.clone());
-                response_tx.send(resp).await.with_context(|| "seeder: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .context(Unrecoverable::new("send response from seeder"))?;
                 Ok(())
             }
         }
