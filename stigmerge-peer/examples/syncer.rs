@@ -64,7 +64,7 @@ use stigmerge_peer::seeder::{self, Seeder};
 use stigmerge_peer::share_resolver::{self, ShareResolver};
 use stigmerge_peer::types::ShareInfo;
 use stigmerge_peer::{Error, Result};
-use veilid_core::TypedKey;
+use veilid_core::TypedRecordKey;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -119,7 +119,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     let mut want_index = None;
     if let Some(ref want_index_digest) = args.want_index_digest {
         for share_key_str in args.share_keys.iter() {
-            let share_key: TypedKey = share_key_str.parse()?;
+            let share_key: TypedRecordKey = share_key_str.parse()?;
             let want_index_digest = hex::decode(want_index_digest.clone())?;
             let want_index_digest: [u8; 32] = want_index_digest
                 .try_into()

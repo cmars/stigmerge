@@ -51,7 +51,7 @@ use stigmerge_peer::node::Veilid;
 use stigmerge_peer::share_resolver::{self, ShareResolver};
 use stigmerge_peer::types::FileBlockFetch;
 use stigmerge_peer::Error;
-use veilid_core::TypedKey;
+use veilid_core::TypedRecordKey;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {
@@ -92,7 +92,7 @@ async fn main() -> std::result::Result<(), Error> {
     );
 
     // Parse share key
-    let key: TypedKey = share_key.parse()?;
+    let key: TypedRecordKey = share_key.parse()?;
 
     // Create a temporary directory for the block fetcher
     let temp_dir = tempfile::tempdir()?;

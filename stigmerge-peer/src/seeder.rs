@@ -195,7 +195,7 @@ mod tests {
 
     use tokio::{sync::mpsc, time};
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{OperationId, TypedKey, VeilidAppCall};
+    use veilid_core::{OperationId, TypedRecordKey, VeilidAppCall};
 
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
@@ -245,8 +245,8 @@ mod tests {
             },
         ));
 
-        let fake_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create share info
         let share_info = ShareInfo {
@@ -363,8 +363,8 @@ mod tests {
             },
         ));
 
-        let fake_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create share info
         let share_info = ShareInfo {

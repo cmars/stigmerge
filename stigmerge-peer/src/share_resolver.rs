@@ -5,13 +5,12 @@ use stigmerge_fileindex::Index;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, warn};
-use veilid_core::{Target, ValueSubkeyRangeSet, VeilidUpdate};
+use veilid_core::{Target, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     content_addressable::ContentAddressable,
     error::Unrecoverable,
-    node::TypedKey,
     proto::{Digest, Header},
     Node, Result,
 };
@@ -21,9 +20,9 @@ use crate::{
 /// the expected index by verifying its content digest.
 pub struct ShareResolver<N: Node> {
     node: N,
-    share_target_tx: flume::Sender<(TypedKey, Target)>,
-    share_target_rx: flume::Receiver<(TypedKey, Target)>,
-    watching: HashSet<TypedKey>,
+    share_target_tx: flume::Sender<(TypedRecordKey, Target)>,
+    share_target_rx: flume::Receiver<(TypedRecordKey, Target)>,
+    watching: HashSet<TypedRecordKey>,
 }
 
 impl<P: Node> ShareResolver<P> {
@@ -38,7 +37,7 @@ impl<P: Node> ShareResolver<P> {
         }
     }
 
-    pub fn subscribe_target(&self) -> flume::Receiver<(TypedKey, Target)> {
+    pub fn subscribe_target(&self) -> flume::Receiver<(TypedRecordKey, Target)> {
         self.share_target_rx.clone()
     }
 }
@@ -52,7 +51,7 @@ pub enum Request {
     /// continual, automatically-renewed watch for this share key.
     Index {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
         want_index_digest: Option<Digest>,
         root: PathBuf,
     },
@@ -64,14 +63,14 @@ pub enum Request {
     /// continual, automatically-renewed watch for this share key.
     Header {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
         prior_target: Option<Target>,
     },
 
     /// Stop watching this share key.
     Remove {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 }
 
@@ -128,7 +127,7 @@ impl Respondable for Request {
 
 impl Request {
     /// Get the share key specified in the request.
-    fn key(&self) -> &TypedKey {
+    fn key(&self) -> &TypedRecordKey {
         match self {
             Request::Index {
                 key,
@@ -153,15 +152,18 @@ impl Request {
 #[derive(Clone, Debug)]
 pub enum Response {
     /// Remote share is not available at the given key, with error cause.
-    NotAvailable { key: TypedKey, err_msg: String },
+    NotAvailable {
+        key: TypedRecordKey,
+        err_msg: String,
+    },
 
     /// Remote share has a bad index. This could be caused by a defective or malicious peer,
     /// or the wrong share key given for the desired index digest.
-    BadIndex { key: TypedKey },
+    BadIndex { key: TypedRecordKey },
 
     /// Index is valid, in response to an Index request.
     Index {
-        key: TypedKey,
+        key: TypedRecordKey,
         header: Header,
         index: Index,
         target: Target,
@@ -170,18 +172,18 @@ pub enum Response {
     /// Header is updated. Could be in response to a header request, or unrequested if
     /// the watch detects a change.
     Header {
-        key: TypedKey,
+        key: TypedRecordKey,
         header: Header,
         target: Target,
     },
 
     /// Acknowledgement that the share key watch has been removed.
-    Remove { key: TypedKey },
+    Remove { key: TypedRecordKey },
 }
 
 impl Response {
     /// Get the share key for a valid usable share.
-    fn valid_key(&self) -> Option<&TypedKey> {
+    fn valid_key(&self) -> Option<&TypedRecordKey> {
         match self {
             Response::NotAvailable { key: _, err_msg: _ } => None,
             Response::BadIndex { key: _ } => None,
@@ -366,7 +368,7 @@ mod tests {
     use sha2::{Digest as _, Sha256};
     use stigmerge_fileindex::Indexer;
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{CryptoKey, Target, TypedKey, ValueSubkeyRangeSet};
+    use veilid_core::{RouteId, Target, TypedRecordKey, ValueSubkeyRangeSet};
 
     use crate::actor::{OneShot, Operator, ResponseChannel};
     use crate::{
@@ -389,11 +391,11 @@ mod tests {
         let mut node = StubNode::new();
         let mock_index = index.clone();
         node.resolve_route_index_result =
-            Arc::new(Mutex::new(move |_key: &TypedKey, _root: &Path| {
+            Arc::new(Mutex::new(move |_key: &TypedRecordKey, _root: &Path| {
                 let index_internal = mock_index.clone();
                 let index_bytes = index_internal.encode().expect("encode index");
                 Ok((
-                    Target::PrivateRoute(CryptoKey::new([0u8; 32])),
+                    Target::PrivateRoute(RouteId::new([0u8; 32])),
                     Header::from_index(
                         &index_internal,
                         index_bytes.as_slice(),
@@ -403,15 +405,15 @@ mod tests {
                 ))
             }));
         node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedKey, _values: ValueSubkeyRangeSet| Ok(()),
+            move |_key: TypedRecordKey, _values: ValueSubkeyRangeSet| Ok(()),
         ));
-        node.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedKey| Ok(())));
+        node.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedRecordKey| Ok(())));
 
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot);
 
-        let fake_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Send a bad "want index digest"
         let bad_digest: crate::proto::Digest = [0u8; 32];
@@ -468,16 +470,18 @@ mod tests {
         index_digest.update(index.encode().expect("encode index"));
 
         let fake_peer_map_key =
-            TypedKey::from_str("VLD0:hIfQGdXUq-oO5wwzODJukR7zOGwpNznKYaFoh6uTp2A").expect("key");
+            TypedRecordKey::from_str("VLD0:hIfQGdXUq-oO5wwzODJukR7zOGwpNznKYaFoh6uTp2A")
+                .expect("key");
         let fake_have_map_key =
-            TypedKey::from_str("VLD0:rl3AyyZNFWP8GQGyY9xSnnIjCDagXzbCA47HFmsbLDU").expect("key");
+            TypedRecordKey::from_str("VLD0:rl3AyyZNFWP8GQGyY9xSnnIjCDagXzbCA47HFmsbLDU")
+                .expect("key");
 
         let mut node = StubNode::new();
         let mock_index = index.clone();
         let mock_peer_map_key = fake_peer_map_key.clone();
         let mock_have_map_key = fake_have_map_key.clone();
         node.resolve_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedKey, _prior_route: Option<Target>| {
+            move |_key: &TypedRecordKey, _prior_route: Option<Target>| {
                 let index_internal = mock_index.clone();
                 let index_bytes = index_internal.encode().expect("encode index");
                 let header = Header::from_index(
@@ -487,18 +491,18 @@ mod tests {
                 )
                 .with_peer_map(PeerMapRef::new(mock_peer_map_key, 1u16))
                 .with_have_map(HaveMapRef::new(mock_have_map_key, 1u16));
-                Ok((Target::PrivateRoute(CryptoKey::new([0u8; 32])), header))
+                Ok((Target::PrivateRoute(RouteId::new([0u8; 32])), header))
             },
         ));
         node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedKey, _values: ValueSubkeyRangeSet| Ok(()),
+            move |_key: TypedRecordKey, _values: ValueSubkeyRangeSet| Ok(()),
         ));
 
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot);
 
-        let fake_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Send a "want index digest" that matches the mock resolved index
         let header_resp = operator
@@ -519,7 +523,7 @@ mod tests {
                 assert_eq!(key, fake_key);
                 assert_eq!(header.have_map().map(|m| m.key()), Some(&fake_have_map_key));
                 assert_eq!(header.peer_map().map(|m| m.key()), Some(&fake_peer_map_key));
-                assert_eq!(target, Target::PrivateRoute(CryptoKey::new([0u8; 32])),);
+                assert_eq!(target, Target::PrivateRoute(RouteId::new([0u8; 32])),);
             }
             _ => panic!("unexpected response"),
         }

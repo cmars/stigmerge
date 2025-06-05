@@ -13,12 +13,12 @@ use tokio::select;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
-use veilid_core::Target;
+use veilid_core::{Target, TypedRecordKey};
 
 use crate::actor::{Actor, Respondable, ResponseChannel};
 use crate::error::{is_io, is_proto, is_route_invalid, Result, Transient};
 use crate::is_cancelled;
-use crate::node::{Node, TypedKey};
+use crate::node::Node;
 use crate::Error;
 
 use super::types::FileBlockFetch;
@@ -84,7 +84,7 @@ impl<N: Node> BlockFetcher<N> {
 pub enum Request {
     Fetch {
         response_tx: ResponseChannel<Response>,
-        share_key: TypedKey,
+        share_key: TypedRecordKey,
         target: Target,
         block: FileBlockFetch,
         flush: bool,
@@ -130,12 +130,12 @@ impl Respondable for Request {
 #[derive(Debug)]
 pub enum Response {
     Fetched {
-        share_key: TypedKey,
+        share_key: TypedRecordKey,
         block: FileBlockFetch,
         length: usize,
     },
     FetchFailed {
-        share_key: TypedKey,
+        share_key: TypedRecordKey,
         target: Target,
         block: FileBlockFetch,
         err: Error,
@@ -234,7 +234,7 @@ mod tests {
     use stigmerge_fileindex::Indexer;
     use tokio::io::AsyncReadExt;
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{CryptoKey, CryptoTyped, CRYPTO_KIND_VLD0};
+    use veilid_core::{CryptoKind, CryptoTyped, RecordKey, RouteId};
 
     use crate::actor::{OneShot, Operator};
     use crate::tests::{temp_file, StubNode};
@@ -295,8 +295,8 @@ mod tests {
         };
         let req = Request::Fetch {
             response_tx: ResponseChannel::default(),
-            share_key: CryptoTyped::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xbe; 32])),
-            target: Target::PrivateRoute(CryptoKey::new([0xbe; 32])),
+            share_key: CryptoTyped::new(CryptoKind::default(), RecordKey::new([0xbe; 32])),
+            target: Target::PrivateRoute(RouteId::new([0xbe; 32])),
             block: block.clone(),
             flush: true,
         };
@@ -382,8 +382,8 @@ mod tests {
         let resp = operator
             .call(Request::Fetch {
                 response_tx: ResponseChannel::default(),
-                share_key: CryptoTyped::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xbe; 32])),
-                target: Target::PrivateRoute(CryptoKey::new([0xbe; 32])),
+                share_key: CryptoTyped::new(CryptoKind::default(), RecordKey::new([0xbe; 32])),
+                target: Target::PrivateRoute(RouteId::new([0xbe; 32])),
                 block: block.clone(),
                 flush: true,
             })
@@ -398,7 +398,7 @@ mod tests {
             } => {
                 assert_eq!(
                     share_key,
-                    CryptoTyped::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xbe; 32]))
+                    CryptoTyped::new(CryptoKind::default(), RecordKey::new([0xbe; 32]))
                 );
                 assert_eq!(failed_block, block);
                 assert_eq!(err.to_string(), "mock block fetch error");

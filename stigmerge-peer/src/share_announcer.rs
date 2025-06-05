@@ -5,12 +5,11 @@ use stigmerge_fileindex::Index;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use veilid_core::{Target, VeilidUpdate};
+use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     error::Unrecoverable,
-    node::TypedKey,
     proto::Header,
     Node, Result,
 };
@@ -23,7 +22,7 @@ pub struct ShareAnnouncer<N: Node> {
 
 #[derive(Clone)]
 struct ShareAnnounce {
-    key: TypedKey,
+    key: TypedRecordKey,
     target: Target,
     header: Header,
 }
@@ -37,7 +36,7 @@ impl<N: Node> ShareAnnouncer<N> {
         }
     }
 
-    pub fn share(&self) -> Option<(&TypedKey, &Target)> {
+    pub fn share(&self) -> Option<(&TypedRecordKey, &Target)> {
         self.share.as_ref().map(|share| (&share.key, &share.target))
     }
 
@@ -107,7 +106,7 @@ impl Respondable for Request {
 pub enum Response {
     NotAvailable,
     Announce {
-        key: TypedKey,
+        key: TypedRecordKey,
         target: Target,
         header: Header,
     },
@@ -191,7 +190,7 @@ mod tests {
 
     use stigmerge_fileindex::Indexer;
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{CryptoKey, Target, TypedKey};
+    use veilid_core::{RouteId, Target, TypedRecordKey};
 
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
@@ -211,9 +210,9 @@ mod tests {
 
         // Create a stub peer with mock behavior
         let mut node = StubNode::new();
-        let fake_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let fake_target = Target::PrivateRoute(CryptoKey::new([0u8; 32]));
+        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
+        let fake_target = Target::PrivateRoute(RouteId::new([0u8; 32]));
 
         // Set up the announce_result mock
         let mock_key = fake_key.clone();
@@ -242,10 +241,10 @@ mod tests {
 
         // Create a stub peer with mock behavior
         let mut node = StubNode::new();
-        let fake_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let fake_target = Target::PrivateRoute(CryptoKey::new([0u8; 32]));
-        let updated_target = Target::PrivateRoute(CryptoKey::new([1u8; 32]));
+        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
+        let fake_target = Target::PrivateRoute(RouteId::new([0u8; 32]));
+        let updated_target = Target::PrivateRoute(RouteId::new([1u8; 32]));
 
         // Set up the announce_result mock
         let mock_key = fake_key.clone();
@@ -260,7 +259,7 @@ mod tests {
         // Set up the reannounce_route_result mock
         let mock_updated_target = updated_target.clone();
         node.announce_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedKey, _prior_route: Option<Target>, header: &Header| {
+            move |_key: &TypedRecordKey, _prior_route: Option<Target>, header: &Header| {
                 let updated_header = header.with_route_data(vec![0xde, 0xca, 0xfb, 0xad]);
                 Ok((mock_updated_target.clone(), updated_header))
             },

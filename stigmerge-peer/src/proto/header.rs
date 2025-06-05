@@ -3,9 +3,7 @@ use capnp::{
     serialize,
 };
 use stigmerge_fileindex::Index;
-use veilid_core::ValueData;
-
-use crate::node::TypedKey;
+use veilid_core::{TypedRecordKey, ValueData};
 
 use super::{
     stigmerge_capnp::header, Decoder, Digest, Encoder, Error, PublicKey, Result, MAX_INDEX_BYTES,
@@ -126,7 +124,7 @@ impl Decoder for Header {
                     key[16..24].clone_from_slice(&key_reader.get_p2().to_be_bytes()[..]);
                     key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
                     header = header.with_have_map(HaveMapRef {
-                        key: TypedKey::new(kind, key.into()),
+                        key: TypedRecordKey::new(kind, key.into()),
                         subkeys: have_map_ref_reader.get_subkeys(),
                     });
                 }
@@ -145,7 +143,7 @@ impl Decoder for Header {
                     key[16..24].clone_from_slice(&key_reader.get_p2().to_be_bytes()[..]);
                     key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
                     header = header.with_peer_map(PeerMapRef {
-                        key: TypedKey::new(typed_key_reader.get_kind().into(), key.into()),
+                        key: TypedRecordKey::new(typed_key_reader.get_kind().into(), key.into()),
                         subkeys: peer_map_ref_reader.get_subkeys(),
                     });
                 }
@@ -158,16 +156,16 @@ impl Decoder for Header {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct HaveMapRef {
-    key: TypedKey,
+    key: TypedRecordKey,
     subkeys: u16,
 }
 
 impl HaveMapRef {
-    pub fn new(key: TypedKey, subkeys: u16) -> Self {
+    pub fn new(key: TypedRecordKey, subkeys: u16) -> Self {
         Self { key, subkeys }
     }
 
-    pub fn key(&self) -> &TypedKey {
+    pub fn key(&self) -> &TypedRecordKey {
         &self.key
     }
 
@@ -178,16 +176,16 @@ impl HaveMapRef {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct PeerMapRef {
-    key: TypedKey,
+    key: TypedRecordKey,
     subkeys: u16,
 }
 
 impl PeerMapRef {
-    pub fn new(key: TypedKey, subkeys: u16) -> Self {
+    pub fn new(key: TypedRecordKey, subkeys: u16) -> Self {
         Self { key, subkeys }
     }
 
-    pub fn key(&self) -> &TypedKey {
+    pub fn key(&self) -> &TypedRecordKey {
         &self.key
     }
 
@@ -284,9 +282,8 @@ mod tests {
     use std::path::PathBuf;
 
     use stigmerge_fileindex::{Index, PayloadSpec};
-    use veilid_core::CRYPTO_KIND_VLD0;
+    use veilid_core::{CryptoKind, TypedRecordKey};
 
-    use crate::node::TypedKey;
     use crate::proto::{Decoder, Encoder, HaveMapRef, Header, PeerMapRef};
 
     #[test]
@@ -312,8 +309,8 @@ mod tests {
         let route_data = vec![1u8, 2u8, 3u8, 4u8];
 
         // Create TypedKeys for peer map and have map
-        let peer_key = TypedKey::new(CRYPTO_KIND_VLD0, [0xaa; 32].into());
-        let have_key = TypedKey::new(CRYPTO_KIND_VLD0, [0xbb; 32].into());
+        let peer_key = TypedRecordKey::new(CryptoKind::default(), [0xaa; 32].into());
+        let have_key = TypedRecordKey::new(CryptoKind::default(), [0xbb; 32].into());
 
         // Create the peer map ref and have map ref
         let peer_map_ref = PeerMapRef::new(peer_key, 10);

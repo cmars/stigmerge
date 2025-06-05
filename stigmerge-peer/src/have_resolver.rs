@@ -4,11 +4,10 @@ use anyhow::Context;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
+use veilid_core::{TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    node::TypedKey,
     piece_map::PieceMap,
     Node, Result,
 };
@@ -22,11 +21,11 @@ pub struct HaveResolver<N: Node> {
     node: N,
 
     // Mapping from have-map key to share key, used in watches
-    have_to_share_map: HashMap<TypedKey, TypedKey>,
+    have_to_share_map: HashMap<TypedRecordKey, TypedRecordKey>,
 
     // Sender for watched have-map updates
-    have_map_tx: flume::Sender<(TypedKey, PieceMap)>,
-    have_map_rx: flume::Receiver<(TypedKey, PieceMap)>,
+    have_map_tx: flume::Sender<(TypedRecordKey, PieceMap)>,
+    have_map_rx: flume::Receiver<(TypedRecordKey, PieceMap)>,
 }
 
 impl<P> HaveResolver<P>
@@ -44,7 +43,7 @@ where
         }
     }
 
-    pub fn subscribe_have_map(&self) -> flume::Receiver<(TypedKey, PieceMap)> {
+    pub fn subscribe_have_map(&self) -> flume::Receiver<(TypedRecordKey, PieceMap)> {
         self.have_map_rx.clone()
     }
 }
@@ -55,19 +54,19 @@ pub enum Request {
     /// pieces the remote peer has.
     Resolve {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 
     /// Watch the have-map for the specified share key for changes.
     Watch {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 
     /// Cancel the watch on the have-map share.
     CancelWatch {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 }
 
@@ -114,17 +113,23 @@ impl Respondable for Request {
 #[derive(Clone, Debug)]
 pub enum Response {
     /// Have-map is not available at the given key, with error cause.
-    NotAvailable { key: TypedKey, err_msg: String },
+    NotAvailable {
+        key: TypedRecordKey,
+        err_msg: String,
+    },
 
     /// Have-map response.
-    Resolve { key: TypedKey, pieces: PieceMap },
+    Resolve {
+        key: TypedRecordKey,
+        pieces: PieceMap,
+    },
 
     /// Acknowledge that the have-map at the remote share key is being monitored
     /// for changes, with an automatically-renewed watch.
-    Watching { key: TypedKey },
+    Watching { key: TypedRecordKey },
 
     /// Acknowledge that the watch on the have-map at remote peer key has been cancelled.
-    WatchCancelled { key: TypedKey },
+    WatchCancelled { key: TypedRecordKey },
 }
 
 impl<P: Node> Actor for HaveResolver<P> {
@@ -289,14 +294,13 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
     use veilid_core::{
-        CryptoKey, Target, ValueData, ValueSubkeyRangeSet, VeilidUpdate, VeilidValueChange,
-        CRYPTO_KEY_LENGTH, CRYPTO_KIND_VLD0,
+        CryptoKind, PublicKey, RecordKey, RouteId, Target, TypedRecordKey, ValueData,
+        ValueSubkeyRangeSet, VeilidUpdate, VeilidValueChange, CRYPTO_KEY_LENGTH,
     };
 
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
         have_resolver::{HaveResolver, Request, Response},
-        node::TypedKey,
         proto::{HaveMapRef, Header},
         tests::StubNode,
     };
@@ -309,14 +313,14 @@ mod tests {
 
         let recorded_key_clone = recorded_key.clone();
 
-        node.resolve_have_map_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+        node.resolve_have_map_result = Arc::new(Mutex::new(move |key: &TypedRecordKey| {
             *recorded_key_clone.write().unwrap() = Some(key.to_owned());
             Ok(vec![42].into())
         }));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create have resolver
         let cancel = CancellationToken::new();
@@ -360,12 +364,12 @@ mod tests {
         let recorded_key_clone = recorded_key.clone();
         let recorded_subkeys_clone = recorded_subkeys.clone();
 
-        let have_map_key = TypedKey::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xa5; 32]));
+        let have_map_key = TypedRecordKey::new(CryptoKind::default(), RecordKey::new([0xa5; 32]));
         let have_map_key_clone = have_map_key.clone();
         node.resolve_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedKey, _prior_route: Option<Target>| {
+            move |_key: &TypedRecordKey, _prior_route: Option<Target>| {
                 Ok((
-                    Target::PrivateRoute(CryptoKey::new([0xa5; 32])),
+                    Target::PrivateRoute(RouteId::new([0xa5; 32])),
                     Header::new(
                         [0xab; 32],
                         42,
@@ -379,7 +383,7 @@ mod tests {
         ));
 
         node.watch_result = Arc::new(Mutex::new(
-            move |key: TypedKey, subkeys: ValueSubkeyRangeSet| {
+            move |key: TypedRecordKey, subkeys: ValueSubkeyRangeSet| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
                 Ok(())
@@ -387,8 +391,8 @@ mod tests {
         ));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create have resolver
         let cancel = CancellationToken::new();
@@ -433,19 +437,19 @@ mod tests {
         let mut node = StubNode::new();
         let recorded_key = Arc::new(RwLock::new(None));
 
-        let have_map_key = TypedKey::new(CRYPTO_KIND_VLD0, CryptoKey::new([0xa5; 32]));
+        let have_map_key = TypedRecordKey::new(CryptoKind::default(), RecordKey::new([0xa5; 32]));
 
         let recorded_key_clone = recorded_key.clone();
-        node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+        node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedRecordKey| {
             *recorded_key_clone.write().unwrap() = Some(key.clone());
             Ok(())
         }));
 
         let have_map_key_clone = have_map_key.clone();
         node.resolve_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedKey, _prior_route: Option<Target>| {
+            move |_key: &TypedRecordKey, _prior_route: Option<Target>| {
                 Ok((
-                    Target::PrivateRoute(CryptoKey::new([0xa5; 32])),
+                    Target::PrivateRoute(RouteId::new([0xa5; 32])),
                     Header::new(
                         [0xab; 32],
                         42,
@@ -459,8 +463,8 @@ mod tests {
         ));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create have resolver
         let cancel = CancellationToken::new();
@@ -502,10 +506,11 @@ mod tests {
 
         // Mock resolve_route (called when setting up watch)
         let have_map_key =
-            TypedKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+            TypedRecordKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+                .expect("key");
         let have_map_key_clone = have_map_key.clone();
         node.resolve_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedKey, _target: Option<Target>| {
+            move |_key: &TypedRecordKey, _target: Option<Target>| {
                 let have_map_ref = crate::proto::HaveMapRef::new(have_map_key_clone, 1);
                 let header = crate::proto::Header::new(
                     [0u8; 32],          // payload_digest
@@ -515,23 +520,23 @@ mod tests {
                     Some(have_map_ref), // have_map
                     None,               // peer_map
                 );
-                Ok((Target::PrivateRoute(CryptoKey::new([0u8; 32])), header))
+                Ok((Target::PrivateRoute(RouteId::new([0u8; 32])), header))
             },
         ));
 
         // Mock watch
         node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedKey, _subkeys: ValueSubkeyRangeSet| Ok(()),
+            move |_key: TypedRecordKey, _subkeys: ValueSubkeyRangeSet| Ok(()),
         ));
 
         // Mock resolve_have_map (called when watch fires)
-        node.resolve_have_map_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+        node.resolve_have_map_result = Arc::new(Mutex::new(move |key: &TypedRecordKey| {
             *recorded_key_clone.write().unwrap() = Some(key.to_owned());
             Ok(vec![42].into())
         }));
 
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
         let update_tx = node.update_tx.clone();
         let cancel = CancellationToken::new();
         let have_resolver = HaveResolver::new(node);
@@ -560,7 +565,7 @@ mod tests {
             key: have_map_key,
             subkeys: ValueSubkeyRangeSet::single_range(0, 99),
             value: Some(
-                ValueData::new(b"foo".to_vec(), CryptoKey::new([0xbe; CRYPTO_KEY_LENGTH]))
+                ValueData::new(b"foo".to_vec(), PublicKey::new([0xbe; CRYPTO_KEY_LENGTH]))
                     .expect("new value data"),
             ),
             count: 1,

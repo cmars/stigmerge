@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS, PIECE_SIZE_BYTES};
+use veilid_core::TypedRecordKey;
 
-use crate::{node::TypedKey, proto::Header};
+use crate::proto::Header;
 
 #[derive(Debug, Clone)]
 pub struct ShareInfo {
-    pub key: TypedKey,
+    pub key: TypedRecordKey,
     pub header: Header,
     pub want_index: Index,
     pub want_index_digest: [u8; 32],
