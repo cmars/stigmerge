@@ -136,6 +136,7 @@ pub enum Response {
     },
     FetchFailed {
         share_key: TypedKey,
+        target: Target,
         block: FileBlockFetch,
         err: Error,
     },
@@ -201,6 +202,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                     Err(e) => (
                         Response::FetchFailed {
                             share_key,
+                            target,
                             block,
                             err: e,
                         },
@@ -392,6 +394,7 @@ mod tests {
                 share_key,
                 block: failed_block,
                 err,
+                ..
             } => {
                 assert_eq!(
                     share_key,

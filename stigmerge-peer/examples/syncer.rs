@@ -244,7 +244,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     let seeder_op = Operator::new(
         cancel.clone(),
         seeder,
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state),
     );
 
     // Create and run fetcher

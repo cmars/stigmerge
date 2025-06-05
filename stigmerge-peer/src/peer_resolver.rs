@@ -8,6 +8,7 @@ use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
+    error::Unrecoverable,
     node::TypedKey,
     proto::{self, Decoder, PeerInfo},
     Node, Result,
@@ -188,7 +189,10 @@ impl<P: Node> Actor for PeerResolver<P> {
                     },
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_resolver: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "peer_resolver: send response")?;
             }
             Request::Watch {
                 key,
@@ -226,7 +230,10 @@ impl<P: Node> Actor for PeerResolver<P> {
                     },
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_resolver: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "peer_resolver: send response")?;
             }
             Request::CancelWatch {
                 key,
@@ -253,7 +260,10 @@ impl<P: Node> Actor for PeerResolver<P> {
                     }
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_resolver: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .context(Unrecoverable::new("send response from peer resolver"))?;
             }
         }
 

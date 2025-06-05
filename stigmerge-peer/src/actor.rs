@@ -12,8 +12,8 @@ use tracing::{error, info, warn};
 use veilid_core::{VeilidAPIError, VeilidUpdate};
 
 use crate::{
-    error::{CancelError, Permanent, Transient},
-    Error, Node, Result,
+    error::{CancelError, Result, Transient},
+    is_cancelled, is_unrecoverable, Error, Node,
 };
 
 /// Common interface for RPC services that handle requests and responses over channels.
@@ -160,7 +160,10 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
     pub async fn call(&mut self, mut req: Req) -> Result<Req::Response> {
         let (resp_ch, resp_rx) = ResponseChannel::new_call();
         req.set_response(resp_ch);
-        self.request_tx.send_async(req).await?;
+        select! {
+            _ = self.cancel.cancelled() => { return Err(CancelError.into()); }
+            res = self.request_tx.send_async(req) => { res?; }
+        }
         Ok(resp_rx.await?)
     }
 
@@ -170,12 +173,18 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
         resp_tx: flume::Sender<Req::Response>,
     ) -> Result<()> {
         req.set_response(resp_tx.into());
-        self.request_tx.send_async(req).await?;
+        select! {
+            _ = self.cancel.cancelled() => { return Err(CancelError.into()); }
+            res = self.request_tx.send_async(req) => { res?; }
+        }
         Ok(())
     }
 
     pub(super) async fn send(&mut self, req: Req) -> Result<()> {
-        self.request_tx.send_async(req).await?;
+        select! {
+            _ = self.cancel.cancelled() => { return Err(CancelError.into()); }
+            res = self.request_tx.send_async(req) => { res?; }
+        }
         Ok(())
     }
 
@@ -184,11 +193,11 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
     }
 
     pub async fn join(self) -> Result<()> {
-        for res in self.tasks.join_all().await.into_iter() {
-            if let Err(e) = res {
-                return Err(e);
-            }
-        }
+        self.tasks
+            .join_all()
+            .await
+            .into_iter()
+            .collect::<Result<()>>()?;
         Ok(())
     }
 }
@@ -270,10 +279,34 @@ impl ConnectionState {
     pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.connected.subscribe()
     }
+
+    pub(super) fn disconnect(&self) {
+        self.connected.send_if_modified(|val| {
+            if *val {
+                *val = false;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    pub(super) fn connect(&self) {
+        self.connected.send_if_modified(|val| {
+            if !*val {
+                *val = true;
+                true
+            } else {
+                false
+            }
+        });
+    }
 }
 
+pub type ConnectionStateHandle = Arc<Mutex<ConnectionState>>;
+
 impl<N: Node> WithVeilidConnection<N> {
-    pub fn new(node: N, state: Arc<Mutex<ConnectionState>>) -> Self {
+    pub fn new(node: N, state: ConnectionStateHandle) -> Self {
         let update_rx = node.subscribe_veilid_update();
         Self {
             node,
@@ -299,7 +332,7 @@ impl<N: Node> WithVeilidConnection<N> {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
                             if veilid_state_attachment.public_internet_ready {
                                 info!("connected: {:?}", veilid_state_attachment);
-                                state.connected.send_if_modified(|val| if !*val { *val = true; true } else { false });
+                                state.connect();
                                 return Ok(())
                             }
                             info!("disconnected: {:?}", veilid_state_attachment);
@@ -344,13 +377,14 @@ impl<
         let mut retries = 0;
         let actor = Arc::new(Mutex::new(actor_inner));
         loop {
-            {
+            let mut conn_rx = {
                 let st = state.lock().await;
                 if !*st.connected.borrow() {
                     self.disconnected(cancel.clone(), st).await?;
                     continue;
                 }
-            }
+                st.subscribe()
+            };
 
             let actor_handle = actor.clone();
             let actor_cancel = cancel.child_token();
@@ -359,7 +393,7 @@ impl<
                 actor_handle
                     .lock()
                     .await
-                    .run(actor_cancel.child_token(), actor_request_rx.clone())
+                    .run(actor_cancel, actor_request_rx.clone())
                     .await
             });
             select! {
@@ -383,14 +417,16 @@ impl<
                                     continue;
                                 }
                                 warn!("too many transient errors");
-                            } else if e.is_permanent() {
+                            } else if is_unrecoverable(&e) {
                                 cancel.cancel();
                                 return Err(e);
+                            } else if is_cancelled(&e) {
+                                return Ok(());
                             }
                             {
                                 if let Ok(st) = state.try_lock() {
                                     info!("marking disconnected");
-                                    st.connected.send_if_modified(|val| if *val { *val = false; true } else { false });
+                                    st.disconnect();
                                     exp_backoff.reset();
                                     retries = 0;
                                 }
@@ -405,7 +441,7 @@ impl<
                             if !veilid_state_attachment.public_internet_ready {
                                 if let Ok(st) = state.try_lock() {
                                     info!("marking disconnected: {:?}", veilid_state_attachment);
-                                    st.connected.send_if_modified(|val| if *val { *val = false; true } else { false });
+                                    st.disconnect();
                                     exp_backoff.reset();
                                     retries = 0;
                                 }
@@ -418,6 +454,10 @@ impl<
                         }
                         _ => {}
                     }
+                }
+                res = conn_rx.changed() => {
+                    // TODO: need to mark these unrecoverable and in the app join, tear down on any unrecoverable error!
+                    res?;
                 }
             }
         }

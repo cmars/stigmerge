@@ -8,6 +8,7 @@ use veilid_core::VeilidUpdate;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
+    error::Unrecoverable,
     node::TypedKey,
     proto::{self, Decoder},
     Node, Result,
@@ -189,7 +190,10 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     Response::Ok
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_announcer: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "peer_announcer: send response")?;
             }
             Request::Redact {
                 key,
@@ -215,7 +219,10 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     Response::Ok
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_announcer: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .with_context(|| "send response from peer announcer")?;
             }
             Request::Reset { mut response_tx } => {
                 let resp = match self
@@ -233,7 +240,10 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     },
                 };
 
-                response_tx.send(resp).await.with_context(|| "peer_announcer: send response")?;
+                response_tx
+                    .send(resp)
+                    .await
+                    .context(Unrecoverable::new("send response from peer_announcer"))?;
             }
         }
 

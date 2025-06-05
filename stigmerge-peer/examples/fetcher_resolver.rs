@@ -130,7 +130,7 @@ async fn main() -> std::result::Result<(), Error> {
     let peer_resolver_op = Operator::new(
         cancel.clone(),
         peer_resolver,
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        WithVeilidConnection::new(node.clone(), conn_state),
     );
 
     let clients = Clients {
