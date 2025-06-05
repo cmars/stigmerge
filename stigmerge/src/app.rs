@@ -83,6 +83,20 @@ impl App {
         // Set up cancellation token
         let cancel = CancellationToken::new();
 
+        // Set up ctrl-c handler
+        let ctrl_c_cancel = cancel.clone();
+        let ctrl_c_node = node.clone();
+        tasks.spawn(async move {
+            select! {
+                _ = ctrl_c_cancel.cancelled() => {}
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received ctrl-c, shutting down...");
+                    ctrl_c_cancel.cancel();
+                }
+            }
+            ctrl_c_node.shutdown().await
+        });
+
         // Set up connection state
         let conn_state_inner = ConnectionState::new();
         let mut conn_state_rx = conn_state_inner.subscribe();
@@ -113,23 +127,6 @@ impl App {
                             conn_progress_bar.set_style(ProgressStyle::with_template("{spinner} {msg}")?);
                             conn_progress_bar.set_message("Disconnected from Veilid network");
                         }
-                    }
-                }
-            }
-        });
-
-        // Set up ctrl-c handler
-        let ctrl_c_cancel = cancel.clone();
-        tasks.spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = ctrl_c_cancel.cancelled() => {
-                        return Ok::<(), Error>(())
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Received ctrl-c, shutting down...");
-                        ctrl_c_cancel.cancel();
-                        return Ok(())
                     }
                 }
             }
@@ -311,7 +308,7 @@ impl App {
             seeder,
             WithVeilidConnection::new(node.clone(), conn_state),
         );
-        tasks.spawn(async move { seeder_op.join().await });
+        tasks.spawn(seeder_op.join());
 
         info!("Seeding until ctrl-c...");
         let seed_progress = self.multi_progress.add(ProgressBar::new_spinner());
@@ -330,11 +327,6 @@ impl App {
 
         // Keep seeding until ctrl-c or fetcher exits
         let res = select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("Received ctrl-c, shutting down...");
-                cancel.cancel();
-                Ok(())
-            }
             join_res = fetcher_task => {
                 cancel.cancel();
                 match join_res {

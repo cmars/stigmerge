@@ -160,7 +160,10 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
     pub async fn call(&mut self, mut req: Req) -> Result<Req::Response> {
         let (resp_ch, resp_rx) = ResponseChannel::new_call();
         req.set_response(resp_ch);
-        self.request_tx.send_async(req).await?;
+        select! {
+            _ = self.cancel.cancelled() => { return Err(CancelError.into()); }
+            res = self.request_tx.send_async(req) => { res?; }
+        }
         Ok(resp_rx.await?)
     }
 
@@ -170,12 +173,18 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
         resp_tx: flume::Sender<Req::Response>,
     ) -> Result<()> {
         req.set_response(resp_tx.into());
-        self.request_tx.send_async(req).await?;
+        select! {
+            _ = self.cancel.cancelled() => { return Err(CancelError.into()); }
+            res = self.request_tx.send_async(req) => { res?; }
+        }
         Ok(())
     }
 
     pub(super) async fn send(&mut self, req: Req) -> Result<()> {
-        self.request_tx.send_async(req).await?;
+        select! {
+            _ = self.cancel.cancelled() => { return Err(CancelError.into()); }
+            res = self.request_tx.send_async(req) => { res?; }
+        }
         Ok(())
     }
 

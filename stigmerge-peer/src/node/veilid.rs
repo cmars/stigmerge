@@ -1,7 +1,7 @@
 use std::{cmp::min, path::Path, sync::Arc};
 
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 use veilid_core::{
     DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Target, ValueData,
     ValueSubkeyRangeSet, VeilidAPIError, VeilidUpdate,
@@ -53,7 +53,7 @@ impl Veilid {
             return Ok(rc.open_dht_record(dht_key, dht_owner_keypair).await?);
         }
         let o_cnt = header.subkeys() + 1;
-        debug!(o_cnt, "header subkeys");
+        trace!(o_cnt, "header subkeys");
         let dht_rec = rc
             .create_dht_record(DHTSchema::dflt(o_cnt)?, None, None)
             .await?;
@@ -139,7 +139,7 @@ impl Veilid {
     ) -> Result<()> {
         // Encode the header
         let header_bytes = header.encode()?;
-        debug!(
+        trace!(
             header_length = header_bytes.len(),
             key = key.to_string(),
             have_map_key = header.have_map().map(|hmr| hmr.key().to_string()),
@@ -165,7 +165,7 @@ impl Veilid {
                 return Ok(());
             }
             let count = min(ValueData::MAX_LEN, index_bytes.len() - offset);
-            debug!(offset, count, "writing index");
+            trace!(offset, count, "writing index");
             rc.set_dht_value(
                 dht_key.to_owned(),
                 subkey,
@@ -179,7 +179,7 @@ impl Veilid {
     }
 
     async fn read_header(&self, rc: &RoutingContext, key: &TypedKey) -> Result<Header> {
-        debug!(key = key.to_string());
+        trace!(key = key.to_string());
         let subkey_value = match rc.get_dht_value(key.to_owned(), 0, true).await? {
             Some(value) => value,
             None => {
@@ -191,7 +191,7 @@ impl Veilid {
             }
         };
         let header = Header::decode(subkey_value.data())?;
-        debug!(
+        trace!(
             header_length = subkey_value.data_size(),
             key = key.to_string(),
             have_map_key = header.have_map().map(|hmr| hmr.key().to_string()),
@@ -314,7 +314,7 @@ impl Node for Veilid {
         prior_route: Option<Target>,
         header: &Header,
     ) -> Result<(Target, Header)> {
-        debug!(key = key.to_string());
+        trace!(key = key.to_string());
         let rc = self.routing_context.read().await;
         self.release_prior_route(&rc, prior_route).await;
         let (announce_route, route_data) = rc.api().new_private_route().await?;
@@ -343,7 +343,7 @@ impl Node for Veilid {
         key: &TypedKey,
         prior_route: Option<Target>,
     ) -> Result<(Target, Header)> {
-        debug!(key = key.to_string());
+        trace!(key = key.to_string());
         let rc = self.routing_context.read().await;
         let _ = rc.open_dht_record(key.to_owned(), None).await?;
         self.release_prior_route(&rc, prior_route).await;
@@ -517,7 +517,7 @@ impl Node for Veilid {
             }
         };
 
-        debug!(
+        trace!(
             peer_share_key = peer_key.to_string(),
             have_map_key = have_map_ref.key().to_string()
         );
@@ -560,7 +560,7 @@ impl Node for Veilid {
             }
         };
 
-        debug!(
+        trace!(
             peer_share_key = peer_key.to_string(),
             peer_map_key = peer_map_ref.key().to_string()
         );
