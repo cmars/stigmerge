@@ -1,8 +1,8 @@
-use crate::node::TypedKey;
 use capnp::{
     message::{self, ReaderOptions},
     serialize,
 };
+use veilid_core::TypedRecordKey;
 
 use super::{
     stigmerge_capnp::request, Decoder, Encoder, Error, PublicKey, Result, MAX_INDEX_BYTES,
@@ -22,7 +22,7 @@ pub struct BlockRequest {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct AdvertisePeerRequest {
-    pub key: TypedKey,
+    pub key: TypedRecordKey,
 }
 
 impl Encoder for Request {
@@ -93,7 +93,7 @@ impl Decoder for Request {
                 }
 
                 Ok(Request::AdvertisePeer(AdvertisePeerRequest {
-                    key: TypedKey::new(typed_key_reader.get_kind().into(), key.into()),
+                    key: TypedRecordKey::new(typed_key_reader.get_kind().into(), key.into()),
                 }))
             }
             Err(e) => Err(e.into()),
@@ -103,9 +103,7 @@ impl Decoder for Request {
 
 #[cfg(test)]
 mod tests {
-    use veilid_core::CRYPTO_KIND_VLD0;
-
-    use crate::node::TypedKey;
+    use veilid_core::CryptoKind;
 
     use super::*;
 
@@ -119,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_advertise_peer() {
-        let key = TypedKey::new(CRYPTO_KIND_VLD0, [0xaa; 32].into());
+        let key = TypedRecordKey::new(CryptoKind::default(), [0xaa; 32].into());
         let message = Request::AdvertisePeer(AdvertisePeerRequest { key });
         let encoded = message.encode().unwrap();
         let decoded = Request::decode(&encoded).unwrap();

@@ -27,7 +27,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
-use veilid_core::TypedKey;
+use veilid_core::TypedRecordKey;
 
 use crate::{cli::Commands, initialize_stdout_logging, initialize_ui_logging, Cli};
 
@@ -168,7 +168,7 @@ impl App {
                 n_fetchers = *fetchers;
                 for share_key_str in share_keys.iter() {
                     debug!("resolving share key: {share_key_str}");
-                    let share_key: TypedKey = share_key_str.parse()?;
+                    let share_key: TypedRecordKey = share_key_str.parse()?;
                     let want_index_digest = match index_digest {
                         Some(digest_string) => {
                             let digest = hex::decode(digest_string)?;

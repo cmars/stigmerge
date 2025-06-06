@@ -19,7 +19,7 @@ use crate::{
     Error, Result,
 };
 
-use super::{Node, TypedKey};
+use super::{Node, TypedRecordKey};
 
 pub struct Veilid {
     routing_context: Arc<RwLock<RoutingContext>>,
@@ -134,7 +134,7 @@ impl Veilid {
     async fn write_header(
         &self,
         rc: &RoutingContext,
-        key: &TypedKey,
+        key: &TypedRecordKey,
         header: &Header,
     ) -> Result<()> {
         // Encode the header
@@ -155,7 +155,7 @@ impl Veilid {
     async fn write_index_bytes(
         &self,
         rc: &RoutingContext,
-        dht_key: &TypedKey,
+        dht_key: &TypedRecordKey,
         index_bytes: &[u8],
     ) -> Result<()> {
         let mut subkey = 1; // index starts at subkey 1 (header is subkey 0)
@@ -178,7 +178,7 @@ impl Veilid {
         }
     }
 
-    async fn read_header(&self, rc: &RoutingContext, key: &TypedKey) -> Result<Header> {
+    async fn read_header(&self, rc: &RoutingContext, key: &TypedRecordKey) -> Result<Header> {
         trace!(key = key.to_string());
         let subkey_value = match rc.get_dht_value(key.to_owned(), 0, true).await? {
             Some(value) => value,
@@ -203,7 +203,7 @@ impl Veilid {
     async fn read_index(
         &self,
         rc: &RoutingContext,
-        key: &TypedKey,
+        key: &TypedRecordKey,
         header: &Header,
         root: &Path,
     ) -> Result<Index> {
@@ -277,7 +277,7 @@ impl Node for Veilid {
         Ok(())
     }
 
-    async fn announce_index(&mut self, index: &Index) -> Result<(TypedKey, Target, Header)> {
+    async fn announce_index(&mut self, index: &Index) -> Result<(TypedRecordKey, Target, Header)> {
         let rc = self.routing_context.read().await;
         // Serialize index to index_bytes
         let index_bytes = index.encode()?;
@@ -310,7 +310,7 @@ impl Node for Veilid {
 
     async fn announce_route(
         &mut self,
-        key: &TypedKey,
+        key: &TypedRecordKey,
         prior_route: Option<Target>,
         header: &Header,
     ) -> Result<(Target, Header)> {
@@ -325,7 +325,7 @@ impl Node for Veilid {
 
     async fn resolve_route_index(
         &mut self,
-        key: &TypedKey,
+        key: &TypedRecordKey,
         root: &Path,
     ) -> Result<(Target, Header, Index)> {
         let rc = self.routing_context.read().await;
@@ -340,7 +340,7 @@ impl Node for Veilid {
 
     async fn resolve_route(
         &mut self,
-        key: &TypedKey,
+        key: &TypedRecordKey,
         prior_route: Option<Target>,
     ) -> Result<(Target, Header)> {
         trace!(key = key.to_string());
@@ -386,7 +386,11 @@ impl Node for Veilid {
         Ok(())
     }
 
-    async fn request_advertise_peer(&mut self, target: &Target, key: &TypedKey) -> Result<()> {
+    async fn request_advertise_peer(
+        &mut self,
+        target: &Target,
+        key: &TypedRecordKey,
+    ) -> Result<()> {
         let rc = self.routing_context.read().await;
         let req = Request::AdvertisePeer(AdvertisePeerRequest { key: *key });
         let req_bytes = req.encode()?;
@@ -394,7 +398,7 @@ impl Node for Veilid {
         Ok(())
     }
 
-    async fn watch(&mut self, key: TypedKey, values: ValueSubkeyRangeSet) -> Result<()> {
+    async fn watch(&mut self, key: TypedRecordKey, values: ValueSubkeyRangeSet) -> Result<()> {
         {
             // Ensure DHT record is open on this node
             let _ = self
@@ -412,7 +416,7 @@ impl Node for Veilid {
         Ok(())
     }
 
-    async fn cancel_watch(&mut self, key: &TypedKey) -> Result<()> {
+    async fn cancel_watch(&mut self, key: &TypedRecordKey) -> Result<()> {
         let rc = self.routing_context.clone();
         let routing_context = rc.read().await;
         routing_context
@@ -423,7 +427,7 @@ impl Node for Veilid {
 
     async fn merge_have_map(
         &mut self,
-        key: TypedKey,
+        key: TypedRecordKey,
         subkeys: ValueSubkeyRangeSet,
         have_map: &mut PieceMap,
     ) -> Result<()> {
@@ -442,7 +446,7 @@ impl Node for Veilid {
         Ok(())
     }
 
-    async fn announce_have_map(&mut self, key: TypedKey, have_map: &PieceMap) -> Result<()> {
+    async fn announce_have_map(&mut self, key: TypedRecordKey, have_map: &PieceMap) -> Result<()> {
         let rc = self.routing_context.read().await;
         let data = have_map.as_ref();
         let subkeys = (data.len() / ValueData::MAX_LEN)
@@ -468,7 +472,7 @@ impl Node for Veilid {
     async fn announce_peer(
         &mut self,
         payload_digest: &[u8],
-        peer_key: Option<TypedKey>,
+        peer_key: Option<TypedRecordKey>,
         subkey: u16,
     ) -> Result<()> {
         let rc = self.routing_context.read().await;
@@ -506,7 +510,7 @@ impl Node for Veilid {
         Ok(())
     }
 
-    async fn resolve_have_map(&mut self, peer_key: &TypedKey) -> Result<PieceMap> {
+    async fn resolve_have_map(&mut self, peer_key: &TypedRecordKey) -> Result<PieceMap> {
         let (_, header) = self.resolve_route(peer_key, None).await?;
         let have_map_ref = match header.have_map() {
             Some(have_map_ref) => have_map_ref,
@@ -549,7 +553,7 @@ impl Node for Veilid {
         Ok(have_map)
     }
 
-    async fn resolve_peers(&mut self, peer_key: &TypedKey) -> Result<Vec<PeerInfo>> {
+    async fn resolve_peers(&mut self, peer_key: &TypedRecordKey) -> Result<Vec<PeerInfo>> {
         let (_, header) = self.resolve_route(peer_key, None).await?;
         let peer_map_ref = match header.peer_map() {
             Some(peer_map_ref) => peer_map_ref,

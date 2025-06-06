@@ -4,12 +4,11 @@ use anyhow::Context;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
-use veilid_core::VeilidUpdate;
+use veilid_core::{TypedRecordKey, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     error::Unrecoverable,
-    node::TypedKey,
     proto::{self, Decoder},
     Node, Result,
 };
@@ -23,8 +22,8 @@ use crate::{
 pub struct PeerAnnouncer<N: Node> {
     node: N,
     payload_digest: Vec<u8>,
-    peer_indexes: HashMap<TypedKey, usize>,
-    peers: Vec<Option<TypedKey>>,
+    peer_indexes: HashMap<TypedRecordKey, usize>,
+    peers: Vec<Option<TypedRecordKey>>,
     max_peers: u16,
 }
 
@@ -42,7 +41,7 @@ impl<N: Node> PeerAnnouncer<N> {
         }
     }
 
-    fn assign_peer_index(&mut self, key: TypedKey) -> u16 {
+    fn assign_peer_index(&mut self, key: TypedRecordKey) -> u16 {
         for (i, maybe_key) in self.peers.iter_mut().enumerate() {
             if let None = maybe_key {
                 *maybe_key = Some(key);
@@ -63,14 +62,14 @@ pub enum Request {
     /// Announce a known remote peer in good standing.
     Announce {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 
     /// Redact a known peer, it may be unavailable or defective
     /// from the point of view of this peer.
     Redact {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 
     /// Clear all peer announcements.
@@ -259,7 +258,7 @@ mod tests {
     };
 
     use tokio_util::sync::CancellationToken;
-    use veilid_core::TypedKey;
+    use veilid_core::TypedRecordKey;
 
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
@@ -272,7 +271,7 @@ mod tests {
         // Create a stub peer with a recording announce_peer_result
         let mut node = StubNode::new();
         let recorded_payload_digest = Arc::new(RwLock::new(None::<Vec<u8>>));
-        let recorded_peer_key = Arc::new(RwLock::new(None::<TypedKey>));
+        let recorded_peer_key = Arc::new(RwLock::new(None::<TypedRecordKey>));
         let recorded_index = Arc::new(RwLock::new(None::<u16>));
 
         let recorded_payload_digest_clone = recorded_payload_digest.clone();
@@ -288,7 +287,7 @@ mod tests {
         }));
 
         node.announce_peer_result = Arc::new(Mutex::new(
-            move |payload_digest: &[u8], peer_key: Option<TypedKey>, index: u16| {
+            move |payload_digest: &[u8], peer_key: Option<TypedRecordKey>, index: u16| {
                 *recorded_payload_digest_clone.write().unwrap() = Some(payload_digest.to_vec());
                 *recorded_peer_key_clone.write().unwrap() = peer_key;
                 *recorded_index_clone.write().unwrap() = Some(index);
@@ -298,8 +297,8 @@ mod tests {
 
         // Create test data
         let payload_digest = vec![0xab; 32];
-        let peer_key =
-            TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let peer_key = TypedRecordKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create peer announcer
         let cancel = CancellationToken::new();
@@ -340,7 +339,7 @@ mod tests {
         // Create a stub peer with recording announce_peer_result
         let mut node = StubNode::new();
         let recorded_payload_digest = Arc::new(RwLock::new(None::<Vec<u8>>));
-        let recorded_peer_key = Arc::new(RwLock::new(None::<TypedKey>));
+        let recorded_peer_key = Arc::new(RwLock::new(None::<TypedRecordKey>));
         let recorded_index = Arc::new(RwLock::new(None::<u16>));
 
         let recorded_payload_digest_clone = recorded_payload_digest.clone();
@@ -356,7 +355,7 @@ mod tests {
         }));
 
         node.announce_peer_result = Arc::new(Mutex::new(
-            move |payload_digest: &[u8], peer_key: Option<TypedKey>, index: u16| {
+            move |payload_digest: &[u8], peer_key: Option<TypedRecordKey>, index: u16| {
                 *recorded_payload_digest_clone.write().unwrap() = Some(payload_digest.to_vec());
                 *recorded_peer_key_clone.write().unwrap() = peer_key;
                 *recorded_index_clone.write().unwrap() = Some(index);
@@ -366,8 +365,8 @@ mod tests {
 
         // Create test data
         let payload_digest = vec![0xab; 32];
-        let peer_key =
-            TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let peer_key = TypedRecordKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create peer announcer
         let cancel = CancellationToken::new();

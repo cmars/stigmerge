@@ -3,12 +3,12 @@ use std::{fmt, ops::Deref, sync::Arc, time::Duration};
 use anyhow::Context;
 use tokio::{select, sync::RwLock};
 use tokio_util::sync::CancellationToken;
+use veilid_core::TypedRecordKey;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     error::Result,
     is_cancelled,
-    node::TypedKey,
     piece_map::PieceMap,
     Node,
 };
@@ -21,14 +21,14 @@ use crate::{
 #[derive(Clone)]
 pub struct HaveAnnouncer<N: Node> {
     node: N,
-    key: TypedKey,
+    key: TypedRecordKey,
     pieces_map: Arc<RwLock<PieceMap>>,
     announce_interval: Duration,
 }
 
 impl<N: Node> HaveAnnouncer<N> {
     /// Create a new have_announcer service.
-    pub fn new(node: N, key: TypedKey) -> Self {
+    pub fn new(node: N, key: TypedRecordKey) -> Self {
         Self {
             node,
             key,
@@ -178,7 +178,7 @@ mod tests {
     };
 
     use tokio_util::sync::CancellationToken;
-    use veilid_core::TypedKey;
+    use veilid_core::TypedRecordKey;
 
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
@@ -197,16 +197,17 @@ mod tests {
         let recorded_have_map_clone = recorded_have_map.clone();
         let recorded_key_clone = recorded_key.clone();
 
-        node.announce_have_map_result =
-            Arc::new(Mutex::new(move |key: TypedKey, have_map: &PieceMap| {
+        node.announce_have_map_result = Arc::new(Mutex::new(
+            move |key: TypedRecordKey, have_map: &PieceMap| {
                 *recorded_have_map_clone.write().unwrap() = Some(have_map.clone());
                 *recorded_key_clone.write().unwrap() = Some(key.clone());
                 Ok(())
-            }));
+            },
+        ));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create have announcer with a short announce interval
         let mut have_announcer = HaveAnnouncer::new(node.clone(), test_key.clone());
@@ -252,15 +253,16 @@ mod tests {
         let recorded_have_map = Arc::new(RwLock::new(None));
 
         let recorded_have_map_clone = recorded_have_map.clone();
-        node.announce_have_map_result =
-            Arc::new(Mutex::new(move |_key: TypedKey, have_map: &PieceMap| {
+        node.announce_have_map_result = Arc::new(Mutex::new(
+            move |_key: TypedRecordKey, have_map: &PieceMap| {
                 *recorded_have_map_clone.write().unwrap() = Some(have_map.clone());
                 Ok(())
-            }));
+            },
+        ));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
         let mut have_announcer = HaveAnnouncer::new(node.clone(), test_key);
         have_announcer.announce_interval = std::time::Duration::from_millis(1);
         let cancel = CancellationToken::new();
@@ -304,15 +306,16 @@ mod tests {
         let recorded_have_map = Arc::new(RwLock::new(None));
 
         let recorded_have_map_clone = recorded_have_map.clone();
-        node.announce_have_map_result =
-            Arc::new(Mutex::new(move |_key: TypedKey, have_map: &PieceMap| {
+        node.announce_have_map_result = Arc::new(Mutex::new(
+            move |_key: TypedRecordKey, have_map: &PieceMap| {
                 *recorded_have_map_clone.write().unwrap() = Some(have_map.clone());
                 Ok(())
-            }));
+            },
+        ));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         let mut have_announcer = HaveAnnouncer::new(node.clone(), test_key);
         let cancel = CancellationToken::new();

@@ -42,7 +42,7 @@ use stigmerge_peer::piece_verifier::PieceVerifier;
 use stigmerge_peer::share_resolver::{self, ShareResolver};
 use stigmerge_peer::types::ShareInfo;
 use stigmerge_peer::Error;
-use veilid_core::TypedKey;
+use veilid_core::TypedRecordKey;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {
@@ -74,7 +74,7 @@ async fn main() -> std::result::Result<(), Error> {
     );
 
     // Parse share key and want_index_digest
-    let key: TypedKey = share_key.parse()?;
+    let key: TypedRecordKey = share_key.parse()?;
     let want_index_digest = hex::decode(want_index_digest)?;
     let want_index_digest: [u8; 32] = want_index_digest
         .try_into()

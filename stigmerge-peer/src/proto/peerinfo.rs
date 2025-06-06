@@ -2,29 +2,29 @@ use capnp::{
     message::{self, ReaderOptions},
     serialize,
 };
-use veilid_core::{Timestamp, TypedKey};
+use veilid_core::{Timestamp, TypedRecordKey};
 
 use super::{stigmerge_capnp::peer_info, Decoder, Encoder, PublicKey};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct PeerInfo {
-    key: TypedKey,
+    key: TypedRecordKey,
     updated_at: Timestamp,
 }
 
 impl PeerInfo {
-    pub fn new(key: TypedKey) -> Self {
+    pub fn new(key: TypedRecordKey) -> Self {
         Self {
             key,
             updated_at: Timestamp::now(),
         }
     }
 
-    pub fn new_updated_at(key: TypedKey, updated_at: Timestamp) -> Self {
+    pub fn new_updated_at(key: TypedRecordKey, updated_at: Timestamp) -> Self {
         Self { key, updated_at }
     }
 
-    pub fn key(&self) -> &TypedKey {
+    pub fn key(&self) -> &TypedRecordKey {
         &self.key
     }
 
@@ -68,7 +68,7 @@ impl Decoder for PeerInfo {
         key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
 
         Ok(Self {
-            key: TypedKey::new(typed_key_reader.get_kind().into(), key.into()),
+            key: TypedRecordKey::new(typed_key_reader.get_kind().into(), key.into()),
             updated_at: Timestamp::new(peer_info_reader.get_updated_at()),
         })
     }
@@ -78,13 +78,14 @@ impl Decoder for PeerInfo {
 mod tests {
     use std::str::FromStr;
 
-    use veilid_core::TypedKey;
+    use veilid_core::TypedRecordKey;
 
     use crate::proto::{Decoder, Encoder, PeerInfo};
 
     #[test]
     fn test_encode_decode() {
-        let key = TypedKey::from_str("VLD0:mluySonu8GKEd2AYTY0KB8y7upLHlXwm4movvucbfoQ").unwrap();
+        let key =
+            TypedRecordKey::from_str("VLD0:mluySonu8GKEd2AYTY0KB8y7upLHlXwm4movvucbfoQ").unwrap();
         let peer_info = PeerInfo::new(key);
         let encoded = peer_info.encode().unwrap();
         let decoded = PeerInfo::decode(&encoded).unwrap();

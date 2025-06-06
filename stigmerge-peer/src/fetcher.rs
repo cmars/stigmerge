@@ -9,11 +9,10 @@ use tokio::time::interval;
 use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
-use veilid_core::Target;
+use veilid_core::{Target, TypedRecordKey};
 
 use crate::actor::ResponseChannel;
 use crate::error::Unrecoverable;
-use crate::node::TypedKey;
 use crate::peer_tracker::PeerTracker;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
@@ -49,9 +48,9 @@ pub struct Clients {
     pub piece_verifier: Operator<piece_verifier::Request>,
     pub have_announcer: Operator<have_announcer::Request>,
     pub share_resolver: Operator<share_resolver::Request>,
-    pub share_target_rx: flume::Receiver<(TypedKey, Target)>,
+    pub share_target_rx: flume::Receiver<(TypedRecordKey, Target)>,
     pub peer_resolver: Operator<peer_resolver::Request>,
-    pub discovered_peers_rx: flume::Receiver<(TypedKey, proto::PeerInfo)>,
+    pub discovered_peers_rx: flume::Receiver<(TypedRecordKey, proto::PeerInfo)>,
 }
 
 #[derive(Debug)]

@@ -2,9 +2,9 @@ use std::collections::{hash_map::Keys, HashMap};
 
 use moka::future::Cache;
 use tracing::debug;
-use veilid_core::Target;
+use veilid_core::{Target, TypedRecordKey};
 
-use crate::{error::is_route_invalid, node::TypedKey, types::FileBlockFetch, Error, Result};
+use crate::{error::is_route_invalid, types::FileBlockFetch, Error, Result};
 
 #[derive(Debug, Clone)]
 struct PeerStatus {
@@ -29,8 +29,8 @@ impl Default for PeerStatus {
 }
 
 pub struct PeerTracker {
-    targets: HashMap<TypedKey, Target>,
-    peer_status: Cache<TypedKey, PeerStatus>,
+    targets: HashMap<TypedRecordKey, Target>,
+    peer_status: Cache<TypedRecordKey, PeerStatus>,
 }
 
 const MAX_TRACKED_PEERS: u64 = 64;
@@ -43,11 +43,11 @@ impl PeerTracker {
         }
     }
 
-    pub fn keys(&self) -> Keys<'_, TypedKey, Target> {
+    pub fn keys(&self) -> Keys<'_, TypedRecordKey, Target> {
         self.targets.keys()
     }
 
-    pub async fn update(&mut self, key: TypedKey, target: Target) -> Option<Target> {
+    pub async fn update(&mut self, key: TypedRecordKey, target: Target) -> Option<Target> {
         if !self.peer_status.contains_key(&key) {
             self.peer_status
                 .insert(key.clone(), PeerStatus::default())
@@ -56,11 +56,11 @@ impl PeerTracker {
         self.targets.insert(key, target)
     }
 
-    pub fn contains(&self, key: &TypedKey) -> bool {
+    pub fn contains(&self, key: &TypedRecordKey) -> bool {
         self.targets.contains_key(key)
     }
 
-    pub async fn fetch_ok(&mut self, key: &TypedKey) {
+    pub async fn fetch_ok(&mut self, key: &TypedRecordKey) {
         let mut status = match self.peer_status.get(&key).await {
             Some(status) => status,
             None => PeerStatus::default(),
@@ -70,7 +70,7 @@ impl PeerTracker {
         self.peer_status.insert(key.clone(), status).await;
     }
 
-    pub async fn fetch_err(&mut self, key: &TypedKey, err: &Error) {
+    pub async fn fetch_err(&mut self, key: &TypedRecordKey, err: &Error) {
         let mut status = match self.peer_status.get(&key).await {
             Some(status) => status,
             None => PeerStatus::default(),
@@ -82,9 +82,9 @@ impl PeerTracker {
     pub async fn share_target(
         &self,
         _block: &FileBlockFetch,
-    ) -> Result<Option<(&TypedKey, &Target)>> {
+    ) -> Result<Option<(&TypedRecordKey, &Target)>> {
         // TODO: factor in have_map and block
-        let mut peers: Vec<(TypedKey, PeerStatus)> = self
+        let mut peers: Vec<(TypedRecordKey, PeerStatus)> = self
             .peer_status
             .iter()
             .map(|(key, status)| (*key, status))
@@ -112,21 +112,22 @@ impl PeerTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use veilid_core::{CryptoKey, CRYPTO_KIND_VLD0};
+    use veilid_core::{CryptoKind, RecordKey, RouteId};
 
-    // Helper function to create a TypedKey for testing
-    fn create_typed_key(id: u8) -> TypedKey {
+    use super::*;
+
+    // Helper function to create a TypedRecordKey for testing
+    fn create_typed_key(id: u8) -> TypedRecordKey {
         let mut key_bytes = [0u8; 32];
         key_bytes[0] = id;
-        TypedKey::new(CRYPTO_KIND_VLD0, CryptoKey::from(key_bytes))
+        TypedRecordKey::new(CryptoKind::default(), RecordKey::from(key_bytes))
     }
 
     // Helper function to create a Target for testing
     fn create_target(id: u8) -> Target {
         let mut key_bytes = [0u8; 32];
         key_bytes[0] = id;
-        Target::PrivateRoute(CryptoKey::new(key_bytes))
+        Target::PrivateRoute(RouteId::new(key_bytes))
     }
 
     #[tokio::test]

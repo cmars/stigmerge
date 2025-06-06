@@ -3,15 +3,13 @@ use std::{future::Future, path::Path};
 
 use backoff::ExponentialBackoff;
 use tokio::sync::broadcast;
-use veilid_core::{CryptoKey, CryptoTyped, OperationId, Target, ValueSubkeyRangeSet, VeilidUpdate};
+use veilid_core::{OperationId, Target, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 
 use stigmerge_fileindex::Index;
 
 use crate::piece_map::PieceMap;
 use crate::proto::PeerInfo;
 use crate::{proto::Header, Result};
-
-pub type TypedKey = CryptoTyped<CryptoKey>;
 
 pub trait Node: Clone + Send {
     fn subscribe_veilid_update(&self) -> broadcast::Receiver<VeilidUpdate>;
@@ -22,22 +20,22 @@ pub trait Node: Clone + Send {
     fn announce_index(
         &mut self,
         index: &Index,
-    ) -> impl std::future::Future<Output = Result<(TypedKey, Target, Header)>> + Send;
+    ) -> impl std::future::Future<Output = Result<(TypedRecordKey, Target, Header)>> + Send;
     fn announce_route(
         &mut self,
-        key: &TypedKey,
+        key: &TypedRecordKey,
         prior_route: Option<Target>,
         header: &Header,
     ) -> impl std::future::Future<Output = Result<(Target, Header)>> + Send;
 
     fn resolve_route_index(
         &mut self,
-        key: &TypedKey,
+        key: &TypedRecordKey,
         root: &Path,
     ) -> impl std::future::Future<Output = Result<(Target, Header, Index)>> + Send;
     fn resolve_route(
         &mut self,
-        key: &TypedKey,
+        key: &TypedRecordKey,
         prior_route: Option<Target>,
     ) -> impl Future<Output = Result<(Target, Header)>> + Send;
 
@@ -57,42 +55,42 @@ pub trait Node: Clone + Send {
     fn request_advertise_peer(
         &mut self,
         target: &Target,
-        key: &TypedKey,
+        key: &TypedRecordKey,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn watch(
         &mut self,
-        key: TypedKey,
+        key: TypedRecordKey,
         values: ValueSubkeyRangeSet,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn cancel_watch(
         &mut self,
-        key: &TypedKey,
+        key: &TypedRecordKey,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn merge_have_map(
         &mut self,
-        key: TypedKey,
+        key: TypedRecordKey,
         subkeys: ValueSubkeyRangeSet,
         have_map: &mut PieceMap,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn announce_have_map(
         &mut self,
-        key: TypedKey,
+        key: TypedRecordKey,
         have_map: &PieceMap,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     fn resolve_have_map(
         &mut self,
-        peer_key: &TypedKey,
+        peer_key: &TypedRecordKey,
     ) -> impl std::future::Future<Output = Result<PieceMap>> + Send;
 
     fn announce_peer(
         &mut self,
         payload_digest: &[u8],
-        peer_key: Option<TypedKey>,
+        peer_key: Option<TypedRecordKey>,
         subkey: u16,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
@@ -104,7 +102,7 @@ pub trait Node: Clone + Send {
 
     fn resolve_peers(
         &mut self,
-        peer_key: &TypedKey,
+        peer_key: &TypedRecordKey,
     ) -> impl std::future::Future<Output = Result<Vec<PeerInfo>>> + Send;
 }
 

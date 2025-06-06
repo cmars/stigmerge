@@ -26,7 +26,7 @@ use tokio::select;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use veilid_core::{TypedKey, VeilidUpdate};
+use veilid_core::{TypedRecordKey, VeilidUpdate};
 
 use stigmerge_fileindex::Indexer;
 use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
@@ -105,7 +105,7 @@ async fn main() -> std::result::Result<(), Error> {
 
     // Announce initial peer keys
     for peer_share_key_str in args.peer_keys {
-        let peer_share_key = TypedKey::from_str(&peer_share_key_str)
+        let peer_share_key = TypedRecordKey::from_str(&peer_share_key_str)
             .map_err(|e| anyhow::anyhow!("invalid peer share key {}: {}", peer_share_key_str, e))?;
 
         match peer_announcer_op

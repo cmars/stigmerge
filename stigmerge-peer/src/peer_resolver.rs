@@ -4,12 +4,11 @@ use anyhow::Context;
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
-use veilid_core::{ValueSubkeyRangeSet, VeilidUpdate};
+use veilid_core::{TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     error::Unrecoverable,
-    node::TypedKey,
     proto::{self, Decoder, PeerInfo},
     Node, Result,
 };
@@ -20,10 +19,10 @@ pub struct PeerResolver<N: Node> {
     node: N,
 
     // Mapping from peer-map key to share key, used in watches
-    peer_to_share_map: HashMap<TypedKey, TypedKey>,
+    peer_to_share_map: HashMap<TypedRecordKey, TypedRecordKey>,
 
-    discovered_peer_tx: flume::Sender<(TypedKey, PeerInfo)>,
-    discovered_peer_rx: flume::Receiver<(TypedKey, PeerInfo)>,
+    discovered_peer_tx: flume::Sender<(TypedRecordKey, PeerInfo)>,
+    discovered_peer_rx: flume::Receiver<(TypedRecordKey, PeerInfo)>,
 }
 
 impl<P> PeerResolver<P>
@@ -41,7 +40,7 @@ where
         }
     }
 
-    pub fn subscribe_discovered_peers(&self) -> flume::Receiver<(TypedKey, PeerInfo)> {
+    pub fn subscribe_discovered_peers(&self) -> flume::Receiver<(TypedRecordKey, PeerInfo)> {
         self.discovered_peer_rx.clone()
     }
 }
@@ -52,20 +51,20 @@ pub enum Request {
     /// response.
     Resolve {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 
     /// Watch for changes in known peers at the given share key. This will
     /// result in a series of resolve responses being sent as the peers change.
     Watch {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 
     /// Cancel the peer watch on the share key.
     CancelWatch {
         response_tx: ResponseChannel<Response>,
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 }
 
@@ -92,18 +91,18 @@ impl Respondable for Request {
 #[derive(Clone, Debug)]
 pub enum Response {
     NotAvailable {
-        key: TypedKey,
+        key: TypedRecordKey,
         err_msg: String,
     },
     Resolve {
-        key: TypedKey,
-        peers: HashMap<TypedKey, PeerInfo>,
+        key: TypedRecordKey,
+        peers: HashMap<TypedRecordKey, PeerInfo>,
     },
     Watching {
-        key: TypedKey,
+        key: TypedRecordKey,
     },
     WatchCancelled {
-        key: TypedKey,
+        key: TypedRecordKey,
     },
 }
 
@@ -181,7 +180,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                         peers: peers
                             .into_iter()
                             .map(|peer| (peer.key().to_owned(), peer))
-                            .collect::<HashMap<TypedKey, PeerInfo>>(),
+                            .collect::<HashMap<TypedRecordKey, PeerInfo>>(),
                     },
                     Err(err) => Response::NotAvailable {
                         key: key.to_owned(),
@@ -290,7 +289,7 @@ mod tests {
     };
 
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{TypedKey, ValueSubkeyRangeSet};
+    use veilid_core::{PublicKey, RouteId, TypedRecordKey, ValueSubkeyRangeSet};
 
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
@@ -309,17 +308,18 @@ mod tests {
 
         // Create a test peer key to return
         let test_peer_key =
-            TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+            TypedRecordKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+                .expect("key");
         let test_peer_info = PeerInfo::new(test_peer_key.clone());
 
-        node.resolve_peers_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+        node.resolve_peers_result = Arc::new(Mutex::new(move |key: &TypedRecordKey| {
             *recorded_key_clone.write().unwrap() = Some(key.to_owned());
             Ok(vec![test_peer_info.clone()])
         }));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create peer resolver
         let cancel = CancellationToken::new();
@@ -368,7 +368,8 @@ mod tests {
 
         // Setup the resolve_route_result to return a header with a peer_map
         let peer_map_key =
-            TypedKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+            TypedRecordKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+                .expect("key");
         let peer_map_ref = crate::proto::PeerMapRef::new(peer_map_key.clone(), 0);
         let header = crate::proto::Header::new(
             [0u8; 32],          // payload_digest
@@ -380,16 +381,16 @@ mod tests {
         );
 
         node.resolve_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedKey, _prior_route: Option<veilid_core::Target>| {
+            move |_key: &TypedRecordKey, _prior_route: Option<veilid_core::Target>| {
                 Ok((
-                    veilid_core::Target::PrivateRoute(veilid_core::CryptoKey::new([0u8; 32])),
+                    veilid_core::Target::PrivateRoute(RouteId::new([0u8; 32])),
                     header.clone(),
                 ))
             },
         ));
 
         node.watch_result = Arc::new(Mutex::new(
-            move |key: TypedKey, subkeys: ValueSubkeyRangeSet| {
+            move |key: TypedRecordKey, subkeys: ValueSubkeyRangeSet| {
                 *recorded_key_clone.write().unwrap() = Some(key);
                 *recorded_subkeys_clone.write().unwrap() = Some(subkeys);
                 Ok(())
@@ -397,8 +398,8 @@ mod tests {
         ));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create peer resolver
         let cancel = CancellationToken::new();
@@ -444,14 +445,15 @@ mod tests {
         let recorded_key = Arc::new(RwLock::new(None));
 
         let recorded_key_clone = recorded_key.clone();
-        node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedKey| {
+        node.cancel_watch_result = Arc::new(Mutex::new(move |key: &TypedRecordKey| {
             *recorded_key_clone.write().unwrap() = Some(key.clone());
             Ok(())
         }));
 
         // Setup the resolve_route_result to return a header with a peer_map
         let peer_map_key =
-            TypedKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+            TypedRecordKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+                .expect("key");
         let peer_map_ref = crate::proto::PeerMapRef::new(peer_map_key.clone(), 0);
         let header = crate::proto::Header::new(
             [0u8; 32],          // payload_digest
@@ -463,17 +465,17 @@ mod tests {
         );
 
         node.resolve_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedKey, _prior_route: Option<veilid_core::Target>| {
+            move |_key: &TypedRecordKey, _prior_route: Option<veilid_core::Target>| {
                 Ok((
-                    veilid_core::Target::PrivateRoute(veilid_core::CryptoKey::new([0u8; 32])),
+                    veilid_core::Target::PrivateRoute(RouteId::new([0u8; 32])),
                     header.clone(),
                 ))
             },
         ));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Create peer resolver
         let cancel = CancellationToken::new();
@@ -511,18 +513,19 @@ mod tests {
         let mut node = StubNode::new();
 
         node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedKey, _subkeys: ValueSubkeyRangeSet| Ok(()),
+            move |_key: TypedRecordKey, _subkeys: ValueSubkeyRangeSet| Ok(()),
         ));
 
         // Create a test key and channel
-        let test_key =
-            TypedKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
-        let peer_key =
-            TypedKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+        let test_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
+        let peer_key = TypedRecordKey::from_str("VLD0:dDHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+            .expect("key");
 
         // Setup the resolve_route_result to return a header with a peer_map
         let peer_map_key =
-            TypedKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
+            TypedRecordKey::from_str("VLD0:eCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+                .expect("key");
         let peer_map_ref = crate::proto::PeerMapRef::new(peer_map_key.clone(), 1);
         let header = crate::proto::Header::new(
             [0u8; 32],                 // payload_digest
@@ -534,9 +537,9 @@ mod tests {
         );
 
         node.resolve_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedKey, _prior_route: Option<veilid_core::Target>| {
+            move |_key: &TypedRecordKey, _prior_route: Option<veilid_core::Target>| {
                 Ok((
-                    veilid_core::Target::PrivateRoute(veilid_core::CryptoKey::new([0u8; 32])),
+                    veilid_core::Target::PrivateRoute(RouteId::new([0u8; 32])),
                     header.clone(),
                 ))
             },
@@ -570,9 +573,9 @@ mod tests {
         let encoded_peer_info = peer_info.encode().expect("encode peer info");
 
         // Simulate a value change notification
-        let crypto_key = veilid_core::CryptoKey::new([0xbe; veilid_core::CRYPTO_KEY_LENGTH]);
+        let signing_key = PublicKey::new([0xbe; veilid_core::CRYPTO_KEY_LENGTH]);
         let value_data =
-            veilid_core::ValueData::new(encoded_peer_info, crypto_key).expect("new value data");
+            veilid_core::ValueData::new(encoded_peer_info, signing_key).expect("new value data");
 
         let change = veilid_core::VeilidValueChange {
             key: peer_map_key.clone(),

@@ -1,7 +1,8 @@
 use std::{env, str::FromStr};
 
 use veilid_core::{
-    ConfigCallbackReturn, FourCC, TypedKey, TypedKeyGroup, TypedSecretGroup, VeilidAPIError,
+    ConfigCallbackReturn, TypedNodeIdGroup, TypedPublicKey, TypedSecretKeyGroup, VeilidAPIError,
+    VeilidCapability,
 };
 
 pub fn node_addr() -> Option<String> {
@@ -19,7 +20,7 @@ pub fn callback(state_dir: String, ns: Option<String>, key: String) -> ConfigCal
         } else {
             Box::<String>::default()
         }),
-        "capabilities.disable" => Ok(Box::<Vec<FourCC>>::default()),
+        "capabilities.disable" => Ok(Box::<Vec<VeilidCapability>>::default()),
         "table_store.directory" => Ok(Box::new(get_table_store_path(&state_dir))),
         "table_store.delete" => Ok(Box::new(false)),
         "block_store.directory" => Ok(Box::new(get_block_store_path(&state_dir))),
@@ -46,15 +47,15 @@ pub fn callback(state_dir: String, ns: Option<String>, key: String) -> ConfigCal
         "network.reverse_connection_receipt_time_ms" => Ok(Box::new(5_000u32)),
         "network.hole_punch_receipt_time_ms" => Ok(Box::new(5_000u32)),
         "network.network_key_password" => Ok(Box::new(Option::<String>::None)),
-        "network.routing_table.node_id" => Ok(Box::new(TypedKeyGroup::new())),
-        "network.routing_table.node_id_secret" => Ok(Box::new(TypedSecretGroup::new())),
+        "network.routing_table.node_id" => Ok(Box::new(TypedNodeIdGroup::new())),
+        "network.routing_table.node_id_secret" => Ok(Box::new(TypedSecretKeyGroup::new())),
         "network.routing_table.bootstrap" => {
             Ok(Box::new(vec!["bootstrap-v1.veilid.net".to_string()]))
         }
         "network.routing_table.bootstrap_keys" => Ok(Box::new(vec![
-            TypedKey::from_str("VLD0:Vj0lKDdUQXmQ5Ol1SZdlvXkBHUccBcQvGLN9vbLSI7k").unwrap(),
-            TypedKey::from_str("VLD0:QeQJorqbXtC7v3OlynCZ_W3m76wGNeB5NTF81ypqHAo").unwrap(),
-            TypedKey::from_str("VLD0:QNdcl-0OiFfYVj9331XVR6IqZ49NG-E18d5P7lwi4TA").unwrap(),
+            TypedPublicKey::from_str("VLD0:Vj0lKDdUQXmQ5Ol1SZdlvXkBHUccBcQvGLN9vbLSI7k").unwrap(),
+            TypedPublicKey::from_str("VLD0:QeQJorqbXtC7v3OlynCZ_W3m76wGNeB5NTF81ypqHAo").unwrap(),
+            TypedPublicKey::from_str("VLD0:QNdcl-0OiFfYVj9331XVR6IqZ49NG-E18d5P7lwi4TA").unwrap(),
         ])),
         "network.routing_table.limit_over_attached" => Ok(Box::new(64u32)),
         "network.routing_table.limit_fully_attached" => Ok(Box::new(32u32)),
