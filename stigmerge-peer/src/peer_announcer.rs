@@ -334,7 +334,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -409,7 +409,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -457,6 +457,6 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 }

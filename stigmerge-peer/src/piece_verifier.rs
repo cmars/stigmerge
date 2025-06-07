@@ -282,7 +282,7 @@ mod tests {
 
         // shut down verifier
         cancel.cancel();
-        operator.join().await.expect("verifier task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -394,7 +394,7 @@ mod tests {
 
         // shut down verifier
         cancel.cancel();
-        operator.join().await.expect("verifier task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -458,6 +458,6 @@ mod tests {
 
         // shut down verifier
         cancel.cancel();
-        operator.join().await.expect("verifier task");
+        operator.join().await.expect_err("cancelled");
     }
 }

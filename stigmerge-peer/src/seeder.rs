@@ -308,7 +308,7 @@ mod tests {
 
         // Cancel the seeder
         cancel.cancel();
-        operator.join().await.expect("seeder task");
+        operator.join().await.expect_err("cancelled");
 
         // Verify reply_block_contents was called
         assert!(
@@ -411,7 +411,7 @@ mod tests {
         cancel.cancel();
 
         // Verify seeder exits cleanly
-        operator.join().await.expect("seeder task");
+        operator.join().await.expect_err("cancelled");
 
         // Verify reply_block_contents was called
         assert!(

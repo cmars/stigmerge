@@ -456,7 +456,7 @@ mod tests {
         cancel.cancel();
 
         // Service run terminates
-        operator.join().await.expect("join");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -532,6 +532,6 @@ mod tests {
         cancel.cancel();
 
         // Service run terminates
-        operator.join().await.expect("join");
+        operator.join().await.expect_err("cancelled");
     }
 }

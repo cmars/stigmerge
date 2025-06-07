@@ -243,7 +243,7 @@ mod tests {
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -296,7 +296,7 @@ mod tests {
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -352,6 +352,6 @@ mod tests {
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 }

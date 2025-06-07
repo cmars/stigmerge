@@ -296,7 +296,7 @@ mod tests {
         cancel.cancel();
 
         // Service run terminates
-        operator.join().await.expect("svc task");
+        operator.join().await.expect_err("cancelled");
     }
 
     // This test directly tests the reannounce method without using the Actor trait
