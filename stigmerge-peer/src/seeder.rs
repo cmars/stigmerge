@@ -14,7 +14,7 @@ use veilid_core::VeilidUpdate;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::Unrecoverable,
+    error::{CancelError, Unrecoverable},
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
     types::{PieceState, ShareInfo},
@@ -109,7 +109,7 @@ impl<P: Node> Actor for Seeder<P> {
             select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return Ok(());
+                    return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
                     let req = res.with_context(|| format!("seeder: receive request"))?;

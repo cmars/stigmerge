@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::{Result, Unrecoverable},
+    error::{CancelError, Result, Unrecoverable},
     types::PieceState,
 };
 
@@ -149,7 +149,7 @@ impl Actor for PieceVerifier {
         loop {
             select! {
                 _ = cancel.cancelled() => {
-                    return Ok(());
+                    return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
                     let req = res.with_context(|| format!("piece_verifier: receive request"))?;

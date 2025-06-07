@@ -28,7 +28,7 @@ use tokio::sync::broadcast;
 use tracing::warn;
 use veilid_core::{RoutingContext, VeilidUpdate};
 
-pub use error::{is_cancelled, is_unrecoverable, Error, Result};
+pub use error::{is_cancelled, is_unrecoverable, CancelError, Error, Result};
 pub use node::{Node, Veilid};
 
 #[cfg(test)]
