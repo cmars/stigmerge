@@ -242,7 +242,6 @@ async fn main() -> std::result::Result<(), Error> {
                                 }
                                 _ => {}  // Ignore other request types
                             }
-
                         }
                         VeilidUpdate::Shutdown => {
                             cancel.cancel();

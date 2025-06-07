@@ -158,7 +158,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                             }
                         }
                         VeilidUpdate::Shutdown => {
-                            return Ok(());
+                            cancel.cancel();
                         }
                         _ => {}
                     }

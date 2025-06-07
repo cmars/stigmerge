@@ -146,6 +146,9 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                                             self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
                                         }
                                     },
+                                    VeilidUpdate::Shutdown => {
+                                        cancel.cancel();
+                                    }
                                     _ => {}
                                 }
                             }

@@ -166,7 +166,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                             }
                         }
                         VeilidUpdate::Shutdown => {
-                            return Ok(());
+                            cancel.cancel();
                         }
                         _ => {}
                     }

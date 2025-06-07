@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use tokio::time::interval;
 use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use veilid_core::{Target, TypedRecordKey};
 
 use crate::actor::ResponseChannel;
@@ -16,7 +16,9 @@ use crate::error::{CancelError, Unrecoverable};
 use crate::peer_tracker::PeerTracker;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
-use crate::{block_fetcher, peer_resolver, piece_verifier, proto, share_resolver, Node, Result};
+use crate::{
+    block_fetcher, is_cancelled, peer_resolver, piece_verifier, proto, share_resolver, Node, Result,
+};
 
 pub struct Fetcher<N: Node> {
     node: N,
@@ -132,6 +134,9 @@ impl<N: Node> Fetcher<N> {
             match res {
                 Ok(state) => self.state = state,
                 Err(e) => {
+                    if !is_cancelled(&e) {
+                        error!("{e}");
+                    }
                     run_res = Err(e);
                     break;
                 }
@@ -142,6 +147,7 @@ impl<N: Node> Fetcher<N> {
     }
 
     async fn index(&mut self, cancel: CancellationToken) -> Result<State> {
+        debug!("indexing");
         let indexer = Indexer::from_wanted(&self.share.want_index)
             .await
             .context(Unrecoverable::new("indexer"))?;
@@ -156,7 +162,7 @@ impl<N: Node> Fetcher<N> {
             loop {
                 select! {
                     _ = status_cancel.cancelled() => {
-                        return Err(CancelError.into());
+                        return Ok(());
                     }
                     res = index_progress.changed() => {
                         res.context(Unrecoverable::new("receive index progress"))?;
@@ -188,16 +194,18 @@ impl<N: Node> Fetcher<N> {
 
         // Stop status updates
         status_task_cancel.cancel();
-        status_task
-            .await
-            .context(Unrecoverable::new("join status task"))?
-            .context(Unrecoverable::new("status task"))?;
+        match status_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => debug!("status progress: {e}"),
+            Err(e) => debug!("status progress task: {e}"),
+        };
 
         // Ready for planning
         Ok(State::Planning)
     }
 
     async fn plan(&mut self, cancel: CancellationToken) -> Result<State> {
+        debug!("planning");
         let diff = self.share.want_index.diff(&self.have_index);
         let mut want_length = 0;
         let total_length = self.share.want_index.payload().length();
@@ -253,6 +261,7 @@ impl<N: Node> Fetcher<N> {
     }
 
     async fn fetch(&mut self, cancel: CancellationToken) -> Result<State> {
+        debug!("fetching");
         let mut verified_pieces = 0u64;
         let mut fetched_bytes = self.status_tx.borrow().deref().position().unwrap_or(0);
         let total_pieces = self
@@ -287,7 +296,7 @@ impl<N: Node> Fetcher<N> {
                             if let Err(e) = self.node.request_advertise_peer(
                                 &target,
                                 &self.share.key).await.with_context(|| format!("advertising our share to new peer")) {
-                                    warn!("advertise share to new peer: {e}");
+                                    warn!("{e}");
                             }
                             refresh_routes_interval.reset();
                         }
@@ -401,6 +410,7 @@ impl<N: Node> Fetcher<N> {
                 // Resolve newly discovered peers
                 res = self.clients.discovered_peers_rx.recv_async() => {
                     let (key, peer_info) = res.context(Unrecoverable::new("receive discovered peer"))?;
+                    debug!("discovered peer {} from {}", peer_info.key(), key);
                     if !self.peer_tracker.contains(peer_info.key()) {
                         self.clients.share_resolver.call(share_resolver::Request::Index{
                             response_tx: ResponseChannel::default(),
@@ -424,7 +434,9 @@ impl<N: Node> Fetcher<N> {
                         // An empty fetcher channel means we've received a
                         // response for all block requests. However, some of
                         // these might fail to validate.
-                        Err(_) => continue,
+                        Err(e) => {
+                            trace!("receive block fetch response: {e}");
+                        },
                         Ok(block_fetcher::Response::Fetched { share_key, block, length }) => {
                             refresh_routes_interval.reset();
 
@@ -459,7 +471,6 @@ impl<N: Node> Fetcher<N> {
                             self.peer_tracker.fetch_err(&share_key, &err).await;
                             self.pending_fetch_tx.send_async(block).await.context(
                                 Unrecoverable::new("enqueue failed block fetch"))?;
-
                         }
                     }
                 }

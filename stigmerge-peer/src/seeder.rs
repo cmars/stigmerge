@@ -123,10 +123,10 @@ impl<P: Node> Actor for Seeder<P> {
                     let update = res.with_context(|| format!("seeder: receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
-                            trace!("app_call: {:?}", veilid_app_call);
                             let req = proto::Request::decode(veilid_app_call.message())?;
                             match req {
                                 proto::Request::BlockRequest(block_req) => {
+                                    trace!("app_call: {:?}", block_req);
                                     if self.piece_map.get(block_req.piece) {
                                         let rd = self.read_block_into(&block_req, &mut buf).await?;
                                         self.node.reply_block_contents(veilid_app_call.id(), Some(&buf[..rd])).await?;
@@ -136,6 +136,9 @@ impl<P: Node> Actor for Seeder<P> {
                                 }
                                 _ => {}  // Ignore other request types
                             }
+                        }
+                        VeilidUpdate::Shutdown => {
+                            cancel.cancel();
                         }
                         _ => {}
                     }

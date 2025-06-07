@@ -160,6 +160,9 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                                 _ => {}
                             }
                         }
+                        VeilidUpdate::Shutdown => {
+                            cancel.cancel();
+                        }
                         _ => {}
                     }
                 }

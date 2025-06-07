@@ -27,7 +27,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace, warn};
 use veilid_core::TypedRecordKey;
 
 use crate::{cli::Commands, initialize_stdout_logging, initialize_ui_logging, Cli};
@@ -69,34 +69,43 @@ impl App {
         let (routing_context, update_rx) = new_routing_context(&state_dir, None).await?;
         let node = Veilid::new(routing_context, update_rx).await?;
 
-        let res = self.run_with_node(node.clone()).await;
-        let _ = node.shutdown().await;
-        if let Err(e) = res {
-            error!(err = e.to_string());
-            return Err(e);
-        }
-        Ok(())
-    }
-
-    async fn run_with_node<T: Node + Sync + Send + 'static>(&self, node: T) -> Result<()> {
-        let mut tasks = JoinSet::new();
-
         // Set up cancellation token
         let cancel = CancellationToken::new();
 
         // Set up ctrl-c handler
         let ctrl_c_cancel = cancel.clone();
         let ctrl_c_node = node.clone();
-        tasks.spawn(async move {
+        spawn(async move {
             select! {
                 _ = ctrl_c_cancel.cancelled() => {}
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received ctrl-c, shutting down...");
-                    ctrl_c_cancel.cancel();
                 }
             }
-            ctrl_c_node.shutdown().await
+            ctrl_c_cancel.cancel();
+            ctrl_c_node.shutdown().await?;
+            trace!("Ctrl-C handler completed");
+            Ok::<(), Error>(())
         });
+
+        let res = self.run_with_node(cancel, node.clone()).await;
+        trace!("run_with_node completed");
+        if let Err(e) = node.shutdown().await {
+            warn!("{e}");
+        }
+        if let Err(e) = res {
+            error!("{e}");
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn run_with_node<T: Node + Sync + Send + 'static>(
+        &self,
+        cancel: CancellationToken,
+        node: T,
+    ) -> Result<()> {
+        let mut tasks = JoinSet::new();
 
         // Set up connection state
         let conn_state_inner = ConnectionState::new();
@@ -181,6 +190,8 @@ impl App {
                         }
                         None => None,
                     };
+                    trace!("want_index_digest: {:?}", want_index_digest);
+
                     // Resolve the index from the bootstrap peer
                     let index = match share_resolver_op
                         .call(share_resolver::Request::Index {
@@ -201,6 +212,7 @@ impl App {
                         _ => anyhow::bail!("Unexpected response"),
                     };
                     want_index.get_or_insert(index);
+                    trace!("got index from {share_key}");
                 }
             }
             Commands::Seed { path } => {

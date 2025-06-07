@@ -250,7 +250,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                             }
                         }
                         VeilidUpdate::Shutdown => {
-                            return Ok(());
+                            cancel.cancel();
                         }
                         _ => {}
                     }
