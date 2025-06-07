@@ -8,7 +8,7 @@ use veilid_core::{TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::Unrecoverable,
+    error::{CancelError, Unrecoverable},
     proto::{self, Decoder, PeerInfo},
     Node, Result,
 };
@@ -120,7 +120,7 @@ impl<P: Node> Actor for PeerResolver<P> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
-                    return Ok(())
+                    return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
                     let req = res.with_context(|| format!("peer_resolver: receive request"))?;

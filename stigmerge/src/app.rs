@@ -18,6 +18,7 @@ use stigmerge_peer::{
     share_announcer::{self, ShareAnnouncer},
     share_resolver::{self, ShareResolver},
     types::ShareInfo,
+    CancelError,
 };
 use tokio::{
     select, spawn,
@@ -114,7 +115,7 @@ impl App {
             loop {
                 select! {
                     _ = conn_cancel.cancelled() => {
-                        return Ok::<(), Error>(());
+                        return Err(CancelError.into());
                     }
                     res = conn_state_rx.changed() => {
                         res?;
@@ -365,7 +366,7 @@ impl App {
             loop {
                 select! {
                     _ = progress_cancel.cancelled() => {
-                        return Ok(())
+                        return Err(CancelError.into());
                     }
                     res = subscribe_fetcher_status.changed() => {
                         res?;
@@ -423,7 +424,7 @@ impl App {
             loop {
                 select! {
                     _ = indexer_cancel.cancelled() => {
-                        return Ok(())
+                        return Err(CancelError.into());
                     }
                     res = subscribe_index_progress.changed() => {
                         res?;
@@ -445,7 +446,7 @@ impl App {
             loop {
                 select! {
                     _ = verifier_cancel.cancelled() => {
-                        return Ok(());
+                        return Err(CancelError.into());
                     }
                     res = subscribe_digest_progress.changed() => {
                         res?;

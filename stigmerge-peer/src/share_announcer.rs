@@ -9,7 +9,7 @@ use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::Unrecoverable,
+    error::{CancelError, Unrecoverable},
     proto::Header,
     Node, Result,
 };
@@ -130,7 +130,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                 Some(ShareAnnounce { target, .. }) => {
                     select! {
                         _ = cancel.cancelled() => {
-                            return Ok(());
+                            return Err(CancelError.into());
                         }
                         res = request_rx.recv_async() => {
                             let req = res.with_context(|| format!("share_announcer: receive request"))?;
