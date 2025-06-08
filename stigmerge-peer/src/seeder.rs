@@ -14,7 +14,7 @@ use veilid_core::VeilidUpdate;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::Unrecoverable,
+    error::{CancelError, Unrecoverable},
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
     types::{PieceState, ShareInfo},
@@ -109,7 +109,7 @@ impl<P: Node> Actor for Seeder<P> {
             select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return Ok(());
+                    return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
                     let req = res.with_context(|| format!("seeder: receive request"))?;
@@ -123,10 +123,10 @@ impl<P: Node> Actor for Seeder<P> {
                     let update = res.with_context(|| format!("seeder: receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
-                            trace!("app_call: {:?}", veilid_app_call);
                             let req = proto::Request::decode(veilid_app_call.message())?;
                             match req {
                                 proto::Request::BlockRequest(block_req) => {
+                                    trace!("app_call: {:?}", block_req);
                                     if self.piece_map.get(block_req.piece) {
                                         let rd = self.read_block_into(&block_req, &mut buf).await?;
                                         self.node.reply_block_contents(veilid_app_call.id(), Some(&buf[..rd])).await?;
@@ -136,6 +136,9 @@ impl<P: Node> Actor for Seeder<P> {
                                 }
                                 _ => {}  // Ignore other request types
                             }
+                        }
+                        VeilidUpdate::Shutdown => {
+                            cancel.cancel();
                         }
                         _ => {}
                     }
@@ -305,7 +308,7 @@ mod tests {
 
         // Cancel the seeder
         cancel.cancel();
-        operator.join().await.expect("seeder task");
+        operator.join().await.expect_err("cancelled");
 
         // Verify reply_block_contents was called
         assert!(
@@ -408,7 +411,7 @@ mod tests {
         cancel.cancel();
 
         // Verify seeder exits cleanly
-        operator.join().await.expect("seeder task");
+        operator.join().await.expect_err("cancelled");
 
         // Verify reply_block_contents was called
         assert!(

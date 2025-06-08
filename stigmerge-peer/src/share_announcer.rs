@@ -9,7 +9,7 @@ use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::Unrecoverable,
+    error::{CancelError, Unrecoverable},
     proto::Header,
     Node, Result,
 };
@@ -130,7 +130,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                 Some(ShareAnnounce { target, .. }) => {
                     select! {
                         _ = cancel.cancelled() => {
-                            return Ok(());
+                            return Err(CancelError.into());
                         }
                         res = request_rx.recv_async() => {
                             let req = res.with_context(|| format!("share_announcer: receive request"))?;
@@ -146,6 +146,9 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                                             self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
                                         }
                                     },
+                                    VeilidUpdate::Shutdown => {
+                                        cancel.cancel();
+                                    }
                                     _ => {}
                                 }
                             }
@@ -293,7 +296,7 @@ mod tests {
         cancel.cancel();
 
         // Service run terminates
-        operator.join().await.expect("svc task");
+        operator.join().await.expect_err("cancelled");
     }
 
     // This test directly tests the reannounce method without using the Actor trait

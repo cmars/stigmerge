@@ -7,7 +7,7 @@ use veilid_core::TypedRecordKey;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::Result,
+    error::{CancelError, Result},
     is_cancelled,
     piece_map::PieceMap,
     Node,
@@ -117,7 +117,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
-                    return Ok(())
+                    return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
                     let req = res.with_context(|| format!("have_announcer: receive request"))?;
@@ -243,7 +243,7 @@ mod tests {
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -296,7 +296,7 @@ mod tests {
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -352,6 +352,6 @@ mod tests {
         assert!(!recorded_map.get(43), "Other piece indices should be clear");
 
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 }

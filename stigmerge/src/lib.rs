@@ -1,7 +1,6 @@
 #![recursion_limit = "256"]
 
 use indicatif::MultiProgress;
-use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 pub mod app;
@@ -19,11 +18,7 @@ pub fn initialize_stdout_logging() {
                 .with_ansi(false)
                 .with_writer(std::io::stdout),
         )
-        .with(
-            EnvFilter::builder()
-                .with_default_directive("stigmerge=debug".parse().unwrap())
-                .from_env_lossy(),
-        )
+        .with(env_filter())
         .init();
 }
 
@@ -37,12 +32,16 @@ pub fn initialize_ui_logging(multi_progress: MultiProgress) {
                 .with_target(true)
                 .with_writer(move || writer.clone()),
         )
-        .with(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .parse_lossy("stigmerge=debug,stigmerge_peer=debug"),
-        )
+        .with(env_filter())
         .init();
+}
+
+fn env_filter() -> EnvFilter {
+    if std::env::var("RUST_LOG").is_ok() {
+        EnvFilter::builder().from_env_lossy()
+    } else {
+        "warn,stigmerge=debug,stigmerge_peer=debug".parse().unwrap()
+    }
 }
 
 #[derive(Clone)]

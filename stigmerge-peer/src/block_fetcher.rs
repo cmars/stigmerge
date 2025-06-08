@@ -16,7 +16,7 @@ use tracing::trace;
 use veilid_core::{Target, TypedRecordKey};
 
 use crate::actor::{Actor, Respondable, ResponseChannel};
-use crate::error::{is_io, is_proto, is_route_invalid, Result, Transient};
+use crate::error::{is_io, is_proto, is_route_invalid, CancelError, Result, Transient};
 use crate::is_cancelled;
 use crate::node::Node;
 use crate::Error;
@@ -154,7 +154,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
-                    return Ok(())
+                    return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
                     let req = res.with_context(|| format!("block_fetcher: receive request"))?;
@@ -332,7 +332,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("fetcher task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -408,6 +408,6 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("fetcher task");
+        operator.join().await.expect_err("cancelled");
     }
 }

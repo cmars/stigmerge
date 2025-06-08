@@ -8,8 +8,8 @@ use tokio::{
     time::{interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
-use veilid_core::{VeilidAPIError, VeilidUpdate};
+use tracing::{error, info, trace, warn};
+use veilid_core::VeilidUpdate;
 
 use crate::{
     error::{CancelError, Result, Transient},
@@ -120,7 +120,11 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
         let task_actor = actor.clone();
         let task_cancel = cancel.child_token();
         let mut tasks = JoinSet::new();
-        tasks.spawn(async move { runner.run(task_actor, task_cancel, request_rx).await });
+        tasks.spawn(async move {
+            let res = runner.run(task_actor, task_cancel, request_rx).await;
+            trace!("runner completed: {res:?}");
+            res
+        });
         Self {
             cancel,
             request_tx,
@@ -145,9 +149,11 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
             let task_cancel = cancel.child_token();
             let task_request_rx = request_rx.clone();
             tasks.spawn(async move {
-                task_runner
+                let res = task_runner
                     .run(task_actor, task_cancel, task_request_rx)
-                    .await
+                    .await;
+                trace!("runner completed: {res:?}");
+                res
             });
         }
         Self {
@@ -164,7 +170,13 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
             _ = self.cancel.cancelled() => { return Err(CancelError.into()); }
             res = self.request_tx.send_async(req) => { res?; }
         }
-        Ok(resp_rx.await?)
+        // In the event of a cancellation the operator may have already
+        // terminated. Need to also check that here, because otherwise the
+        // oneshot receiver will hang forever.
+        select! {
+            _ = self.cancel.cancelled() => { Err(CancelError.into()) }
+            res = resp_rx => { Ok(res?) }
+        }
     }
 
     pub async fn defer(
@@ -193,11 +205,13 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
     }
 
     pub async fn join(self) -> Result<()> {
+        trace!("joining tasks");
         self.tasks
             .join_all()
             .await
             .into_iter()
             .collect::<Result<()>>()?;
+        trace!("join completed");
         Ok(())
     }
 }
@@ -250,6 +264,7 @@ impl<
         loop {
             select! {
                 _ = cancel.cancelled() => {
+                    trace!("cancelled");
                     return Err(CancelError.into())
                 }
                 _ = actor.run(cancel.child_token(), request_rx.clone()) => {
@@ -324,6 +339,7 @@ impl<N: Node> WithVeilidConnection<N> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
+                    trace!("cancelled");
                     return Err(CancelError.into())
                 }
                 res = self.update_rx.recv() => {
@@ -338,9 +354,7 @@ impl<N: Node> WithVeilidConnection<N> {
                             info!("disconnected: {:?}", veilid_state_attachment);
                         }
                         VeilidUpdate::Shutdown => {
-                            warn!("shutdown");
                             cancel.cancel();
-                            return Err(VeilidAPIError::Shutdown.into())
                         }
                         _ => {}
                     }
@@ -398,6 +412,7 @@ impl<
             });
             select! {
                 _ = cancel.cancelled() => {
+                    trace!("cancelled");
                     return Err(CancelError.into())
                 }
                 join_res = actor_task => {
@@ -448,9 +463,7 @@ impl<
                             }
                         }
                         VeilidUpdate::Shutdown => {
-                            warn!("shutdown");
                             cancel.cancel();
-                            return Err(VeilidAPIError::Shutdown.into())
                         }
                         _ => {}
                     }

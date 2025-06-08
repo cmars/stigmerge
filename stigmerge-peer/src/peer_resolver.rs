@@ -8,7 +8,7 @@ use veilid_core::{TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::Unrecoverable,
+    error::{CancelError, Unrecoverable},
     proto::{self, Decoder, PeerInfo},
     Node, Result,
 };
@@ -120,7 +120,7 @@ impl<P: Node> Actor for PeerResolver<P> {
         loop {
             select! {
                 _ = cancel.cancelled() => {
-                    return Ok(())
+                    return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
                     let req = res.with_context(|| format!("peer_resolver: receive request"))?;
@@ -158,7 +158,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                             }
                         }
                         VeilidUpdate::Shutdown => {
-                            return Ok(());
+                            cancel.cancel();
                         }
                         _ => {}
                     }
@@ -353,7 +353,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -435,7 +435,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -504,7 +504,7 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 
     #[tokio::test]
@@ -592,6 +592,6 @@ mod tests {
 
         // Clean up
         cancel.cancel();
-        operator.join().await.expect("task");
+        operator.join().await.expect_err("cancelled");
     }
 }
