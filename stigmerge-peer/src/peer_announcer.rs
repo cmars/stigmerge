@@ -140,11 +140,11 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                     return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("peer_announcer: receive request"))?;
+                    let req = res.context(Unrecoverable::new("peer_announcer: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    let update = res.with_context(|| format!("peer_announcer: receive veilid update"))?;
+                    let update = res.context(Unrecoverable::new("peer_announcer: receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
                             trace!("app_call: {:?}", veilid_app_call);
@@ -195,7 +195,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 response_tx
                     .send(resp)
                     .await
-                    .with_context(|| "peer_announcer: send response")?;
+                    .context(Unrecoverable::new("peer_announcer: send response"))?;
             }
             Request::Redact {
                 key,
@@ -224,7 +224,7 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                 response_tx
                     .send(resp)
                     .await
-                    .with_context(|| "send response from peer announcer")?;
+                    .context(Unrecoverable::new("send response from peer announcer"))?;
             }
             Request::Reset { mut response_tx } => {
                 let resp = match self

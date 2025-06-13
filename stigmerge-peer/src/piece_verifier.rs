@@ -152,7 +152,7 @@ impl Actor for PieceVerifier {
                     return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("piece_verifier: receive request"))?;
+                    let req = res.context(Unrecoverable::new("piece_verifier: receive request"))?;
                     self.handle_request(req).await?;
                 }
             }
@@ -182,7 +182,7 @@ impl Actor for PieceVerifier {
                 self.verified_tx
                     .send_async(req.piece_state())
                     .await
-                    .with_context(|| "piece_verifier: notify verified piece")?;
+                    .context(Unrecoverable::new( "piece_verifier: notify verified piece"))?;
                 Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),

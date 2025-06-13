@@ -8,7 +8,7 @@ use veilid_core::{TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::CancelError,
+    error::{CancelError, Unrecoverable},
     piece_map::PieceMap,
     Node, Result,
 };
@@ -149,11 +149,11 @@ impl<P: Node> Actor for HaveResolver<P> {
                     return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("have_resolver: receive request"))?;
+                    let req = res.context(Unrecoverable::new("have_resolver: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    let update = res.with_context(|| format!("have_resolver: receive veilid update"))?;
+                    let update = res.context(Unrecoverable::new("have_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {
                             match self.have_to_share_map.get(&ch.key) {
@@ -269,7 +269,7 @@ impl<P: Node> Actor for HaveResolver<P> {
         resp_tx
             .send(resp)
             .await
-            .with_context(|| "have_resolver: send response")?;
+            .context(Unrecoverable::new("have_resolver: send response"))?;
 
         Ok(())
     }

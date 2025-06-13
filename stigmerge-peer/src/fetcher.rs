@@ -286,27 +286,6 @@ impl<N: Node> Fetcher<N> {
                 _ = cancel.cancelled() => {
                     return Err(CancelError.into())
                 }
-                res = self.clients.share_target_rx.recv_async() => {
-                    let (key, target) = res.context(Unrecoverable::new("receive share target update"))?;
-                    debug!("share target update for {key}: {target:?}");
-                    match self.peer_tracker.update(key, target.to_owned()).await {
-                        None => {
-                            // Never seen this peer before, advertise ourselves to it
-                            // TODO: this be handled by a WithVeilidConnection-run actor
-                            if let Err(e) = self.node.request_advertise_peer(
-                                &target,
-                                &self.share.key).await.with_context(|| format!("advertising our share to new peer")) {
-                                    warn!("{e}");
-                            }
-                            refresh_routes_interval.reset();
-                        }
-                        Some(prior_target) => {
-                            if prior_target != target {
-                                refresh_routes_interval.reset();
-                            }
-                        }
-                    }
-                }
                 _ = refresh_routes_interval.tick() => {
                     self.refresh_share_targets().await?;
                 }
@@ -364,6 +343,29 @@ impl<N: Node> Fetcher<N> {
                         piece_verifier::Response::IncompletePiece { .. } => {}
                     }
                 }
+
+                res = self.clients.share_target_rx.recv_async() => {
+                    let (key, target) = res.context(Unrecoverable::new("receive share target update"))?;
+                    debug!("share target update for {key}: {target:?}");
+                    match self.peer_tracker.update(key, target.to_owned()).await {
+                        None => {
+                            // Never seen this peer before, advertise ourselves to it
+                            // TODO: can / should this be handled by the seeder?
+                            if let Err(e) = self.node.request_advertise_peer(
+                                &target,
+                                &self.share.key).await.with_context(|| format!("advertising our share to new peer")) {
+                                    warn!("{e}");
+                            }
+                            refresh_routes_interval.reset();
+                        }
+                        Some(prior_target) => {
+                            if prior_target != target {
+                                refresh_routes_interval.reset();
+                            }
+                        }
+                    }
+                }
+
                 res = self.pending_fetch_rx.recv_async() => {
                     let block = res.context(Unrecoverable::new("receive pending block fetch"))?;
                     let (share_key, target) = match match self.peer_tracker.share_target(&block).await {
@@ -430,14 +432,9 @@ impl<N: Node> Fetcher<N> {
                 }
 
                 res = self.fetch_resp_rx.recv_async() => {
-                    match res.with_context(|| format!("fetcher: receive block fetch response")) {
-                        // An empty fetcher channel means we've received a
-                        // response for all block requests. However, some of
-                        // these might fail to validate.
-                        Err(e) => {
-                            trace!("receive block fetch response: {e}");
-                        },
-                        Ok(block_fetcher::Response::Fetched { share_key, block, length }) => {
+                    let resp = res.context(Unrecoverable::new("receive block fetch response"))?;
+                    match resp {
+                        block_fetcher::Response::Fetched { share_key, block, length } => {
                             refresh_routes_interval.reset();
 
                             // Update peer stats with success
@@ -465,7 +462,7 @@ impl<N: Node> Fetcher<N> {
                             }, self.verify_resp_tx.clone()).await.context(
                                 Unrecoverable::new("defer piece verification for fetched block"))?;
                         }
-                        Ok(block_fetcher::Response::FetchFailed { share_key, block, err, .. }) => {
+                        block_fetcher::Response::FetchFailed { share_key, block, err, .. } => {
                             trace!("fetch block failed: {:?}", err);
                             // Update peer stats with failure
                             self.peer_tracker.fetch_err(&share_key, &err).await;

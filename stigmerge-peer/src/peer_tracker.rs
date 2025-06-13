@@ -34,6 +34,7 @@ pub struct PeerTracker {
 }
 
 const MAX_TRACKED_PEERS: u64 = 64;
+const MIN_SCORE_THRESHOLD: i32 = -500;
 
 impl PeerTracker {
     pub fn new() -> Self {
@@ -48,11 +49,9 @@ impl PeerTracker {
     }
 
     pub async fn update(&mut self, key: TypedRecordKey, target: Target) -> Option<Target> {
-        if !self.peer_status.contains_key(&key) {
-            self.peer_status
-                .insert(key.clone(), PeerStatus::default())
-                .await;
-        }
+        self.peer_status
+            .insert(key.clone(), PeerStatus::default())
+            .await;
         self.targets.insert(key, target)
     }
 
@@ -91,6 +90,10 @@ impl PeerTracker {
             .collect();
         peers.sort_by(|(_, l_status), (_, r_status)| r_status.score().cmp(&l_status.score()));
         if !peers.is_empty() {
+            if peers[0].1.score() < MIN_SCORE_THRESHOLD {
+                debug!("all peers below score threshold");
+                return Ok(None);
+            }
             return Ok(self.targets.get_key_value(&peers[0].0));
         }
         if self.targets.is_empty() {

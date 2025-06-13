@@ -229,11 +229,11 @@ impl<P: Node> Actor for ShareResolver<P> {
                     return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("share_resolver: receive request"))?;
+                    let req = res.context(Unrecoverable::new("share_resolver: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    let update = res.with_context(|| format!("share_resolver: receive veilid update"))?;
+                    let update = res.context(Unrecoverable::new("share_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {
                             if !self.watching.contains(&ch.key) {
@@ -246,7 +246,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                                 key: ch.key,
                                 prior_target: None
                             }).await {
-                                warn!("Failed to handle value change: {}", e);
+                                warn!("failed to handle value change: {}", e);
                             }
                         }
                         VeilidUpdate::Shutdown => {

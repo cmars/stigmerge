@@ -133,17 +133,17 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                             return Err(CancelError.into());
                         }
                         res = request_rx.recv_async() => {
-                            let req = res.with_context(|| format!("share_announcer: receive request"))?;
+                            let req = res.context(Unrecoverable::new("share_announcer: receive request"))?;
                             self.handle_request(req).await?;
                         }
                         res = update_rx.recv() => {
                             if let Target::PrivateRoute(ref route_id) = target {
-                                let update = res.with_context(|| format!("share_announcer: receive veilid update"))?;
+                                let update = res.context(Unrecoverable::new("share_announcer: receive veilid update"))?;
                                 match update {
                                     VeilidUpdate::RouteChange(route_change) => {
                                         if route_change.dead_routes.contains(route_id) {
                                             info!("route changed, reannouncing");
-                                            self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
+                                            self.reannounce().await.context(Unrecoverable::new("share_announcer: route changed"))?;
                                         }
                                     },
                                     VeilidUpdate::Shutdown => {

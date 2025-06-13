@@ -14,7 +14,7 @@ use veilid_core::VeilidUpdate;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::{CancelError, Unrecoverable},
+    error::{is_io, CancelError, Unrecoverable},
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
     types::{PieceState, ShareInfo},
@@ -112,15 +112,15 @@ impl<P: Node> Actor for Seeder<P> {
                     return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("seeder: receive request"))?;
+                    let req = res.context(Unrecoverable::new("seeder: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = self.clients.verified_rx.recv_async() => {
-                    let piece_state = res.with_context(|| format!("seeder: receive verified piece update"))?;
+                    let piece_state = res.context(Unrecoverable::new("seeder: receive verified piece update"))?;
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }
                 res = self.clients.update_rx.recv() => {
-                    let update = res.with_context(|| format!("seeder: receive veilid update"))?;
+                    let update = res.context(Unrecoverable::new("seeder: receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
                             let req = proto::Request::decode(veilid_app_call.message())?;
@@ -128,7 +128,17 @@ impl<P: Node> Actor for Seeder<P> {
                                 proto::Request::BlockRequest(block_req) => {
                                     trace!("app_call: {:?}", block_req);
                                     if self.piece_map.get(block_req.piece) {
-                                        let rd = self.read_block_into(&block_req, &mut buf).await?;
+                                        let rd = match self.read_block_into(&block_req, &mut buf).await {
+                                            Ok(rd) => rd,
+                                            Err(e) => {
+                                                if is_io(&e) {
+                                                    // If there was an io error, it might be bad / stale
+                                                    // file handles. Clear the cache.
+                                                    self.files.clear();
+                                                }
+                                                return Err(e);
+                                            }
+                                        };
                                         self.node.reply_block_contents(veilid_app_call.id(), Some(&buf[..rd])).await?;
                                     } else {
                                         self.node.reply_block_contents(veilid_app_call.id(), None).await?;

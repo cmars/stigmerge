@@ -16,7 +16,7 @@ use tracing::trace;
 use veilid_core::{Target, TypedRecordKey};
 
 use crate::actor::{Actor, Respondable, ResponseChannel};
-use crate::error::{is_io, is_proto, is_route_invalid, CancelError, Result, Transient};
+use crate::error::{is_io, is_proto, is_route_invalid, CancelError, Result, Transient, Unrecoverable};
 use crate::is_cancelled;
 use crate::node::Node;
 use crate::Error;
@@ -157,7 +157,7 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                     return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("block_fetcher: receive request"))?;
+                    let req = res.context(Unrecoverable::new("block_fetcher: receive request"))?;
                     if let Err(e) = self.handle_request(req).await {
                         if is_cancelled(&e) {
                             return Ok(());
@@ -199,15 +199,22 @@ impl<P: Node + Send> Actor for BlockFetcher<P> {
                         },
                         response_tx,
                     ),
-                    Err(e) => (
-                        Response::FetchFailed {
-                            share_key,
-                            target,
-                            block,
-                            err: e,
-                        },
-                        response_tx,
-                    ),
+                    Err(e) => {
+                        if is_io(&e) {
+                            // If there was an io error, it might be bad / stale
+                            // file handles. Clear the cache.
+                            self.files.clear();
+                        }
+                        (
+                            Response::FetchFailed {
+                                share_key,
+                                target,
+                                block,
+                                err: e,
+                            },
+                            response_tx,
+                        )
+                    }
                 }
             }
         };

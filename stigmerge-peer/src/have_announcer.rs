@@ -7,7 +7,7 @@ use veilid_core::TypedRecordKey;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::{CancelError, Result},
+    error::{CancelError, Result, Unrecoverable},
     is_cancelled,
     piece_map::PieceMap,
     Node,
@@ -120,7 +120,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
                     return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("have_announcer: receive request"))?;
+                    let req = res.context(Unrecoverable::new("have_announcer: receive request"))?;
                     if let Err(e) = self.handle_request(req).await {
                         if is_cancelled(&e) {
                             return Ok(());
@@ -165,7 +165,7 @@ impl<P: Node> Actor for HaveAnnouncer<P> {
         response_tx
             .send(())
             .await
-            .with_context(|| format!("have_announcer: send response"))?;
+            .context(Unrecoverable::new("have_announcer: send response"))?;
         Ok(())
     }
 }

@@ -123,11 +123,11 @@ impl<P: Node> Actor for PeerResolver<P> {
                     return Err(CancelError.into());
                 }
                 res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("peer_resolver: receive request"))?;
+                    let req = res.context(Unrecoverable::new("peer_resolver: receive request"))?;
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    let update = res.with_context(|| format!("peer_resolver: receive veilid update"))?;
+                    let update = res.context(Unrecoverable::new("peer_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
                             trace!("app_call: {:?}", veilid_app_call);
@@ -152,7 +152,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                                 if data.data_size() > 0 {
                                     if let Ok(peer_info) = PeerInfo::decode(data.data()) {
                                         self.discovered_peer_tx.send_async((share_key.to_owned(), peer_info)).await
-                                            .with_context(|| format!("peer_resolver: send discovered peer"))?;
+                                            .context(Unrecoverable::new("peer_resolver: send discovered peer"))?;
                                     }
                                 }
                             }
@@ -191,7 +191,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                 response_tx
                     .send(resp)
                     .await
-                    .with_context(|| "peer_resolver: send response")?;
+                    .context(Unrecoverable::new("peer_resolver: send response"))?;
             }
             Request::Watch {
                 key,
@@ -232,7 +232,7 @@ impl<P: Node> Actor for PeerResolver<P> {
                 response_tx
                     .send(resp)
                     .await
-                    .with_context(|| "peer_resolver: send response")?;
+                    .context(Unrecoverable::new( "peer_resolver: send response"))?;
             }
             Request::CancelWatch {
                 key,
