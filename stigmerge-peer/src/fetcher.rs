@@ -312,7 +312,7 @@ impl<N: Node> Fetcher<N> {
                 }
                 res = self.verify_resp_rx.recv_async() => {
                     match res.context(Unrecoverable::new("receive piece verification"))? {
-                        piece_verifier::Response::ValidPiece { file_index:_, piece_index, index_complete } => {
+                        piece_verifier::Response::ValidPiece { file_index: _, piece_index, index_complete } => {
                             verified_pieces += 1u64;
 
                             // Update verify progress

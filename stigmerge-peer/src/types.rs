@@ -86,11 +86,16 @@ impl PieceState {
         }
     }
 
-    pub fn merged(&mut self, other: PieceState) -> PieceState {
+    pub fn merged(mut self, other: PieceState) -> PieceState {
         if self.file_index != other.file_index || self.piece_index != other.piece_index {
             panic!("attempt to merge mismatched pieces");
         }
         self.blocks |= other.blocks;
-        self.clone()
+        self
+    }
+
+    pub fn cleared(mut self) -> PieceState {
+        self.blocks = 0;
+        self
     }
 }

@@ -122,6 +122,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
         request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
         let mut update_rx = self.node.subscribe_veilid_update();
+        let mut public_internet_ready = false;
         loop {
             match self.share {
                 None => {
@@ -146,6 +147,15 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                                             self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
                                         }
                                     },
+                                    VeilidUpdate::Attachment(veilid_state_attachment) => {
+                                        if veilid_state_attachment.public_internet_ready != public_internet_ready {
+                                            if veilid_state_attachment.public_internet_ready {
+                                                info!("attachment public internet ready, reannouncing");
+                                                self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
+                                            }
+                                            public_internet_ready = veilid_state_attachment.public_internet_ready;
+                                        }
+                                    }
                                     VeilidUpdate::Shutdown => {
                                         cancel.cancel();
                                     }

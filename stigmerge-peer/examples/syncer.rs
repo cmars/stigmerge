@@ -196,7 +196,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         args.fetchers,
     );
 
-    let piece_verifier = PieceVerifier::new(Arc::new(RwLock::new(index.clone())));
+    let piece_verifier = PieceVerifier::new(Arc::new(RwLock::new(index.clone()))).await;
     let verified_rx = piece_verifier.subscribe_verified();
     let piece_verifier_op = Operator::new(cancel.clone(), piece_verifier, UntilCancelled);
 
