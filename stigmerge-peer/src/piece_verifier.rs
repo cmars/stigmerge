@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashMap, io::SeekFrom, sync::Arc};
+use std::{cmp::Ordering, collections::HashMap, io::SeekFrom, ops::Deref, sync::Arc};
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
@@ -20,19 +20,20 @@ use crate::{
 #[derive(Clone)]
 pub struct PieceVerifier {
     index: Arc<RwLock<Index>>,
-    piece_states: HashMap<(usize, usize), PieceState>,
-    verified_pieces: usize,
+    pending_pieces: HashMap<(usize, usize), PieceState>,
+    verified_pieces: HashMap<(usize, usize), PieceState>,
     verified_tx: flume::Sender<PieceState>,
     verified_rx: flume::Receiver<PieceState>,
 }
 
 impl PieceVerifier {
-    pub fn new(index: Arc<RwLock<Index>>) -> PieceVerifier {
+    pub async fn new(index: Arc<RwLock<Index>>) -> PieceVerifier {
         let (verified_tx, verified_rx) = flume::unbounded();
+        let pending_pieces = Self::empty_pieces(index.read().await.deref());
         PieceVerifier {
             index,
-            piece_states: HashMap::new(),
-            verified_pieces: 0,
+            pending_pieces,
+            verified_pieces: HashMap::new(),
             verified_tx,
             verified_rx,
         }
@@ -65,6 +66,32 @@ impl PieceVerifier {
         let expected_digest = piece_spec.digest();
         let actual_digest: [u8; 32] = digest.finalize().into();
         Ok(expected_digest.cmp(&actual_digest[..]) == Ordering::Equal)
+    }
+
+    fn empty_pieces(index: &Index) -> HashMap<(usize, usize), PieceState> {
+        let mut result = HashMap::new();
+        for (file_index, file) in index.files().iter().enumerate() {
+            let n_pieces = (file.contents().length() / PIECE_SIZE_BYTES)
+                + if file.contents().length() % PIECE_SIZE_BYTES > 0 {
+                    1
+                } else {
+                    0
+                };
+            let starting_piece = file.contents().starting_piece();
+            for piece_index in starting_piece..starting_piece + n_pieces {
+                result.insert(
+                    (file_index, piece_index),
+                    PieceState::new(
+                        file_index,
+                        piece_index,
+                        0,
+                        index.payload().pieces()[piece_index].block_count(),
+                        0,
+                    ),
+                );
+            }
+        }
+        result
     }
 }
 
@@ -161,24 +188,21 @@ impl Actor for PieceVerifier {
 
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         // update piece state
-        let prior_state = match self.piece_states.get_mut(&req.key()) {
-            Some(prior_state) => {
-                *prior_state = prior_state.merged(req.piece_state());
-                prior_state
-            }
+        let piece_state = match self.pending_pieces.remove(&req.key()) {
+            Some(prior_state) => prior_state.merged(req.piece_state()),
             None => {
-                self.piece_states.insert(req.key(), req.piece_state());
-                self.piece_states.get_mut(&req.key()).unwrap()
+                self.pending_pieces.insert(req.key(), req.piece_state());
+                req.piece_state()
             }
         };
 
-        let resp = if prior_state.is_complete() {
+        let resp = if piece_state.is_complete() {
             // verify complete ones
             if self
                 .verify_piece(req.file_index(), req.piece_index())
                 .await?
             {
-                self.verified_pieces += 1;
+                self.verified_pieces.insert(req.key(), piece_state);
                 self.verified_tx
                     .send_async(req.piece_state())
                     .await
@@ -186,10 +210,11 @@ impl Actor for PieceVerifier {
                 Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
-                    index_complete: self.verified_pieces
-                        == self.index.read().await.payload().pieces().len(),
+                    index_complete: self.pending_pieces.is_empty(),
                 }
             } else {
+                // invalid piece, still pending
+                self.pending_pieces.insert(req.key(), piece_state.cleared());
                 Response::InvalidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
@@ -197,6 +222,7 @@ impl Actor for PieceVerifier {
             }
         } else {
             // indicate incomplete ones
+            self.pending_pieces.insert(req.key(), piece_state);
             Response::IncompletePiece {
                 file_index: req.file_index(),
                 piece_index: req.piece_index(),
@@ -240,7 +266,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
+            PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))).await,
             OneShot,
         );
 
@@ -300,7 +326,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
+            PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))).await,
             OneShot,
         );
 
@@ -415,32 +441,13 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))),
+            PieceVerifier::new(Arc::new(RwLock::new(indexer.index().await.expect("index")))).await,
             OneShot,
         );
 
-        for piece_index in 0..NUM_PIECES {
-            // Building up to piece validation
-            for block_index in 0..PIECE_SIZE_BLOCKS - 1 {
-                let piece_state =
-                    PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
-                let req = Request::Piece {
-                    piece_state,
-                    response_tx: ResponseChannel::default(),
-                };
-                let resp = operator.call(req).await.expect("call request");
-                assert_eq!(
-                    resp,
-                    Response::IncompletePiece {
-                        file_index: 0,
-                        piece_index: piece_index,
-                    }
-                );
-            }
-
-            // Verify first complete piece
-            let piece_state =
-                PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
+        let piece_index = 0;
+        for block_index in 0..PIECE_SIZE_BLOCKS - 1 {
+            let piece_state = PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, block_index);
             let req = Request::Piece {
                 piece_state,
                 response_tx: ResponseChannel::default(),
@@ -448,13 +455,63 @@ mod tests {
             let resp = operator.call(req).await.expect("call request");
             assert_eq!(
                 resp,
-                Response::ValidPiece {
+                Response::IncompletePiece {
                     file_index: 0,
-                    piece_index,
-                    index_complete: piece_index == NUM_PIECES - 1
+                    piece_index: piece_index,
                 }
             );
         }
+
+        // Verify first complete piece
+        let piece_state =
+            PieceState::new(0, piece_index, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
+        let req = Request::Piece {
+            piece_state,
+            response_tx: ResponseChannel::default(),
+        };
+        let resp = operator.call(req).await.expect("call request");
+        assert_eq!(
+            resp,
+            Response::ValidPiece {
+                file_index: 0,
+                piece_index,
+                index_complete: piece_index == NUM_PIECES - 1
+            }
+        );
+
+        let piece_index = 1;
+        for block_index in 0..14 {
+            let piece_state = PieceState::new(0, piece_index, 0, 16, block_index);
+            let req = Request::Piece {
+                piece_state,
+                response_tx: ResponseChannel::default(),
+            };
+            let resp = operator.call(req).await.expect("call request");
+            assert_eq!(
+                resp,
+                Response::IncompletePiece {
+                    file_index: 0,
+                    piece_index: piece_index,
+                },
+                "{piece_index} {block_index}"
+            );
+        }
+
+        // Verify second complete piece
+        let piece_state = PieceState::new(0, piece_index, 0, 16, 15);
+        let req = Request::Piece {
+            piece_state,
+            response_tx: ResponseChannel::default(),
+        };
+        let resp = operator.call(req).await.expect("call request");
+        assert_eq!(
+            resp,
+            Response::ValidPiece {
+                file_index: 0,
+                piece_index,
+                index_complete: piece_index == NUM_PIECES - 1
+            }
+        );
 
         // shut down verifier
         cancel.cancel();

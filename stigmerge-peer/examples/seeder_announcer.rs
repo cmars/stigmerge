@@ -83,7 +83,7 @@ async fn main() -> std::result::Result<(), Error> {
     let shared_index = Arc::new(RwLock::new(index.clone()));
 
     // Set up the verifier
-    let verifier = piece_verifier::PieceVerifier::new(shared_index.clone());
+    let verifier = piece_verifier::PieceVerifier::new(shared_index.clone()).await;
     let verified_rx = verifier.subscribe_verified();
     let mut verifier_op = Operator::new(cancel.clone(), verifier, OneShot);
 

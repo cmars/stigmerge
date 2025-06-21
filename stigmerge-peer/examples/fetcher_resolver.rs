@@ -107,7 +107,7 @@ async fn main() -> std::result::Result<(), Error> {
 
     let piece_verifier = Operator::new(
         cancel.clone(),
-        PieceVerifier::new(want_index.clone()),
+        PieceVerifier::new(want_index.clone()).await,
         UntilCancelled,
     );
 
