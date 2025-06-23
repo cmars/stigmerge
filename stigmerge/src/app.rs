@@ -373,6 +373,8 @@ impl App {
         fetch_progress.set_style(ProgressStyle::with_template(
             "{msg} {wide_bar} {binary_bytes}/{binary_total_bytes}",
         )?);
+        let verify_progress = self.multi_progress.add(ProgressBar::new_spinner());
+        verify_progress.set_style(ProgressStyle::with_template("{msg} {bar:40} {pos}/{len}")?);
         let progress_cancel = cancel.clone();
         tasks.spawn(async move {
             loop {
@@ -393,18 +395,17 @@ impl App {
                                 fetch_progress.set_position(position);
                                 fetch_progress.set_length(length);
                             }
-                            fetcher::Status::FetchProgress { position, length } => {
-                                fetch_progress.set_message("Fetching");
-                                fetch_progress.set_position(position);
-                                fetch_progress.set_length(length);
-                            }
-                            fetcher::Status::VerifyProgress { position, length } => {
-                                fetch_progress.set_message("Comparing");
-                                fetch_progress.set_position(position);
-                                fetch_progress.set_length(length);
+                            fetcher::Status::FetchProgress { fetch_position, fetch_length, verify_position, verify_length } => {
+                                fetch_progress.set_message("Fetching ");
+                                fetch_progress.set_position(fetch_position);
+                                fetch_progress.set_length(fetch_length);
+                                verify_progress.set_message("Verifying");
+                                verify_progress.set_position(verify_position);
+                                verify_progress.set_length(verify_length);
                             }
                             fetcher::Status::Done => {
                                 fetch_progress.finish_with_message("Fetch complete");
+                                verify_progress.finish_and_clear();
                             }
                             _ => {}
                         }

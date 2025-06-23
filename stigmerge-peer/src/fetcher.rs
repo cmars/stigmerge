@@ -64,10 +64,20 @@ pub enum State {
 #[derive(Clone, Debug)]
 pub enum Status {
     NotStarted,
-    IndexProgress { position: u64, length: u64 },
-    DigestProgress { position: u64, length: u64 },
-    FetchProgress { position: u64, length: u64 },
-    VerifyProgress { position: u64, length: u64 },
+    IndexProgress {
+        position: u64,
+        length: u64,
+    },
+    DigestProgress {
+        position: u64,
+        length: u64,
+    },
+    FetchProgress {
+        fetch_position: u64,
+        fetch_length: u64,
+        verify_position: u64,
+        verify_length: u64,
+    },
     Done,
 }
 
@@ -77,8 +87,10 @@ impl Status {
             Status::NotStarted => None,
             Status::IndexProgress { position, .. } => Some(*position),
             Status::DigestProgress { position, .. } => Some(*position),
-            Status::FetchProgress { position, .. } => Some(*position),
-            Status::VerifyProgress { position, .. } => Some(*position),
+            Status::FetchProgress {
+                fetch_position: position,
+                ..
+            } => Some(*position),
             Status::Done => None,
         }
     }
@@ -248,9 +260,16 @@ impl<N: Node> Fetcher<N> {
                 }
             }
         }
-        self.status_tx.send_replace(Status::FetchProgress {
-            position: have_length.try_into().unwrap(),
-            length: total_length.try_into().unwrap(),
+        self.status_tx.send_modify(|status| {
+            *status = Status::FetchProgress {
+                fetch_position: have_length.try_into().unwrap(),
+                fetch_length: total_length.try_into().unwrap(),
+                verify_position: 0,
+                verify_length: TryInto::<u64>::try_into(
+                    self.share.want_index.payload().pieces().len(),
+                )
+                .unwrap(),
+            };
         });
         Ok(if want_length == 0 {
             self.status_tx.send_replace(Status::Done);
@@ -316,11 +335,15 @@ impl<N: Node> Fetcher<N> {
                             verified_pieces += 1u64;
 
                             // Update verify progress
-                            self.status_tx.send_replace(
-                                Status::VerifyProgress{
-                                    length: total_pieces,
-                                    position: verified_pieces
-                                });
+                            self.status_tx.send_modify(|status| {
+                                match status {
+                                    Status::FetchProgress { verify_position, verify_length, .. } => {
+                                        *verify_length = total_pieces;
+                                        *verify_position = verified_pieces;
+                                    }
+                                    _ => {}
+                                }
+                            });
 
                             // Update have map
                             self.clients.have_announcer.send(
@@ -341,12 +364,15 @@ impl<N: Node> Fetcher<N> {
                             fetched_bytes -= TryInto::<u64>::try_into(piece_length).unwrap();
 
                             // Rewind the fetch progress status by the piece length
-                            self.status_tx.send_replace(
-                                Status::FetchProgress{
-                                    length: total_length.try_into().unwrap(),
-                                    position: fetched_bytes,
-                                });
-
+                            self.status_tx.send_modify(|status| {
+                                match status {
+                                    Status::FetchProgress{ fetch_position, fetch_length, .. } => {
+                                        *fetch_length = total_length.try_into().unwrap();
+                                        *fetch_position = fetched_bytes;
+                                    }
+                                    _ => {}
+                                };
+                            });
                             // Re-fetch all the blocks in the failed piece
                             let piece_blocks = piece_length / BLOCK_SIZE_BYTES + if piece_length % BLOCK_SIZE_BYTES > 0 { 1 } else { 0 };
                             for block_index in 0..piece_blocks  {
@@ -446,12 +472,15 @@ impl<N: Node> Fetcher<N> {
                             fetched_bytes += TryInto::<u64>::try_into(length).unwrap();
 
                             // Send progress to subscribers
-                            self.status_tx.send_replace(
-                                Status::FetchProgress{
-                                    position: fetched_bytes.try_into().unwrap(),
-                                    length: total_length.try_into().unwrap(),
-                                });
-
+                            self.status_tx.send_modify(|status| {
+                                match status {
+                                    Status::FetchProgress{ fetch_position, fetch_length, .. } => {
+                                        *fetch_position= fetched_bytes.try_into().unwrap();
+                                        *fetch_length= total_length.try_into().unwrap();
+                                    }
+                                    _ => {}
+                                };
+                            });
                             // Update verifier
                             self.clients.piece_verifier.defer(piece_verifier::Request::Piece {
                                 piece_state: PieceState::new(
