@@ -1,23 +1,23 @@
-use std::ops::Deref;
 use std::time::Duration;
 
 use anyhow::Context;
 use backoff::backoff::Backoff;
 use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
-use tokio::sync::watch;
-use tokio::time::interval;
+use tokio::sync::{broadcast, watch, MutexGuard};
+use tokio::time::{interval, sleep};
 use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
-use veilid_core::{Target, TypedRecordKey};
+use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
-use crate::actor::ResponseChannel;
-use crate::error::{CancelError, Unrecoverable};
+use crate::actor::{ConnectionState, ConnectionStateHandle, ResponseChannel};
+use crate::error::{CancelError, Transient, Unrecoverable};
 use crate::peer_tracker::PeerTracker;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
 use crate::{
-    block_fetcher, is_cancelled, peer_resolver, piece_verifier, proto, share_resolver, Node, Result,
+    block_fetcher, is_cancelled, is_unrecoverable, peer_resolver, piece_verifier, proto,
+    share_resolver, Node, Result,
 };
 
 pub struct Fetcher<N: Node> {
@@ -51,6 +51,7 @@ pub struct Clients {
     pub share_target_rx: flume::Receiver<(TypedRecordKey, Target)>,
     pub peer_resolver: Operator<peer_resolver::Request>,
     pub discovered_peers_rx: flume::Receiver<(TypedRecordKey, proto::PeerInfo)>,
+    pub update_rx: broadcast::Receiver<VeilidUpdate>,
 }
 
 #[derive(Debug)]
@@ -82,16 +83,18 @@ pub enum Status {
 }
 
 impl Status {
-    fn position(&self) -> Option<u64> {
+    fn fetch_position(&self) -> Option<u64> {
         match self {
-            Status::NotStarted => None,
-            Status::IndexProgress { position, .. } => Some(*position),
-            Status::DigestProgress { position, .. } => Some(*position),
+            Status::FetchProgress { fetch_position, .. } => Some(*fetch_position),
+            _ => None,
+        }
+    }
+    fn verify_position(&self) -> Option<u64> {
+        match self {
             Status::FetchProgress {
-                fetch_position: position,
-                ..
-            } => Some(*position),
-            Status::Done => None,
+                verify_position, ..
+            } => Some(*verify_position),
+            _ => None,
         }
     }
 }
@@ -129,9 +132,25 @@ impl<N: Node> Fetcher<N> {
         self.status_rx.clone()
     }
 
-    pub async fn run(mut self, cancel: CancellationToken) -> Result<()> {
+    pub async fn run(
+        mut self,
+        cancel: CancellationToken,
+        conn_state: ConnectionStateHandle,
+    ) -> Result<()> {
         let mut run_res = Ok(());
+        let mut exp_backoff = backoff::ExponentialBackoffBuilder::new()
+            .with_max_interval(Duration::from_secs(5))
+            .build();
+        let mut retries = 0;
         loop {
+            {
+                let st = conn_state.lock().await;
+                if !*st.connected.borrow() {
+                    self.disconnected(cancel.clone(), st).await?;
+                    continue;
+                }
+            }
+
             let cancel_iter = cancel.clone();
             let res = match self.state {
                 State::Indexing => self.index(cancel_iter).await,
@@ -146,11 +165,38 @@ impl<N: Node> Fetcher<N> {
             match res {
                 Ok(state) => self.state = state,
                 Err(e) => {
-                    if !is_cancelled(&e) {
-                        error!("{e}");
+                    if is_cancelled(&e) {
+                        break;
                     }
-                    run_res = Err(e);
-                    break;
+                    if e.is_transient() {
+                        sleep(
+                            exp_backoff
+                                .next_backoff()
+                                .unwrap_or(exp_backoff.max_interval),
+                        )
+                        .await;
+                        retries += 1;
+                        if retries < crate::actor::MAX_TRANSIENT_RETRIES {
+                            continue;
+                        }
+                        warn!("too many transient errors");
+                    } else if is_unrecoverable(&e) {
+                        cancel.cancel();
+                        error!("{e}");
+                        run_res = Err(e);
+                        break;
+                    } else if is_cancelled(&e) {
+                        break;
+                    }
+                    {
+                        if let Ok(st) = conn_state.try_lock() {
+                            info!("marking disconnected, resetting");
+                            self.node.reset().await?;
+                            st.disconnect();
+                            exp_backoff.reset();
+                            retries = 0;
+                        }
+                    }
                 }
             }
         }
@@ -281,8 +327,8 @@ impl<N: Node> Fetcher<N> {
 
     async fn fetch(&mut self, cancel: CancellationToken) -> Result<State> {
         debug!("fetching");
-        let mut verified_pieces = 0u64;
-        let mut fetched_bytes = self.status_tx.borrow().deref().position().unwrap_or(0);
+        let mut fetched_bytes = self.status_tx.borrow().fetch_position().unwrap_or(0);
+        let mut verified_pieces = self.status_tx.borrow().verify_position().unwrap_or(0);
         let total_pieces = self
             .share
             .want_index
@@ -292,13 +338,7 @@ impl<N: Node> Fetcher<N> {
             .try_into()
             .unwrap();
         let total_length = self.share.want_index.payload().length();
-        let mut no_peers_backoff = backoff::ExponentialBackoffBuilder::new()
-            .with_max_interval(Duration::from_secs(5))
-            // TODO: make the max elapsed time configurable
-            //.with_max_elapsed_time(None)
-            .build();
         let mut refresh_routes_interval = interval(Duration::from_secs(30));
-        refresh_routes_interval.reset();
         loop {
             select! {
                 biased;
@@ -401,27 +441,12 @@ impl<N: Node> Fetcher<N> {
                         }
                     } {
                         Some((share_key, target)) => {
-                            no_peers_backoff.reset();
                             (share_key, target)
                         }
                         None => {
-                            match no_peers_backoff.next_backoff() {
-                                Some(duration) => {
-                                    warn!("no peers available, retrying in {:?}", duration);
-                                    select! {
-                                        _ = cancel.cancelled() => {
-                                            return Err(CancelError.into())
-                                        }
-                                        _ = tokio::time::sleep(duration) => {}
-                                    }
-                                }
-                                None => {
-                                    return Err(
-                                        anyhow::anyhow!("no peers available after {:?}", no_peers_backoff.get_elapsed_time())
-                                    ).context(Unrecoverable::new("share target"));
-                                }
-                            }
-                            continue;
+                            // We can't dispatch the block, re-queue the block for fetching when conditions improve.
+                            self.pending_fetch_tx.send_async(block).await.context(Unrecoverable::new("send pending block fetch"))?;
+                            return Err(anyhow::anyhow!("no peers available"));
                         }
                     };
                     self.clients.block_fetcher.defer(block_fetcher::Request::Fetch{
@@ -546,5 +571,42 @@ impl<N: Node> Fetcher<N> {
             self.clients.peer_resolver.join(),
         )?;
         Ok(())
+    }
+
+    async fn disconnected<'a>(
+        &mut self,
+        cancel: CancellationToken,
+        state: MutexGuard<'a, ConnectionState>,
+    ) -> Result<()> {
+        let mut reset_interval = interval(Duration::from_secs(120));
+        loop {
+            select! {
+                _ = cancel.cancelled() => {
+                    trace!("cancelled");
+                    return Err(CancelError.into())
+                }
+                res = self.clients.update_rx.recv() => {
+                    let update = res?;
+                    match update {
+                        VeilidUpdate::Attachment(veilid_state_attachment) => {
+                            if veilid_state_attachment.public_internet_ready {
+                                info!("connected: {:?}", veilid_state_attachment);
+                                state.connect();
+                                return Ok(())
+                            }
+                            info!("disconnected: {:?}", veilid_state_attachment);
+                        }
+                        VeilidUpdate::Shutdown => {
+                            cancel.cancel();
+                        }
+                        _ => {}
+                    }
+                }
+                _ = reset_interval.tick() => {
+                    warn!("resetting connection");
+                    self.node.reset().await?;
+                }
+            }
+        }
     }
 }

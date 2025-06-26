@@ -282,7 +282,7 @@ pub struct WithVeilidConnection<N> {
 }
 
 pub struct ConnectionState {
-    connected: watch::Sender<bool>,
+    pub(crate) connected: watch::Sender<bool>,
 }
 
 impl ConnectionState {
@@ -368,7 +368,7 @@ impl<N: Node> WithVeilidConnection<N> {
     }
 }
 
-const MAX_TRANSIENT_RETRIES: u8 = 5;
+pub(crate) const MAX_TRANSIENT_RETRIES: u8 = 5;
 
 impl<
         A: Actor<Request: Send + Sync + 'static, Response: Send + Sync + 'static>
@@ -440,7 +440,8 @@ impl<
                             }
                             {
                                 if let Ok(st) = state.try_lock() {
-                                    info!("marking disconnected");
+                                    info!("marking disconnected, resetting");
+                                    self.node.reset().await?;
                                     st.disconnect();
                                     exp_backoff.reset();
                                     retries = 0;
