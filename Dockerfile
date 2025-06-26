@@ -1,17 +1,39 @@
-FROM debian:bookworm-slim
+FROM rust:1.88-slim-bookworm AS base
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y git ca-certificates build-essential pkg-config libssl-dev
+RUN cargo install sccache --version ^0.7
+RUN cargo install cargo-chef --version ^0.1
+ENV RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache
 
-RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl xz-utils
+FROM base AS planner
+WORKDIR /app
+COPY . .
+RUN --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
+    cargo chef prepare --recipe-path recipe.json
 
-COPY Cargo.toml .
-RUN awk '/^version =/ {print $3}' Cargo.toml | sed 's/"//g' > /stigmerge.version
-RUN curl --proto '=https' --tlsv1.2 -LsSf https://github.com/cmars/stigmerge/releases/download/stigmerge-v$(cat /stigmerge.version)/stigmerge-installer.sh | sh
-ENV PATH="$HOME/.cargo/bin:$PATH"
+FROM base AS builder
+WORKDIR /app
+COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
+    cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
+    cargo build --release
 
-VOLUME /share
-WORKDIR /share
+### Dist image
+FROM gcr.io/distroless/cc-debian12 AS dist
+COPY --from=builder /app/target/release/stigmerge /usr/bin/stigmerge
+
+ENV RUST_LOG="veilid_core=error,stigmerge=debug"
+ENV NO_UI=true
 
 VOLUME /state
 ENV STATE_DIR=/state
 
-ENTRYPOINT ["/root/.cargo/bin/stigmerge"]
-CMD ["stigmerge"]
+VOLUME /data
+WORKDIR /data
+
+EXPOSE 5150
+ENV NODE_ADDR=":5150"
+
+ENTRYPOINT ["/usr/bin/stigmerge"]
