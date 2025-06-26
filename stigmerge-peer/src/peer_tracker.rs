@@ -34,6 +34,7 @@ pub struct PeerTracker {
 }
 
 const MAX_TRACKED_PEERS: u64 = 64;
+const MINIMUM_PEER_SCORE: i32 = -100;
 
 impl PeerTracker {
     pub fn new() -> Self {
@@ -75,8 +76,14 @@ impl PeerTracker {
             Some(status) => status,
             None => PeerStatus::default(),
         };
+        status.fetch_ok_count = 0;
         status.fetch_err_count += if is_route_invalid(&err) { 10 } else { 1 };
         self.peer_status.insert(key.clone(), status).await;
+    }
+
+    #[cfg(test)]
+    async fn status(&self, key: &TypedRecordKey) -> Option<PeerStatus> {
+        self.peer_status.get(&key).await.map(|st| st.to_owned())
     }
 
     pub async fn share_target(
@@ -88,6 +95,7 @@ impl PeerTracker {
             .peer_status
             .iter()
             .map(|(key, status)| (*key, status))
+            .filter(|(_, status)| status.score() >= MINIMUM_PEER_SCORE)
             .collect();
         peers.sort_by(|(_, l_status), (_, r_status)| r_status.score().cmp(&l_status.score()));
         if !peers.is_empty() {
@@ -112,7 +120,7 @@ impl PeerTracker {
 
 #[cfg(test)]
 mod tests {
-    use veilid_core::{CryptoKind, RecordKey, RouteId};
+    use veilid_core::{CryptoKind, RecordKey, RouteId, VeilidAPIError};
 
     use super::*;
 
@@ -184,6 +192,39 @@ mod tests {
         assert!(result.is_some());
         let (share_key, _) = result.unwrap();
         assert_eq!(share_key, &key1);
+    }
+
+    #[tokio::test]
+    async fn test_err_clears_ok() {
+        let mut tracker = PeerTracker::new();
+        let key1 = create_typed_key(1);
+        let target1 = create_target(1);
+
+        tracker.update(key1.clone(), target1.clone()).await;
+
+        // Route error
+        tracker
+            .fetch_err(
+                &key1,
+                &VeilidAPIError::InvalidTarget {
+                    message: "nope".to_string(),
+                }
+                .into(),
+            )
+            .await;
+        // Route errors are more heavily penalized
+        assert_eq!(tracker.status(&key1).await.unwrap().score(), -10);
+
+        // Increase score for key1
+        tracker.fetch_ok(&key1).await;
+        tracker.fetch_ok(&key1).await;
+        // oks are counted
+        assert_eq!(tracker.status(&key1).await.unwrap().score(), 2);
+
+        tracker.fetch_err(&key1, &Error::msg("nope")).await;
+
+        // error wipes out oks
+        assert_eq!(tracker.status(&key1).await.unwrap().score(), -1);
     }
 
     #[tokio::test]

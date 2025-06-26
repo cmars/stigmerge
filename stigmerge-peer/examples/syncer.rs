@@ -232,6 +232,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         share_target_rx,
         peer_resolver: peer_resolver_op,
         discovered_peers_rx,
+        update_rx: node.subscribe_veilid_update(),
     };
 
     // Set up seeder
@@ -244,7 +245,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     let seeder_op = Operator::new(
         cancel.clone(),
         seeder,
-        WithVeilidConnection::new(node.clone(), conn_state),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     // Create and run fetcher
@@ -253,7 +254,7 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     info!("Starting fetch...");
 
     // Run the fetcher until completion
-    let fetcher_task = spawn(fetcher.run(cancel.clone()));
+    let fetcher_task = spawn(fetcher.run(cancel.clone(), conn_state));
 
     info!("Seeding until ctrl-c...");
 

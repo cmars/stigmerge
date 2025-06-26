@@ -26,6 +26,7 @@ struct Args {
 use stigmerge_peer::actor::ResponseChannel;
 use stigmerge_peer::actor::UntilCancelled;
 use stigmerge_peer::peer_resolver::PeerResolver;
+use stigmerge_peer::Node;
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -130,7 +131,7 @@ async fn main() -> std::result::Result<(), Error> {
     let peer_resolver_op = Operator::new(
         cancel.clone(),
         peer_resolver,
-        WithVeilidConnection::new(node.clone(), conn_state),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
     let clients = Clients {
@@ -141,6 +142,7 @@ async fn main() -> std::result::Result<(), Error> {
         share_target_rx,
         peer_resolver: peer_resolver_op,
         discovered_peers_rx,
+        update_rx: node.subscribe_veilid_update(),
     };
 
     // Create and run fetcher
@@ -149,7 +151,7 @@ async fn main() -> std::result::Result<(), Error> {
     info!("Starting fetch...");
 
     select! {
-        res = fetcher.run(cancel.clone()) => {
+        res = fetcher.run(cancel.clone(), conn_state) => {
             res?;
             info!("Fetch complete!");
             cancel.cancel();

@@ -300,6 +300,7 @@ impl App {
             share_target_rx,
             peer_resolver: peer_resolver_op,
             discovered_peers_rx,
+            update_rx: node.subscribe_veilid_update(),
         };
 
         // Create and run fetcher
@@ -307,7 +308,7 @@ impl App {
 
         let fetcher = Fetcher::new(node.clone(), share.clone(), fetcher_clients);
         self.add_fetch_progress(&cancel, &mut tasks, fetcher.subscribe_fetcher_status())?;
-        let fetcher_task = spawn(fetcher.run(cancel.clone()));
+        let fetcher_task = spawn(fetcher.run(cancel.clone(), conn_state.clone()));
 
         // Set up seeder
         let seeder_clients = seeder::Clients {
