@@ -232,7 +232,6 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         share_target_rx,
         peer_resolver: peer_resolver_op,
         discovered_peers_rx,
-        update_rx: node.subscribe_veilid_update(),
     };
 
     // Set up seeder

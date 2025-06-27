@@ -1,7 +1,6 @@
 use std::collections::{hash_map::Keys, HashMap};
 
-use moka::future::Cache;
-use tracing::debug;
+use tracing::trace;
 use veilid_core::{Target, TypedRecordKey};
 
 use crate::{error::is_route_invalid, types::FileBlockFetch, Error, Result};
@@ -30,17 +29,16 @@ impl Default for PeerStatus {
 
 pub struct PeerTracker {
     targets: HashMap<TypedRecordKey, Target>,
-    peer_status: Cache<TypedRecordKey, PeerStatus>,
+    peer_status: HashMap<TypedRecordKey, PeerStatus>,
 }
 
-const MAX_TRACKED_PEERS: u64 = 64;
 const MINIMUM_PEER_SCORE: i32 = -100;
 
 impl PeerTracker {
     pub fn new() -> Self {
         PeerTracker {
             targets: HashMap::new(),
-            peer_status: Cache::builder().max_capacity(MAX_TRACKED_PEERS).build(),
+            peer_status: HashMap::new(),
         }
     }
 
@@ -48,11 +46,9 @@ impl PeerTracker {
         self.targets.keys()
     }
 
-    pub async fn update(&mut self, key: TypedRecordKey, target: Target) -> Option<Target> {
+    pub fn update(&mut self, key: TypedRecordKey, target: Target) -> Option<Target> {
         if !self.peer_status.contains_key(&key) {
-            self.peer_status
-                .insert(key.clone(), PeerStatus::default())
-                .await;
+            self.peer_status.insert(key.clone(), PeerStatus::default());
         }
         self.targets.insert(key, target)
     }
@@ -61,41 +57,39 @@ impl PeerTracker {
         self.targets.contains_key(key)
     }
 
-    pub async fn fetch_ok(&mut self, key: &TypedRecordKey) {
-        let mut status = match self.peer_status.get(&key).await {
-            Some(status) => status,
-            None => PeerStatus::default(),
-        };
+    pub fn fetch_ok(&mut self, key: &TypedRecordKey) {
+        if !self.peer_status.contains_key(&key) {
+            self.peer_status.insert(key.clone(), PeerStatus::default());
+        }
+        let status = self.peer_status.get_mut(&key).unwrap();
         status.fetch_err_count = 0;
         status.fetch_ok_count += 1;
-        self.peer_status.insert(key.clone(), status).await;
     }
 
     pub async fn fetch_err(&mut self, key: &TypedRecordKey, err: &Error) {
-        let mut status = match self.peer_status.get(&key).await {
-            Some(status) => status,
-            None => PeerStatus::default(),
-        };
+        if !self.peer_status.contains_key(&key) {
+            self.peer_status.insert(key.clone(), PeerStatus::default());
+        }
+        let status = self.peer_status.get_mut(&key).unwrap();
         status.fetch_ok_count = 0;
         status.fetch_err_count += if is_route_invalid(&err) { 10 } else { 1 };
-        self.peer_status.insert(key.clone(), status).await;
     }
 
     #[cfg(test)]
     async fn status(&self, key: &TypedRecordKey) -> Option<PeerStatus> {
-        self.peer_status.get(&key).await.map(|st| st.to_owned())
+        self.peer_status.get(&key).map(|st| st.to_owned())
     }
 
-    pub async fn share_target(
-        &self,
+    pub fn share_target(
+        &mut self,
         _block: &FileBlockFetch,
     ) -> Result<Option<(&TypedRecordKey, &Target)>> {
         // TODO: factor in have_map and block
         let mut peers: Vec<(TypedRecordKey, PeerStatus)> = self
             .peer_status
             .iter()
-            .map(|(key, status)| (*key, status))
             .filter(|(_, status)| status.score() >= MINIMUM_PEER_SCORE)
+            .map(|(key, status)| (key.to_owned(), status.to_owned()))
             .collect();
         peers.sort_by(|(_, l_status), (_, r_status)| r_status.score().cmp(&l_status.score()));
         if !peers.is_empty() {
@@ -109,10 +103,7 @@ impl PeerTracker {
                 .iter()
                 .nth(rand::random::<usize>() % self.targets.len())
                 .unwrap();
-            debug!("new status for peer key {share_key}");
-            self.peer_status
-                .insert(share_key.clone(), PeerStatus::default())
-                .await;
+            trace!("new status for peer key {share_key}");
             Ok(Some((share_key, target)))
         }
     }
@@ -151,7 +142,7 @@ mod tests {
         let target = create_target(1);
 
         // Update should return None for a new peer
-        let previous = tracker.update(key.clone(), target.clone()).await;
+        let previous = tracker.update(key.clone(), target.clone());
         assert!(previous.is_none());
 
         // Tracker should now contain the peer
@@ -159,7 +150,7 @@ mod tests {
 
         // Update with a new target should return the old target
         let new_target = create_target(2);
-        let previous = tracker.update(key.clone(), new_target.clone()).await;
+        let previous = tracker.update(key.clone(), new_target.clone());
         assert_eq!(previous.unwrap(), target);
     }
 
@@ -172,8 +163,8 @@ mod tests {
         let target2 = create_target(2);
 
         // Add two peers
-        tracker.update(key1.clone(), target1.clone()).await;
-        tracker.update(key2.clone(), target2.clone()).await;
+        tracker.update(key1.clone(), target1.clone());
+        tracker.update(key2.clone(), target2.clone());
 
         // Initially both peers have the same score
         let block = FileBlockFetch {
@@ -184,11 +175,11 @@ mod tests {
         };
 
         // Increase score for key1
-        tracker.fetch_ok(&key1).await;
-        tracker.fetch_ok(&key1).await;
+        tracker.fetch_ok(&key1);
+        tracker.fetch_ok(&key1);
 
         // key1 should now be ranked higher
-        let result = tracker.share_target(&block).await.unwrap();
+        let result = tracker.share_target(&block).unwrap();
         assert!(result.is_some());
         let (share_key, _) = result.unwrap();
         assert_eq!(share_key, &key1);
@@ -200,7 +191,7 @@ mod tests {
         let key1 = create_typed_key(1);
         let target1 = create_target(1);
 
-        tracker.update(key1.clone(), target1.clone()).await;
+        tracker.update(key1.clone(), target1.clone());
 
         // Route error
         tracker
@@ -216,8 +207,8 @@ mod tests {
         assert_eq!(tracker.status(&key1).await.unwrap().score(), -10);
 
         // Increase score for key1
-        tracker.fetch_ok(&key1).await;
-        tracker.fetch_ok(&key1).await;
+        tracker.fetch_ok(&key1);
+        tracker.fetch_ok(&key1);
         // oks are counted
         assert_eq!(tracker.status(&key1).await.unwrap().score(), 2);
 
@@ -234,11 +225,11 @@ mod tests {
         let target1 = create_target(1);
 
         // Add a peer
-        tracker.update(key.clone(), target1.clone()).await;
+        tracker.update(key.clone(), target1.clone());
 
         // Update the peer's route
         let target2 = create_target(2);
-        tracker.update(key.clone(), target2.clone()).await;
+        tracker.update(key.clone(), target2.clone());
 
         // The share_target should now return the updated route
         let block = FileBlockFetch {
@@ -248,7 +239,7 @@ mod tests {
             block_index: 0,
         };
 
-        let share_target = tracker.share_target(&block).await.unwrap();
+        let share_target = tracker.share_target(&block).unwrap();
         assert!(share_target.is_some());
         let (share_key, share_target) = share_target.unwrap();
         assert_eq!(share_key, &key);
