@@ -40,7 +40,7 @@ fn env_filter() -> EnvFilter {
     if std::env::var("RUST_LOG").is_ok() {
         EnvFilter::builder().from_env_lossy()
     } else {
-        "warn,stigmerge=debug,stigmerge_peer=debug".parse().unwrap()
+        "stigmerge=debug,stigmerge_peer=debug".parse().unwrap()
     }
 }
 

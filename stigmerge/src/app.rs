@@ -300,7 +300,6 @@ impl App {
             share_target_rx,
             peer_resolver: peer_resolver_op,
             discovered_peers_rx,
-            update_rx: node.subscribe_veilid_update(),
         };
 
         // Create and run fetcher

@@ -17,7 +17,7 @@ use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
 use crate::{
     block_fetcher, is_cancelled, is_unrecoverable, peer_resolver, piece_verifier, proto,
-    share_resolver, Node, Result,
+    share_resolver, Error, Node, Result,
 };
 
 pub struct Fetcher<N: Node> {
@@ -41,6 +41,8 @@ pub struct Fetcher<N: Node> {
     verify_resp_rx: flume::Receiver<piece_verifier::Response>,
 
     peer_tracker: PeerTracker,
+
+    update_rx: broadcast::Receiver<VeilidUpdate>,
 }
 
 pub struct Clients {
@@ -51,7 +53,6 @@ pub struct Clients {
     pub share_target_rx: flume::Receiver<(TypedRecordKey, Target)>,
     pub peer_resolver: Operator<peer_resolver::Request>,
     pub discovered_peers_rx: flume::Receiver<(TypedRecordKey, proto::PeerInfo)>,
-    pub update_rx: broadcast::Receiver<VeilidUpdate>,
 }
 
 #[derive(Debug)]
@@ -105,6 +106,7 @@ impl<N: Node> Fetcher<N> {
         let (pending_fetch_tx, pending_fetch_rx) = flume::unbounded();
         let (fetch_resp_tx, fetch_resp_rx) = flume::unbounded();
         let (verify_resp_tx, verify_resp_rx) = flume::unbounded();
+        let update_rx = node.subscribe_veilid_update();
         Fetcher {
             node,
             clients,
@@ -125,6 +127,8 @@ impl<N: Node> Fetcher<N> {
             verify_resp_rx,
 
             peer_tracker: PeerTracker::new(),
+
+            update_rx,
         }
     }
 
@@ -143,19 +147,20 @@ impl<N: Node> Fetcher<N> {
             .build();
         let mut retries = 0;
         loop {
-            {
+            let conn_rx = {
                 let st = conn_state.lock().await;
                 if !*st.connected.borrow() {
                     self.disconnected(cancel.clone(), st).await?;
                     continue;
                 }
-            }
+                st.subscribe()
+            };
 
             let cancel_iter = cancel.clone();
             let res = match self.state {
                 State::Indexing => self.index(cancel_iter).await,
                 State::Planning => self.plan(cancel_iter).await,
-                State::Fetching => self.fetch(cancel_iter).await,
+                State::Fetching => self.fetch(cancel_iter, conn_rx).await,
                 State::Done => {
                     info!("done");
                     cancel.cancelled().await;
@@ -325,7 +330,11 @@ impl<N: Node> Fetcher<N> {
         })
     }
 
-    async fn fetch(&mut self, cancel: CancellationToken) -> Result<State> {
+    async fn fetch(
+        &mut self,
+        cancel: CancellationToken,
+        mut conn_rx: watch::Receiver<bool>,
+    ) -> Result<State> {
         debug!("fetching");
         let mut fetched_bytes = self.status_tx.borrow().fetch_position().unwrap_or(0);
         let mut verified_pieces = self.status_tx.borrow().verify_position().unwrap_or(0);
@@ -341,14 +350,19 @@ impl<N: Node> Fetcher<N> {
         let mut refresh_routes_interval = interval(Duration::from_secs(30));
         loop {
             select! {
-                biased;
                 _ = cancel.cancelled() => {
                     return Err(CancelError.into())
+                }
+                res = conn_rx.changed() => {
+                    res.context(Unrecoverable::new("connection changed"))?;
+                    if !*conn_rx.borrow() {
+                        return Err(Error::msg("connection lost"));
+                    }
                 }
                 res = self.clients.share_target_rx.recv_async() => {
                     let (key, target) = res.context(Unrecoverable::new("receive share target update"))?;
                     debug!("share target update for {key}: {target:?}");
-                    match self.peer_tracker.update(key, target.to_owned()).await {
+                    match self.peer_tracker.update(key, target.to_owned()) {
                         None => {
                             // Never seen this peer before, advertise ourselves to it
                             // TODO: this be handled by a WithVeilidConnection-run actor
@@ -432,7 +446,7 @@ impl<N: Node> Fetcher<N> {
                 }
                 res = self.pending_fetch_rx.recv_async() => {
                     let block = res.context(Unrecoverable::new("receive pending block fetch"))?;
-                    let (share_key, target) = match match self.peer_tracker.share_target(&block).await {
+                    let (share_key, target) = match match self.peer_tracker.share_target(&block) {
                         Ok(Some((share_key, target))) => Some((share_key, target)),
                         Ok(None) => None,
                         Err(e) => {
@@ -492,7 +506,7 @@ impl<N: Node> Fetcher<N> {
                             refresh_routes_interval.reset();
 
                             // Update peer stats with success
-                            self.peer_tracker.fetch_ok(&share_key).await;
+                            self.peer_tracker.fetch_ok(&share_key);
 
                             fetched_bytes += TryInto::<u64>::try_into(length).unwrap();
 
@@ -552,7 +566,7 @@ impl<N: Node> Fetcher<N> {
                 .context(Unrecoverable::new("call share resolver"))?;
             match resp {
                 share_resolver::Response::Header { target, .. } => {
-                    self.peer_tracker.update(share_key.to_owned(), target).await;
+                    self.peer_tracker.update(share_key.to_owned(), target);
                 }
                 other => {
                     warn!("unexpected share resolver response: {:?}", other);
@@ -585,7 +599,7 @@ impl<N: Node> Fetcher<N> {
                     trace!("cancelled");
                     return Err(CancelError.into())
                 }
-                res = self.clients.update_rx.recv() => {
+                res = self.update_rx.recv() => {
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
