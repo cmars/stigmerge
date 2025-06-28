@@ -5,7 +5,7 @@
 [![docs.rs/stigmerge-peer](https://img.shields.io/docsrs/stigmerge_peer)](https://docs.rs/stigmerge-peer)
 [![MPL-2.0](https://img.shields.io/crates/l/stigmerge.svg)](./LICENSE)
 
-stigmerge (distribution and transfer) sends and receives file content anonymously over the [Veilid](https://veilid.com) network.
+stigmerge sends and receives file content anonymously over the [Veilid](https://veilid.com) network.
 
 # Usage
 
@@ -13,7 +13,8 @@ stigmerge (distribution and transfer) sends and receives file content anonymousl
 
 [![asciicast](https://asciinema.org/a/663366.svg)](https://asciinema.org/a/663366)
 
-`stigmerge fetch <dht key> [directory]` fetches a file while it's being seeded (defaults to current directory).
+`stigmerge fetch <dht key> [<dht key> [...]] [-o <directory>]` fetches a file
+while it's being seeded (defaults to current directory) from one or more peers.
 
 [![asciicast](https://asciinema.org/a/663367.svg)](https://asciinema.org/a/663367)
 
@@ -25,9 +26,43 @@ See `stigmerge --help` for more options.
 
 Try fetching a test file with `stigmerge fetch VLD0:yb7Mz4g-BaFzn2qDt-xCPzsbzlJz7iq1MOFFBaCXqTw`.
 
+This is seeding from a secret location.
+
 # Install
 
 Install a [binary release](https://github.com/cmars/stigmerge/releases) on Linux, macOS or Windows.
+
+## Podman & Docker
+
+Substitute `docker` for `podman` if necessary.
+
+Build the container with `podman build -t stigmerge .`
+
+Mount the /data volume to seed or fetch files. The current working directory defaults to this volume in the container.
+
+The following example seeds a file `linux.iso` located at `./data/linux.iso`.
+
+```bash
+podman run --rm \
+    -v `pwd`/data:/data:rw,Z \
+    -v `pwd`/state:/state:rw,Z \
+    stigmerge seed linux.iso
+```
+
+Look for the log message containing the share record key, like this:
+
+```
+2025-06-28T00:54:30.118142Z  INFO stigmerge::app: announced share, key: VLD0:RDwOzUCVwY2EhL4z1C_od1J2JMS8oZbPgIuI6k5sS0I
+```
+
+Another peer could fetch this file to ~/Downloads/linux.iso with
+
+```bash
+podman run --rm \
+    -v ~/Downloads:/data:rw,Z \
+    -v `pwd`/state:/state:rw,Z \
+    stigmerge fetch VLD0:RDwOzUCVwY2EhL4z1C_od1J2JMS8oZbPgIuI6k5sS0I
+```
 
 ## Rust crate
 
