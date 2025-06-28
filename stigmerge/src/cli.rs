@@ -3,7 +3,6 @@ use std::{io::IsTerminal, path::PathBuf};
 use anyhow::{Error, Result};
 use clap::{arg, Parser, Subcommand};
 use sha2::{Digest, Sha256};
-use tracing::debug;
 
 #[derive(Parser, Debug)]
 #[command(name = "stigmerge")]
@@ -69,7 +68,6 @@ impl Cli {
             .into_os_string()
             .into_string()
             .map_err(|os| Error::msg(format!("{:?}", os)))?;
-        debug!(state_dir);
         Ok(state_dir)
     }
 
