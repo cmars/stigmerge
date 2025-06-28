@@ -42,6 +42,10 @@ jobs:
         uses: docker/metadata-action@be19121bfd18b9c1ac415d9571d4f67b9b357886
         with:
           images: stigmerge/stigmerge
+          tags: |
+            type=edge,branch=main
+            type=match,pattern=stigmerge-v(.*),group=1
+            type=ref,event=tag,enable=${{ startsWith(github.ref, 'refs/tags/stigmerge-v') }}
 
       - name: Build and push Docker image
         id: push
