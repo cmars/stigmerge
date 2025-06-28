@@ -10,6 +10,11 @@
 name: Publish Docker image
 
 on:
+  push:
+    branches:
+      - main
+    tags:
+      - stigmerge-v*
   release:
     types: [published]
 
