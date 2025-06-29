@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt};
 
 use anyhow::Context;
-use tokio::select;
+use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 use veilid_core::{TypedRecordKey, VeilidUpdate};
@@ -18,26 +18,44 @@ use crate::{
 ///
 /// Each remote peer is encoded to a separate subkey. Redacted peers are
 /// marked with empty contents.
-#[derive(Clone)]
 pub struct PeerAnnouncer<N: Node> {
     node: N,
     payload_digest: Vec<u8>,
     peer_indexes: HashMap<TypedRecordKey, usize>,
     peers: Vec<Option<TypedRecordKey>>,
     max_peers: u16,
+    discovered_peers_rx: broadcast::Receiver<(TypedRecordKey, proto::PeerInfo)>,
+}
+
+impl<N: Node> Clone for PeerAnnouncer<N> {
+    fn clone(&self) -> Self {
+        Self {
+            node: self.node.clone(),
+            payload_digest: self.payload_digest.clone(),
+            peer_indexes: self.peer_indexes.clone(),
+            peers: self.peers.clone(),
+            max_peers: self.max_peers,
+            discovered_peers_rx: self.discovered_peers_rx.resubscribe(),
+        }
+    }
 }
 
 pub const DEFAULT_MAX_PEERS: u16 = 32;
 
 impl<N: Node> PeerAnnouncer<N> {
     /// Create a new peer_announcer service.
-    pub fn new(node: N, payload_digest: &[u8]) -> Self {
+    pub fn new(
+        node: N,
+        payload_digest: &[u8],
+        discovered_peers_rx: broadcast::Receiver<(TypedRecordKey, proto::PeerInfo)>,
+    ) -> Self {
         Self {
             node,
             payload_digest: payload_digest.to_vec(),
             peer_indexes: HashMap::new(),
             peers: vec![],
             max_peers: DEFAULT_MAX_PEERS,
+            discovered_peers_rx,
         }
     }
 
@@ -166,6 +184,14 @@ impl<P: Node> Actor for PeerAnnouncer<P> {
                         _ => {}
                     }
                 }
+                res = self.discovered_peers_rx.recv() => {
+                    let (key, peer_info) = res?;
+                    self.handle_request(Request::Announce {
+                        response_tx: ResponseChannel::Drop,
+                        key: peer_info.key().to_owned(),
+                    }).await?;
+                    debug!("announced discovered peer {} from {}", peer_info.key(), key);
+                }
             }
         }
     }
@@ -260,6 +286,7 @@ mod tests {
         sync::{Arc, Mutex, RwLock},
     };
 
+    use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
     use veilid_core::TypedRecordKey;
 
@@ -305,7 +332,8 @@ mod tests {
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest);
+        let (_discovered_peer_tx, discovered_peer_rx) = broadcast::channel(16);
+        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest, discovered_peer_rx);
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send an Announce request
@@ -373,7 +401,8 @@ mod tests {
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest);
+        let (_discovered_peer_tx, discovered_peer_rx) = broadcast::channel(16);
+        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest, discovered_peer_rx);
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // First announce a peer
@@ -434,7 +463,8 @@ mod tests {
 
         // Create peer announcer
         let cancel = CancellationToken::new();
-        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest);
+        let (_discovered_peer_tx, discovered_peer_rx) = broadcast::channel(16);
+        let peer_announcer = PeerAnnouncer::new(node.clone(), &payload_digest, discovered_peer_rx);
         let mut operator = Operator::new(cancel.clone(), peer_announcer, OneShot);
 
         // Send a Reset request

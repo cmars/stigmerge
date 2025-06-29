@@ -75,8 +75,8 @@ pub fn is_cancelled(e: &Error) -> bool {
 pub struct Unrecoverable(String);
 
 impl Unrecoverable {
-    pub fn new(msg: &str) -> Unrecoverable {
-        Unrecoverable(msg.to_owned())
+    pub fn new<T: ToString>(msg: T) -> Unrecoverable {
+        Unrecoverable(msg.to_string())
     }
 }
 

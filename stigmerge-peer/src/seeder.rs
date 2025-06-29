@@ -1,7 +1,7 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 use anyhow::Context;
-use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
+use stigmerge_fileindex::{BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
@@ -9,14 +9,16 @@ use tokio::{
     sync::broadcast,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::trace;
-use veilid_core::VeilidUpdate;
+use tracing::{debug, trace};
+use veilid_core::{TypedRecordKey, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     error::{CancelError, Unrecoverable},
+    peer_resolver,
     piece_map::PieceMap,
-    proto::{self, BlockRequest, Decoder},
+    proto::{self, BlockRequest, Decoder, PeerInfo},
+    share_resolver,
     types::{PieceState, ShareInfo},
     Node, Result,
 };
@@ -50,22 +52,22 @@ pub enum Response {
 
 pub struct Seeder<N: Node> {
     node: N,
-    want_index: Index,
-    root: PathBuf,
+    share: ShareInfo,
     clients: Clients,
     files: HashMap<u32, File>,
     piece_map: PieceMap,
+    known_peers: HashMap<TypedRecordKey, PeerInfo>,
 }
 
 impl<N: Node> Seeder<N> {
     pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
         Seeder {
             node,
-            want_index: share.want_index,
-            root: share.root,
+            share,
             clients,
             files: HashMap::new(),
             piece_map: PieceMap::new(),
+            known_peers: HashMap::new(),
         }
     }
 
@@ -87,7 +89,10 @@ impl<N: Node> Seeder<N> {
     async fn get_file_for_block(&mut self, block_req: &BlockRequest) -> Result<&mut File> {
         if !self.files.contains_key(&block_req.piece) {
             // FIXME: does not support multifile; piece -> file mapping should be handled by Index
-            let file_path = self.root.join(self.want_index.files()[0].path());
+            let file_path = self
+                .share
+                .root
+                .join(self.share.want_index.files()[0].path());
             let fh = File::open(file_path).await?;
             self.files.insert(block_req.piece, fh);
         }
@@ -143,6 +148,22 @@ impl<P: Node> Actor for Seeder<P> {
                         _ => {}
                     }
                 }
+                res = self.clients.discovered_peers_rx.recv() => {
+                    let (key, peer_info) = res?;
+                    if !self.known_peers.contains_key(peer_info.key()) {
+                        debug!("discovered peer {} at {key}", peer_info.key());
+                        self.clients.share_resolver_tx.send_async(share_resolver::Request::Index{
+                            response_tx: ResponseChannel::Drop,
+                            key,
+                            want_index_digest: Some(self.share.want_index_digest),
+                            root: self.share.root.to_owned(),
+                        }).await.context(Unrecoverable::new(format!("resolve share for discovered peer {} at {key}", peer_info.key())))?;
+                        self.clients.peer_resolver_tx.send_async(peer_resolver::Request::Watch{
+                            response_tx: ResponseChannel::Drop,
+                            key: peer_info.key().to_owned(),
+                        }).await.context(Unrecoverable::new(format!("watch peers of discovered peer {} at {key}", peer_info.key())))?;
+                    }
+                }
             }
         }
     }
@@ -165,11 +186,11 @@ impl<P: Node> Clone for Seeder<P> {
     fn clone(&self) -> Self {
         Self {
             node: self.node.clone(),
-            want_index: self.want_index.clone(),
-            root: self.root.clone(),
+            share: self.share.clone(),
             clients: self.clients.clone(),
             files: HashMap::new(),
             piece_map: self.piece_map.clone(),
+            known_peers: self.known_peers.clone(),
         }
     }
 }
@@ -177,6 +198,9 @@ impl<P: Node> Clone for Seeder<P> {
 pub struct Clients {
     pub verified_rx: flume::Receiver<PieceState>,
     pub update_rx: broadcast::Receiver<VeilidUpdate>,
+    pub discovered_peers_rx: broadcast::Receiver<(TypedRecordKey, PeerInfo)>,
+    pub share_resolver_tx: flume::Sender<share_resolver::Request>,
+    pub peer_resolver_tx: flume::Sender<peer_resolver::Request>,
 }
 
 impl Clone for Clients {
@@ -184,6 +208,9 @@ impl Clone for Clients {
         Self {
             verified_rx: self.verified_rx.clone(),
             update_rx: self.update_rx.resubscribe(),
+            discovered_peers_rx: self.discovered_peers_rx.resubscribe(),
+            share_resolver_tx: self.share_resolver_tx.clone(),
+            peer_resolver_tx: self.peer_resolver_tx.clone(),
         }
     }
 }
@@ -191,11 +218,13 @@ impl Clone for Clients {
 #[cfg(test)]
 mod tests {
     use std::{
+        path::PathBuf,
         str::FromStr,
         sync::{Arc, Mutex},
         time::Duration,
     };
 
+    use stigmerge_fileindex::Index;
     use tokio::{sync::mpsc, time};
     use tokio_util::sync::CancellationToken;
     use veilid_core::{OperationId, TypedRecordKey, VeilidAppCall};
@@ -260,10 +289,17 @@ mod tests {
             root: root_dir,
         };
 
+        let (_discovered_peers_tx, discovered_peers_rx) = broadcast::channel(16);
+        let (share_resolver_tx, _share_resolver_rx) = flume::unbounded();
+        let (peer_resolver_tx, _peer_resolver_rx) = flume::unbounded();
+
         // Create clients
         let clients = Clients {
             verified_rx,
             update_rx: node.update_tx.subscribe(),
+            discovered_peers_rx,
+            share_resolver_tx,
+            peer_resolver_tx,
         };
 
         // Create cancellation token
@@ -378,10 +414,17 @@ mod tests {
             root: root_dir,
         };
 
+        let (_discovered_peers_tx, discovered_peers_rx) = broadcast::channel(16);
+        let (share_resolver_tx, _share_resolver_rx) = flume::unbounded();
+        let (peer_resolver_tx, _peer_resolver_rx) = flume::unbounded();
+
         // Create clients
         let clients = Clients {
             verified_rx,
             update_rx: node.update_tx.subscribe(),
+            discovered_peers_rx,
+            share_resolver_tx,
+            peer_resolver_tx,
         };
 
         // Create seeder

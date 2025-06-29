@@ -224,6 +224,14 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
+    let seeder_clients = seeder::Clients {
+        update_rx: node.subscribe_veilid_update(),
+        verified_rx,
+        discovered_peers_rx: discovered_peers_rx.resubscribe(),
+        share_resolver_tx: share_resolver_op.client(),
+        peer_resolver_tx: peer_resolver_op.client(),
+    };
+
     let fetcher_clients = FetcherClients {
         block_fetcher,
         piece_verifier: piece_verifier_op,
@@ -235,11 +243,6 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     };
 
     // Set up seeder
-    let seeder_clients = seeder::Clients {
-        update_rx: node.subscribe_veilid_update(),
-        verified_rx,
-    };
-
     let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
     let seeder_op = Operator::new(
         cancel.clone(),

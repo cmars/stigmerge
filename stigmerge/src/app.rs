@@ -24,6 +24,7 @@ use stigmerge_peer::{
     have_announcer::HaveAnnouncer,
     new_routing_context,
     node::{Node, Veilid},
+    peer_announcer::PeerAnnouncer,
     peer_resolver::PeerResolver,
     piece_verifier::PieceVerifier,
     seeder::{self, Seeder},
@@ -300,6 +301,26 @@ impl App {
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
 
+        // Create peer announcer for our share
+        let peer_announcer_op = Operator::new(
+            cancel.clone(),
+            PeerAnnouncer::new(
+                node.clone(),
+                &share_header.payload_digest(),
+                discovered_peers_rx.resubscribe(),
+            ),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        );
+        tasks.spawn(peer_announcer_op.join());
+
+        let seeder_clients = seeder::Clients {
+            update_rx: node.subscribe_veilid_update(),
+            verified_rx,
+            discovered_peers_rx: discovered_peers_rx.resubscribe(),
+            share_resolver_tx: share_resolver_op.client(),
+            peer_resolver_tx: peer_resolver_op.client(),
+        };
+
         let fetcher_clients = FetcherClients {
             block_fetcher,
             piece_verifier: piece_verifier_op,
@@ -318,11 +339,6 @@ impl App {
         let fetcher_task = spawn(fetcher.run(cancel.clone(), conn_state.clone()));
 
         // Set up seeder
-        let seeder_clients = seeder::Clients {
-            update_rx: node.subscribe_veilid_update(),
-            verified_rx,
-        };
-
         let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
         let seeder_op = Operator::new(
             cancel.clone(),
