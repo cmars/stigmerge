@@ -15,11 +15,11 @@ digest=$(sha256sum ${seed_dir}/testfile | cut -d' ' -f1)
 
 function run_seed {
     cd ${seed_dir}
-    ${stigmerge} --no-ui seed testfile 2>&1 > seed.log
+    ${stigmerge} --no-ui --state-dir ${seed_dir}/state seed testfile 2>&1 > seed.log
 }
 
 function get_seed_key {
-    awk '/announced share, key: /' ${seed_dir}/seed.log | sed 's/.* announced share, key: //;'
+    cat ${seed_dir}/state/share_key
 }
 
 run_seed &
@@ -42,7 +42,7 @@ else
     echo "got seed key ${seed_key}"
 fi
 
-(cd ${fetch_dir}; ${stigmerge} --no-ui fetch ${seed_key}) &
+(cd ${fetch_dir}; ${stigmerge} --no-ui --state-dir ${fetch_dir}/state fetch ${seed_key}) &
 fetch_pid=$!
 trap "kill ${seed_pid} ${fetch_pid}; rm -rf ${seed_dir} ${fetch_dir}" EXIT
 
