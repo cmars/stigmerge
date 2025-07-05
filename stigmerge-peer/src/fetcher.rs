@@ -50,9 +50,9 @@ pub struct Clients {
     pub piece_verifier: Operator<piece_verifier::Request>,
     pub have_announcer: Operator<have_announcer::Request>,
     pub share_resolver: Operator<share_resolver::Request>,
-    pub share_target_rx: flume::Receiver<(TypedRecordKey, Target)>,
+    pub share_target_rx: broadcast::Receiver<(TypedRecordKey, Target)>,
     pub peer_resolver: Operator<peer_resolver::Request>,
-    pub discovered_peers_rx: flume::Receiver<(TypedRecordKey, proto::PeerInfo)>,
+    pub discovered_peers_rx: broadcast::Receiver<(TypedRecordKey, proto::PeerInfo)>,
 }
 
 #[derive(Debug)]
@@ -359,7 +359,7 @@ impl<N: Node> Fetcher<N> {
                         return Err(Error::msg("connection lost"));
                     }
                 }
-                res = self.clients.share_target_rx.recv_async() => {
+                res = self.clients.share_target_rx.recv() => {
                     let (key, target) = res.context(Unrecoverable::new("receive share target update"))?;
                     debug!("share target update for {key}: {target:?}");
                     match self.peer_tracker.update(key, target.to_owned()) {
@@ -473,7 +473,7 @@ impl<N: Node> Fetcher<N> {
                 }
 
                 // Resolve newly discovered peers
-                res = self.clients.discovered_peers_rx.recv_async() => {
+                res = self.clients.discovered_peers_rx.recv() => {
                     let (key, peer_info) = res.context(Unrecoverable::new("receive discovered peer"))?;
                     debug!("discovered peer {} from {}", peer_info.key(), key);
                     if !self.peer_tracker.contains(peer_info.key()) {

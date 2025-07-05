@@ -2,7 +2,7 @@ use std::{collections::HashSet, fmt, path::PathBuf};
 
 use anyhow::Context;
 use stigmerge_fileindex::Index;
-use tokio::select;
+use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace, warn};
 use veilid_core::{Target, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
@@ -20,15 +20,15 @@ use crate::{
 /// the expected index by verifying its content digest.
 pub struct ShareResolver<N: Node> {
     node: N,
-    share_target_tx: flume::Sender<(TypedRecordKey, Target)>,
-    share_target_rx: flume::Receiver<(TypedRecordKey, Target)>,
+    share_target_tx: broadcast::Sender<(TypedRecordKey, Target)>,
+    share_target_rx: broadcast::Receiver<(TypedRecordKey, Target)>,
     watching: HashSet<TypedRecordKey>,
 }
 
 impl<P: Node> ShareResolver<P> {
     /// Create a new share_resolver service.
     pub fn new(node: P) -> Self {
-        let (share_target_tx, share_target_rx) = flume::unbounded();
+        let (share_target_tx, share_target_rx) = broadcast::channel(32768);
         Self {
             node,
             share_target_tx,
@@ -37,8 +37,8 @@ impl<P: Node> ShareResolver<P> {
         }
     }
 
-    pub fn subscribe_target(&self) -> flume::Receiver<(TypedRecordKey, Target)> {
-        self.share_target_rx.clone()
+    pub fn subscribe_target(&self) -> broadcast::Receiver<(TypedRecordKey, Target)> {
+        self.share_target_rx.resubscribe()
     }
 }
 
@@ -282,8 +282,8 @@ impl<P: Node> Actor for ShareResolver<P> {
 
                 if digest_matches {
                     self.share_target_tx
-                        .send_async((key.to_owned(), target.to_owned()))
-                        .await?;
+                        .send((key.to_owned(), target.to_owned()))
+                        .context(Unrecoverable::new("notify target on index"))?;
                     (
                         Response::Index {
                             key: key.clone(),
@@ -304,8 +304,8 @@ impl<P: Node> Actor for ShareResolver<P> {
             } => {
                 let (target, header) = self.node.resolve_route(&key, prior_target).await?;
                 self.share_target_tx
-                    .send_async((key.to_owned(), target.to_owned()))
-                    .await?;
+                    .send((key.to_owned(), target.to_owned()))
+                    .context(Unrecoverable::new("notify target on header"))?;
                 (
                     Response::Header {
                         key: key.clone(),
@@ -351,7 +351,7 @@ impl<P: Node + Clone> Clone for ShareResolver<P> {
         Self {
             node: self.node.clone(),
             share_target_tx: self.share_target_tx.clone(),
-            share_target_rx: self.share_target_rx.clone(),
+            share_target_rx: self.share_target_rx.resubscribe(),
             watching: self.watching.clone(),
         }
     }
