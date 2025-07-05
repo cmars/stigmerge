@@ -7,7 +7,7 @@ use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
-    sync::RwLock,
+    sync::{broadcast, RwLock},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -17,18 +17,17 @@ use crate::{
     types::PieceState,
 };
 
-#[derive(Clone)]
 pub struct PieceVerifier {
     index: Arc<RwLock<Index>>,
     pending_pieces: HashMap<(usize, usize), PieceState>,
     verified_pieces: HashMap<(usize, usize), PieceState>,
-    verified_tx: flume::Sender<PieceState>,
-    verified_rx: flume::Receiver<PieceState>,
+    verified_tx: broadcast::Sender<PieceState>,
+    verified_rx: broadcast::Receiver<PieceState>,
 }
 
 impl PieceVerifier {
     pub async fn new(index: Arc<RwLock<Index>>) -> PieceVerifier {
-        let (verified_tx, verified_rx) = flume::unbounded();
+        let (verified_tx, verified_rx) = broadcast::channel(32768);
         let pending_pieces = Self::empty_pieces(index.read().await.deref());
         PieceVerifier {
             index,
@@ -39,8 +38,8 @@ impl PieceVerifier {
         }
     }
 
-    pub fn subscribe_verified(&self) -> flume::Receiver<PieceState> {
-        self.verified_rx.clone()
+    pub fn subscribe_verified(&self) -> broadcast::Receiver<PieceState> {
+        self.verified_rx.resubscribe()
     }
 
     async fn verify_piece(&self, file_index: usize, piece_index: usize) -> Result<bool> {
@@ -204,9 +203,8 @@ impl Actor for PieceVerifier {
             {
                 self.verified_pieces.insert(req.key(), piece_state);
                 self.verified_tx
-                    .send_async(req.piece_state())
-                    .await
-                    .with_context(|| "piece_verifier: notify verified piece")?;
+                    .send(req.piece_state())
+                    .context(Unrecoverable::new("notify verified piece"))?;
                 Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
@@ -214,7 +212,7 @@ impl Actor for PieceVerifier {
                 }
             } else {
                 // invalid piece, still pending
-                self.pending_pieces.insert(req.key(), piece_state.cleared());
+                self.pending_pieces.insert(req.key(), piece_state);
                 Response::InvalidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
@@ -236,6 +234,18 @@ impl Actor for PieceVerifier {
             .context(Unrecoverable::new("send response from piece verifier"))?;
 
         Ok(())
+    }
+}
+
+impl Clone for PieceVerifier {
+    fn clone(&self) -> Self {
+        PieceVerifier {
+            index: self.index.clone(),
+            pending_pieces: self.pending_pieces.clone(),
+            verified_pieces: self.verified_pieces.clone(),
+            verified_tx: self.verified_tx.clone(),
+            verified_rx: self.verified_rx.resubscribe(),
+        }
     }
 }
 

@@ -115,12 +115,12 @@ impl<P: Node> Actor for Seeder<P> {
                     let req = res.with_context(|| format!("seeder: receive request"))?;
                     self.handle_request(req).await?;
                 }
-                res = self.clients.verified_rx.recv_async() => {
-                    let piece_state = res.with_context(|| format!("seeder: receive verified piece update"))?;
+                res = self.clients.verified_rx.recv() => {
+                    let piece_state = res.context(Unrecoverable::new("receive verified piece update"))?;
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }
                 res = self.clients.update_rx.recv() => {
-                    let update = res.with_context(|| format!("seeder: receive veilid update"))?;
+                    let update = res.context(Unrecoverable::new("receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
                             let req = proto::Request::decode(veilid_app_call.message())?;
@@ -175,14 +175,14 @@ impl<P: Node> Clone for Seeder<P> {
 }
 
 pub struct Clients {
-    pub verified_rx: flume::Receiver<PieceState>,
+    pub verified_rx: broadcast::Receiver<PieceState>,
     pub update_rx: broadcast::Receiver<VeilidUpdate>,
 }
 
 impl Clone for Clients {
     fn clone(&self) -> Self {
         Self {
-            verified_rx: self.verified_rx.clone(),
+            verified_rx: self.verified_rx.resubscribe(),
             update_rx: self.update_rx.resubscribe(),
         }
     }
@@ -224,7 +224,7 @@ mod tests {
         let index = create_test_index(&tf_path).await;
 
         // Set up channels
-        let (verified_tx, verified_rx) = flume::bounded(16);
+        let (verified_tx, verified_rx) = broadcast::channel(16);
 
         // Create a stub peer with mock reply_block_contents
         let mut node = StubNode::new();
@@ -276,10 +276,7 @@ mod tests {
 
         // First, send a verified piece notification with confirmation it's applied
         let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
-        verified_tx
-            .send_async(piece_state)
-            .await
-            .expect("send verified piece");
+        verified_tx.send(piece_state).expect("send verified piece");
 
         // Have map should be updated. This should be a certainty with biased
         // select! behavior.
@@ -341,7 +338,7 @@ mod tests {
         let index = create_test_index(&tf_path).await;
 
         // Set up channels
-        let (_verified_tx, verified_rx) = flume::bounded(16);
+        let (_verified_tx, verified_rx) = broadcast::channel(16);
 
         // Create a stub peer with mock reply_block_contents
         let mut node = StubNode::new();

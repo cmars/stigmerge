@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Context;
-use tokio::select;
+use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 use veilid_core::{TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
@@ -21,8 +21,8 @@ pub struct PeerResolver<N: Node> {
     // Mapping from peer-map key to share key, used in watches
     peer_to_share_map: HashMap<TypedRecordKey, TypedRecordKey>,
 
-    discovered_peer_tx: flume::Sender<(TypedRecordKey, PeerInfo)>,
-    discovered_peer_rx: flume::Receiver<(TypedRecordKey, PeerInfo)>,
+    discovered_peer_tx: broadcast::Sender<(TypedRecordKey, PeerInfo)>,
+    discovered_peer_rx: broadcast::Receiver<(TypedRecordKey, PeerInfo)>,
 }
 
 impl<P> PeerResolver<P>
@@ -31,7 +31,7 @@ where
 {
     /// Create a new peer_resolver service.
     pub fn new(node: P) -> Self {
-        let (discovered_peer_tx, discovered_peer_rx) = flume::unbounded();
+        let (discovered_peer_tx, discovered_peer_rx) = broadcast::channel(256);
         Self {
             node,
             peer_to_share_map: HashMap::new(),
@@ -40,8 +40,8 @@ where
         }
     }
 
-    pub fn subscribe_discovered_peers(&self) -> flume::Receiver<(TypedRecordKey, PeerInfo)> {
-        self.discovered_peer_rx.clone()
+    pub fn subscribe_discovered_peers(&self) -> broadcast::Receiver<(TypedRecordKey, PeerInfo)> {
+        self.discovered_peer_rx.resubscribe()
     }
 }
 
@@ -151,8 +151,8 @@ impl<P: Node> Actor for PeerResolver<P> {
                                 };
                                 if data.data_size() > 0 {
                                     if let Ok(peer_info) = PeerInfo::decode(data.data()) {
-                                        self.discovered_peer_tx.send_async((share_key.to_owned(), peer_info)).await
-                                            .with_context(|| format!("peer_resolver: send discovered peer"))?;
+                                        self.discovered_peer_tx.send((share_key.to_owned(), peer_info))
+                                            .context(Unrecoverable::new("send discovered peer"))?;
                                     }
                                 }
                             }
@@ -276,7 +276,7 @@ impl<P: Node> Clone for PeerResolver<P> {
             node: self.node.clone(),
             peer_to_share_map: self.peer_to_share_map.clone(),
             discovered_peer_tx: self.discovered_peer_tx.clone(),
-            discovered_peer_rx: self.discovered_peer_rx.clone(),
+            discovered_peer_rx: self.discovered_peer_rx.resubscribe(),
         }
     }
 }
