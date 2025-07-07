@@ -405,7 +405,7 @@ impl App {
                             }
                             fetcher::Status::FetchProgress { fetch_position, fetch_length, verify_position, verify_length } => {
                                 fetch_progress.set_message("Fetching ");
-                                fetch_progress.set_position(fetch_position);
+                                fetch_progress.set_position(if fetch_position > 0 { fetch_position.try_into().unwrap() } else { 0 });
                                 fetch_progress.set_length(fetch_length);
                                 verify_progress.set_message("Verifying");
                                 verify_progress.set_position(verify_position);

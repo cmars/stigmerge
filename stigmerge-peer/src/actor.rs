@@ -141,7 +141,7 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
         runner: R,
         n: usize,
     ) -> Self {
-        let (request_tx, request_rx) = flume::unbounded();
+        let (request_tx, request_rx) = flume::bounded(n * 2);
         let mut tasks = JoinSet::new();
         for _ in 0..n {
             let mut task_runner = runner.clone();
