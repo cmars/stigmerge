@@ -53,6 +53,7 @@ impl PeerTracker {
         self.targets.insert(key, target)
     }
 
+    #[cfg(test)]
     pub fn contains(&self, key: &TypedRecordKey) -> bool {
         self.targets.contains_key(key)
     }

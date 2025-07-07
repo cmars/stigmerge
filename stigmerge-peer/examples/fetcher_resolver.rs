@@ -5,6 +5,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use tokio::select;
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+use veilid_core::TypedRecordKey;
+
+use stigmerge_peer::actor::ResponseChannel;
+use stigmerge_peer::actor::UntilCancelled;
+use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
+use stigmerge_peer::block_fetcher::BlockFetcher;
+use stigmerge_peer::fetcher::{Clients, Fetcher};
+use stigmerge_peer::have_announcer::HaveAnnouncer;
+use stigmerge_peer::new_routing_context;
+use stigmerge_peer::node::Veilid;
+use stigmerge_peer::piece_verifier::PieceVerifier;
+use stigmerge_peer::share_resolver::{self, ShareResolver};
+use stigmerge_peer::types::ShareInfo;
+use stigmerge_peer::Error;
 
 /// Fetcher resolver CLI arguments
 #[derive(Parser, Debug)]
@@ -22,27 +41,6 @@ struct Args {
     #[arg(default_value = ".", help = "Directory to download files to")]
     download_dir: PathBuf,
 }
-
-use stigmerge_peer::actor::ResponseChannel;
-use stigmerge_peer::actor::UntilCancelled;
-use stigmerge_peer::peer_resolver::PeerResolver;
-use tokio::select;
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
-use tracing::info;
-
-use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
-use stigmerge_peer::block_fetcher::BlockFetcher;
-use stigmerge_peer::fetcher::{Clients, Fetcher};
-use stigmerge_peer::have_announcer::HaveAnnouncer;
-use stigmerge_peer::new_routing_context;
-use stigmerge_peer::node::Veilid;
-use stigmerge_peer::piece_verifier::PieceVerifier;
-use stigmerge_peer::share_resolver::{self, ShareResolver};
-use stigmerge_peer::types::ShareInfo;
-use stigmerge_peer::Error;
-use veilid_core::TypedRecordKey;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {
@@ -125,22 +123,12 @@ async fn main() -> std::result::Result<(), Error> {
         header,
     };
 
-    let peer_resolver = PeerResolver::new(node.clone());
-    let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
-    let peer_resolver_op = Operator::new(
-        cancel.clone(),
-        peer_resolver,
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-    );
-
     let clients = Clients {
         block_fetcher,
         piece_verifier,
         have_announcer,
         share_resolver: share_resolver_op,
         share_target_rx,
-        peer_resolver: peer_resolver_op,
-        discovered_peers_rx,
     };
 
     // Create and run fetcher

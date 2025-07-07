@@ -16,15 +16,14 @@ use crate::peer_tracker::PeerTracker;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
 use crate::{
-    block_fetcher, is_cancelled, is_unrecoverable, peer_resolver, piece_verifier, proto,
-    share_resolver, Error, Node, Result,
+    block_fetcher, is_cancelled, is_unrecoverable, piece_verifier, share_resolver, Error, Node,
+    Result,
 };
 
 pub struct Fetcher<N: Node> {
     node: N,
     clients: Clients,
 
-    have_index: Index,
     share: ShareInfo,
 
     state: State,
@@ -51,14 +50,12 @@ pub struct Clients {
     pub have_announcer: Operator<have_announcer::Request>,
     pub share_resolver: Operator<share_resolver::Request>,
     pub share_target_rx: broadcast::Receiver<(TypedRecordKey, Target)>,
-    pub peer_resolver: Operator<peer_resolver::Request>,
-    pub discovered_peers_rx: broadcast::Receiver<(TypedRecordKey, proto::PeerInfo)>,
 }
 
 #[derive(Debug)]
 pub enum State {
     Indexing,
-    Planning,
+    Planning { have_index: Index },
     Fetching,
     Done,
 }
@@ -93,7 +90,6 @@ impl<N: Node> Fetcher<N> {
         Fetcher {
             node,
             clients,
-            have_index: share.want_index.empty(),
             share,
             state: State::Indexing,
 
@@ -142,7 +138,9 @@ impl<N: Node> Fetcher<N> {
             let cancel_iter = cancel.clone();
             let res = match self.state {
                 State::Indexing => self.index(cancel_iter).await,
-                State::Planning => self.plan(cancel_iter).await,
+                State::Planning { ref have_index } => {
+                    self.plan(cancel_iter, have_index.clone()).await
+                }
                 State::Fetching => self.fetch(cancel_iter, conn_rx).await,
                 State::Done => {
                     info!("done");
@@ -233,7 +231,7 @@ impl<N: Node> Fetcher<N> {
         });
 
         // Index the file
-        self.have_index = indexer
+        let have_index = indexer
             .index()
             .await
             .context(Unrecoverable::new("index local share"))?;
@@ -247,12 +245,12 @@ impl<N: Node> Fetcher<N> {
         };
 
         // Ready for planning
-        Ok(State::Planning)
+        Ok(State::Planning { have_index })
     }
 
-    async fn plan(&mut self, cancel: CancellationToken) -> Result<State> {
+    async fn plan(&mut self, cancel: CancellationToken, have_index: Index) -> Result<State> {
         debug!("planning");
-        let diff = self.share.want_index.diff(&self.have_index);
+        let diff = self.share.want_index.diff(&have_index);
         let mut want_length = 0;
         let total_length = self.share.want_index.payload().length();
         for want_block in diff.want {
@@ -449,28 +447,6 @@ impl<N: Node> Fetcher<N> {
                     };
                 }
 
-                // Resolve newly discovered peers
-                res = self.clients.discovered_peers_rx.recv() => {
-                    let (key, peer_info) = res.context(Unrecoverable::new("receive discovered peer"))?;
-                    debug!("discovered peer {} from {}", peer_info.key(), key);
-                    if !self.peer_tracker.contains(peer_info.key()) {
-                        self.clients.share_resolver.call(share_resolver::Request::Index{
-                            response_tx: ResponseChannel::default(),
-                            key,
-                            want_index_digest: Some(self.share.want_index_digest),
-                            root: self.share.root.to_owned(),
-                        }).await.err().map(|e| {
-                            warn!("failed to resolve share for discovered peer {} at {key}: {e}", peer_info.key());
-                        });
-                        self.clients.peer_resolver.call(peer_resolver::Request::Watch{
-                            response_tx: ResponseChannel::default(),
-                            key: peer_info.key().to_owned(),
-                        }).await.err().map(|e| {
-                            warn!("failed to watch peers of discovered peer {} at {key}: {e}", peer_info.key());
-                        });
-                    }
-                }
-
                 res = self.fetch_resp_rx.recv_async() => {
                     match res.with_context(|| format!("fetcher: receive block fetch response")) {
                         // An empty fetcher channel means we've received a
@@ -557,7 +533,6 @@ impl<N: Node> Fetcher<N> {
             self.clients.block_fetcher.join(),
             self.clients.have_announcer.join(),
             self.clients.share_resolver.join(),
-            self.clients.peer_resolver.join(),
         )?;
         Ok(())
     }

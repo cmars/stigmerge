@@ -106,22 +106,21 @@ pub trait Respondable {
 
 pub struct Operator<Req> {
     cancel: CancellationToken,
-    request_tx: flume::Sender<Req>,
+    pub request_tx: flume::Sender<Req>,
     tasks: task::JoinSet<Result<()>>,
 }
 
 impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
-    pub fn new<A: Actor<Request = Req> + Clone + Send + 'static, R: Runner<A> + Send + 'static>(
+    pub fn new<A: Actor<Request = Req> + Send + 'static, R: Runner<A> + Send + 'static>(
         cancel: CancellationToken,
         actor: A,
         mut runner: R,
     ) -> Self {
         let (request_tx, request_rx) = flume::unbounded();
-        let task_actor = actor.clone();
         let task_cancel = cancel.child_token();
         let mut tasks = JoinSet::new();
         tasks.spawn(async move {
-            let res = runner.run(task_actor, task_cancel, request_rx).await;
+            let res = runner.run(actor, task_cancel, request_rx).await;
             trace!("runner completed: {res:?}");
             res
         });

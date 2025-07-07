@@ -1,7 +1,7 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 use anyhow::Context;
-use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
+use stigmerge_fileindex::{BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
@@ -9,14 +9,16 @@ use tokio::{
     sync::broadcast,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::trace;
-use veilid_core::VeilidUpdate;
+use tracing::{debug, trace, warn};
+use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::{
-    actor::{Actor, Respondable, ResponseChannel},
+    actor::{Actor, Operator, Respondable, ResponseChannel},
     error::{CancelError, Unrecoverable},
+    peer_resolver,
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
+    share_resolver,
     types::{PieceState, ShareInfo},
     Node, Result,
 };
@@ -50,20 +52,23 @@ pub enum Response {
 
 pub struct Seeder<N: Node> {
     node: N,
-    want_index: Index,
-    root: PathBuf,
     clients: Clients,
+    update_rx: broadcast::Receiver<VeilidUpdate>,
+
+    share: ShareInfo,
+
     files: HashMap<u32, File>,
     piece_map: PieceMap,
 }
 
 impl<N: Node> Seeder<N> {
     pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
+        let update_rx = node.subscribe_veilid_update();
         Seeder {
             node,
-            want_index: share.want_index,
-            root: share.root,
             clients,
+            update_rx,
+            share,
             files: HashMap::new(),
             piece_map: PieceMap::new(),
         }
@@ -87,7 +92,10 @@ impl<N: Node> Seeder<N> {
     async fn get_file_for_block(&mut self, block_req: &BlockRequest) -> Result<&mut File> {
         if !self.files.contains_key(&block_req.piece) {
             // FIXME: does not support multifile; piece -> file mapping should be handled by Index
-            let file_path = self.root.join(self.want_index.files()[0].path());
+            let file_path = self
+                .share
+                .root
+                .join(self.share.want_index.files()[0].path());
             let fh = File::open(file_path).await?;
             self.files.insert(block_req.piece, fh);
         }
@@ -107,7 +115,6 @@ impl<P: Node> Actor for Seeder<P> {
         let mut buf = [0u8; BLOCK_SIZE_BYTES];
         loop {
             select! {
-                biased;
                 _ = cancel.cancelled() => {
                     return Err(CancelError.into());
                 }
@@ -119,7 +126,38 @@ impl<P: Node> Actor for Seeder<P> {
                     let piece_state = res.context(Unrecoverable::new("receive verified piece update"))?;
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }
-                res = self.clients.update_rx.recv() => {
+                res = self.clients.share_target_rx.recv() => {
+                    let (key, target) = match res {
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        res => res
+                    }.context(Unrecoverable::new("receive share target update"))?;
+                    debug!("share target update for {key}: {target:?}");
+                    if let Err(e) = self.node.request_advertise_peer(
+                        &target,
+                        &self.share.key).await.with_context(|| format!("advertising our share to new peer")) {
+                            warn!("{e}");
+                    }
+                }
+                res = self.clients.discovered_peers_rx.recv() => {
+                    let (key, peer_info) = match res {
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        res => res,
+                    }.context(Unrecoverable::new("receive discovered peer"))?;
+                    debug!("discovered peer {} from {}", peer_info.key(), key);
+                    self.clients.share_resolver_tx.send_async(share_resolver::Request::Index{
+                        response_tx: ResponseChannel::default(),
+                        key,
+                        want_index_digest: Some(self.share.want_index_digest),
+                        root: self.share.root.to_owned(),
+                    }).await.context(Unrecoverable::new("send share_resolver request"))?;
+                    self.clients.peer_resolver.call(peer_resolver::Request::Watch{
+                        response_tx: ResponseChannel::default(),
+                        key: peer_info.key().to_owned(),
+                    }).await.err().map(|e| {
+                        warn!("failed to watch peers of discovered peer {} at {key}: {e}", peer_info.key());
+                    });
+                }
+                res = self.update_rx.recv() => {
                     let update = res.context(Unrecoverable::new("receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
@@ -161,41 +199,24 @@ impl<P: Node> Actor for Seeder<P> {
     }
 }
 
-impl<P: Node> Clone for Seeder<P> {
-    fn clone(&self) -> Self {
-        Self {
-            node: self.node.clone(),
-            want_index: self.want_index.clone(),
-            root: self.root.clone(),
-            clients: self.clients.clone(),
-            files: HashMap::new(),
-            piece_map: self.piece_map.clone(),
-        }
-    }
-}
-
 pub struct Clients {
     pub verified_rx: broadcast::Receiver<PieceState>,
-    pub update_rx: broadcast::Receiver<VeilidUpdate>,
-}
-
-impl Clone for Clients {
-    fn clone(&self) -> Self {
-        Self {
-            verified_rx: self.verified_rx.resubscribe(),
-            update_rx: self.update_rx.resubscribe(),
-        }
-    }
+    pub peer_resolver: Operator<peer_resolver::Request>,
+    pub share_resolver_tx: flume::Sender<share_resolver::Request>,
+    pub share_target_rx: broadcast::Receiver<(TypedRecordKey, Target)>,
+    pub discovered_peers_rx: broadcast::Receiver<(TypedRecordKey, proto::PeerInfo)>,
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
+        path::PathBuf,
         str::FromStr,
         sync::{Arc, Mutex},
         time::Duration,
     };
 
+    use stigmerge_fileindex::Index;
     use tokio::{sync::mpsc, time};
     use tokio_util::sync::CancellationToken;
     use veilid_core::{OperationId, TypedRecordKey, VeilidAppCall};
@@ -261,9 +282,18 @@ mod tests {
         };
 
         // Create clients
+        let cancel = CancellationToken::new();
+        let peer_resolver = peer_resolver::PeerResolver::new(node.clone());
+        let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
+        let peer_resolver_op = Operator::new(cancel.clone(), peer_resolver, OneShot);
+        let (share_resolver_tx, _share_resolver_rx) = flume::unbounded();
+        let (_share_target_tx, share_target_rx) = broadcast::channel(16);
         let clients = Clients {
             verified_rx,
-            update_rx: node.update_tx.subscribe(),
+            peer_resolver: peer_resolver_op,
+            share_resolver_tx,
+            share_target_rx,
+            discovered_peers_rx,
         };
 
         // Create cancellation token
@@ -278,17 +308,25 @@ mod tests {
         let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
         verified_tx.send(piece_state).expect("send verified piece");
 
-        // Have map should be updated. This should be a certainty with biased
-        // select! behavior.
-        let req = Request::HaveMap {
-            response_tx: ResponseChannel::default(),
-        };
-        let resp = operator.call(req).await.expect("call havemap");
-        match resp {
-            Response::HaveMap(have_map) => {
-                assert!(!have_map.is_empty(), "confirm verified block");
+        // Have map should be updated. Retry with a backoff delay to allow
+        // select! to pick up on the request.
+        let mut confirmed_have_map = false;
+        for i in 0..30 {
+            let req = Request::HaveMap {
+                response_tx: ResponseChannel::default(),
+            };
+            let resp = operator.call(req).await.expect("call havemap");
+            match resp {
+                Response::HaveMap(have_map) => {
+                    if !have_map.is_empty() {
+                        confirmed_have_map = true;
+                        break;
+                    }
+                }
             }
+            time::sleep(Duration::from_millis(i)).await;
         }
+        assert!(confirmed_have_map, "confirm verified block");
 
         // Send a block request for the verified piece
         let block_req = BlockRequest { piece: 0, block: 0 };
@@ -376,13 +414,21 @@ mod tests {
         };
 
         // Create clients
+        let cancel = CancellationToken::new();
+        let peer_resolver = peer_resolver::PeerResolver::new(node.clone());
+        let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
+        let peer_resolver_op = Operator::new(cancel.clone(), peer_resolver, OneShot);
+        let (share_resolver_tx, _share_resolver_rx) = flume::unbounded();
+        let (_share_target_tx, share_target_rx) = broadcast::channel(16);
         let clients = Clients {
             verified_rx,
-            update_rx: node.update_tx.subscribe(),
+            peer_resolver: peer_resolver_op,
+            discovered_peers_rx,
+            share_resolver_tx,
+            share_target_rx,
         };
 
         // Create seeder
-        let cancel = CancellationToken::new();
         let operator = Operator::new(
             cancel.clone(),
             Seeder::new(node, share_info, clients),

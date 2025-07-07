@@ -168,6 +168,7 @@ impl App {
             share_resolver,
             WithVeilidConnection::new(node.clone(), conn_state.clone()),
         );
+        let share_resolver_tx = share_resolver_op.request_tx.clone();
 
         // Resolve bootstrap share keys and want_index_digest
         let mut want_index = None;
@@ -292,22 +293,12 @@ impl App {
             n_fetchers,
         );
 
-        let peer_resolver = PeerResolver::new(node.clone());
-        let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
-        let peer_resolver_op = Operator::new(
-            cancel.clone(),
-            peer_resolver,
-            WithVeilidConnection::new(node.clone(), conn_state.clone()),
-        );
-
         let fetcher_clients = FetcherClients {
             block_fetcher,
             piece_verifier: piece_verifier_op,
             have_announcer,
             share_resolver: share_resolver_op,
-            share_target_rx,
-            peer_resolver: peer_resolver_op,
-            discovered_peers_rx,
+            share_target_rx: share_target_rx.resubscribe(),
         };
 
         // Create and run fetcher
@@ -318,9 +309,20 @@ impl App {
         let fetcher_task = spawn(fetcher.run(cancel.clone(), conn_state.clone()));
 
         // Set up seeder
+        let peer_resolver = PeerResolver::new(node.clone());
+        let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
+        let peer_resolver_op = Operator::new(
+            cancel.clone(),
+            peer_resolver,
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        );
+
         let seeder_clients = seeder::Clients {
-            update_rx: node.subscribe_veilid_update(),
             verified_rx,
+            share_resolver_tx,
+            share_target_rx,
+            peer_resolver: peer_resolver_op,
+            discovered_peers_rx,
         };
 
         let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
