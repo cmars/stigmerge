@@ -75,29 +75,12 @@ pub enum Status {
         length: u64,
     },
     FetchProgress {
-        fetch_position: u64,
+        fetch_position: i64,
         fetch_length: u64,
         verify_position: u64,
         verify_length: u64,
     },
     Done,
-}
-
-impl Status {
-    fn fetch_position(&self) -> Option<u64> {
-        match self {
-            Status::FetchProgress { fetch_position, .. } => Some(*fetch_position),
-            _ => None,
-        }
-    }
-    fn verify_position(&self) -> Option<u64> {
-        match self {
-            Status::FetchProgress {
-                verify_position, ..
-            } => Some(*verify_position),
-            _ => None,
-        }
-    }
 }
 
 impl<N: Node> Fetcher<N> {
@@ -336,8 +319,6 @@ impl<N: Node> Fetcher<N> {
         mut conn_rx: watch::Receiver<bool>,
     ) -> Result<State> {
         debug!("fetching");
-        let mut fetched_bytes = self.status_tx.borrow().fetch_position().unwrap_or(0);
-        let mut verified_pieces = self.status_tx.borrow().verify_position().unwrap_or(0);
         let total_pieces = self
             .share
             .want_index
@@ -346,7 +327,7 @@ impl<N: Node> Fetcher<N> {
             .len()
             .try_into()
             .unwrap();
-        let total_length = self.share.want_index.payload().length();
+        let total_length: u64 = self.share.want_index.payload().length().try_into().unwrap();
         let mut refresh_routes_interval = interval(Duration::from_secs(30));
         loop {
             select! {
@@ -386,14 +367,13 @@ impl<N: Node> Fetcher<N> {
                 res = self.verify_resp_rx.recv_async() => {
                     match res.context(Unrecoverable::new("receive piece verification"))? {
                         piece_verifier::Response::ValidPiece { file_index: _, piece_index, index_complete } => {
-                            verified_pieces += 1u64;
 
                             // Update verify progress
                             self.status_tx.send_modify(|status| {
                                 match status {
                                     Status::FetchProgress { verify_position, verify_length, .. } => {
                                         *verify_length = total_pieces;
-                                        *verify_position = verified_pieces;
+                                        *verify_position += 1u64;
                                     }
                                     _ => {}
                                 }
@@ -415,14 +395,12 @@ impl<N: Node> Fetcher<N> {
                             let piece_length = self.share.want_index.payload().pieces()[piece_index].length();
                             warn!(file_index, piece_index, piece_length, "invalid piece");
 
-                            fetched_bytes -= TryInto::<u64>::try_into(piece_length).unwrap();
-
                             // Rewind the fetch progress status by the piece length
                             self.status_tx.send_modify(|status| {
                                 match status {
                                     Status::FetchProgress{ fetch_position, fetch_length, .. } => {
-                                        *fetch_length = total_length.try_into().unwrap();
-                                        *fetch_position = fetched_bytes;
+                                        *fetch_length = total_length;
+                                        *fetch_position -= TryInto::<i64>::try_into(piece_length).unwrap();
                                     }
                                     _ => {}
                                 };
@@ -446,7 +424,7 @@ impl<N: Node> Fetcher<N> {
                 }
                 res = self.pending_fetch_rx.recv_async() => {
                     let block = res.context(Unrecoverable::new("receive pending block fetch"))?;
-                    let (share_key, target) = match match self.peer_tracker.share_target(&block) {
+                    match match self.peer_tracker.share_target(&block) {
                         Ok(Some((share_key, target))) => Some((share_key, target)),
                         Ok(None) => None,
                         Err(e) => {
@@ -455,7 +433,13 @@ impl<N: Node> Fetcher<N> {
                         }
                     } {
                         Some((share_key, target)) => {
-                            (share_key, target)
+                            self.clients.block_fetcher.defer(block_fetcher::Request::Fetch{
+                                response_tx: ResponseChannel::default(),
+                                share_key: share_key.to_owned(),
+                                target: target.to_owned(),
+                                block,
+                                flush: true,
+                            }, self.fetch_resp_tx.clone()).await.context(Unrecoverable::new("defer block fetch"))?;
                         }
                         None => {
                             // We can't dispatch the block, re-queue the block for fetching when conditions improve.
@@ -463,13 +447,6 @@ impl<N: Node> Fetcher<N> {
                             return Err(anyhow::anyhow!("no peers available"));
                         }
                     };
-                    self.clients.block_fetcher.defer(block_fetcher::Request::Fetch{
-                        response_tx: ResponseChannel::default(),
-                        share_key: share_key.to_owned(),
-                        target: target.to_owned(),
-                        block,
-                        flush: true,
-                    }, self.fetch_resp_tx.clone()).await.context(Unrecoverable::new("defer block fetch"))?;
                 }
 
                 // Resolve newly discovered peers
@@ -508,14 +485,12 @@ impl<N: Node> Fetcher<N> {
                             // Update peer stats with success
                             self.peer_tracker.fetch_ok(&share_key);
 
-                            fetched_bytes += TryInto::<u64>::try_into(length).unwrap();
-
                             // Send progress to subscribers
                             self.status_tx.send_modify(|status| {
                                 match status {
                                     Status::FetchProgress{ fetch_position, fetch_length, .. } => {
-                                        *fetch_position= fetched_bytes.try_into().unwrap();
-                                        *fetch_length= total_length.try_into().unwrap();
+                                        *fetch_position += TryInto::<i64>::try_into(length).unwrap();
+                                        *fetch_length = total_length;
                                     }
                                     _ => {}
                                 };

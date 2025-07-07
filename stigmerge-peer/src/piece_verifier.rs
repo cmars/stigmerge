@@ -21,6 +21,7 @@ pub struct PieceVerifier {
     index: Arc<RwLock<Index>>,
     pending_pieces: HashMap<(usize, usize), PieceState>,
     verified_pieces: HashMap<(usize, usize), PieceState>,
+    n_pieces: usize,
     verified_tx: broadcast::Sender<PieceState>,
     verified_rx: broadcast::Receiver<PieceState>,
 }
@@ -29,10 +30,12 @@ impl PieceVerifier {
     pub async fn new(index: Arc<RwLock<Index>>) -> PieceVerifier {
         let (verified_tx, verified_rx) = broadcast::channel(32768);
         let pending_pieces = Self::empty_pieces(index.read().await.deref());
+        let n_pieces = pending_pieces.len();
         PieceVerifier {
             index,
             pending_pieces,
             verified_pieces: HashMap::new(),
+            n_pieces,
             verified_tx,
             verified_rx,
         }
@@ -189,10 +192,7 @@ impl Actor for PieceVerifier {
         // update piece state
         let piece_state = match self.pending_pieces.remove(&req.key()) {
             Some(prior_state) => prior_state.merged(req.piece_state()),
-            None => {
-                self.pending_pieces.insert(req.key(), req.piece_state());
-                req.piece_state()
-            }
+            None => req.piece_state(),
         };
 
         let resp = if piece_state.is_complete() {
@@ -208,7 +208,7 @@ impl Actor for PieceVerifier {
                 Response::ValidPiece {
                     file_index: req.file_index(),
                     piece_index: req.piece_index(),
-                    index_complete: self.pending_pieces.is_empty(),
+                    index_complete: self.verified_pieces.len() == self.n_pieces,
                 }
             } else {
                 // invalid piece, still pending
@@ -243,6 +243,7 @@ impl Clone for PieceVerifier {
             index: self.index.clone(),
             pending_pieces: self.pending_pieces.clone(),
             verified_pieces: self.verified_pieces.clone(),
+            n_pieces: self.n_pieces,
             verified_tx: self.verified_tx.clone(),
             verified_rx: self.verified_rx.resubscribe(),
         }
