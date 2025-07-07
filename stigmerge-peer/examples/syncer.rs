@@ -15,6 +15,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use path_absolutize::Absolutize;
+use stigmerge_fileindex::Indexer;
+use stigmerge_peer::actor::{ResponseChannel, UntilCancelled};
+use stigmerge_peer::content_addressable::ContentAddressable;
+use stigmerge_peer::peer_resolver::PeerResolver;
+use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
+use tokio::select;
+use tokio::spawn;
+use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
+use veilid_core::TypedRecordKey;
+
+use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
+use stigmerge_peer::block_fetcher::BlockFetcher;
+use stigmerge_peer::fetcher::{Clients as FetcherClients, Fetcher};
+use stigmerge_peer::have_announcer::HaveAnnouncer;
+use stigmerge_peer::new_routing_context;
+use stigmerge_peer::node::{Node, Veilid};
+use stigmerge_peer::piece_verifier::PieceVerifier;
+use stigmerge_peer::seeder::{self, Seeder};
+use stigmerge_peer::share_resolver::{self, ShareResolver};
+use stigmerge_peer::types::ShareInfo;
+use stigmerge_peer::{Error, Result};
 
 /// Syncer CLI arguments
 #[derive(Parser, Debug)]
@@ -40,31 +64,6 @@ struct Args {
     )]
     fetchers: usize,
 }
-
-use path_absolutize::Absolutize;
-use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ResponseChannel, UntilCancelled};
-use stigmerge_peer::content_addressable::ContentAddressable;
-use stigmerge_peer::peer_resolver::PeerResolver;
-use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
-use tokio::select;
-use tokio::spawn;
-use tokio::sync::{Mutex, RwLock};
-use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
-
-use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
-use stigmerge_peer::block_fetcher::BlockFetcher;
-use stigmerge_peer::fetcher::{Clients as FetcherClients, Fetcher};
-use stigmerge_peer::have_announcer::HaveAnnouncer;
-use stigmerge_peer::new_routing_context;
-use stigmerge_peer::node::{Node, Veilid};
-use stigmerge_peer::piece_verifier::PieceVerifier;
-use stigmerge_peer::seeder::{self, Seeder};
-use stigmerge_peer::share_resolver::{self, ShareResolver};
-use stigmerge_peer::types::ShareInfo;
-use stigmerge_peer::{Error, Result};
-use veilid_core::TypedRecordKey;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -216,6 +215,17 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         header: share_header.clone(),
     };
 
+    let share_resolver_tx = share_resolver_op.request_tx.clone();
+
+    let fetcher_clients = FetcherClients {
+        block_fetcher,
+        piece_verifier: piece_verifier_op,
+        have_announcer,
+        share_resolver: share_resolver_op,
+        share_target_rx: share_target_rx.resubscribe(),
+    };
+
+    // Set up seeder
     let peer_resolver = PeerResolver::new(node.clone());
     let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
     let peer_resolver_op = Operator::new(
@@ -223,21 +233,12 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         peer_resolver,
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
-
-    let fetcher_clients = FetcherClients {
-        block_fetcher,
-        piece_verifier: piece_verifier_op,
-        have_announcer,
-        share_resolver: share_resolver_op,
-        share_target_rx,
+    let seeder_clients = seeder::Clients {
+        verified_rx,
         peer_resolver: peer_resolver_op,
         discovered_peers_rx,
-    };
-
-    // Set up seeder
-    let seeder_clients = seeder::Clients {
-        update_rx: node.subscribe_veilid_update(),
-        verified_rx,
+        share_target_rx,
+        share_resolver_tx,
     };
 
     let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);

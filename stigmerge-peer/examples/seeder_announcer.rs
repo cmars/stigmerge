@@ -5,6 +5,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use stigmerge_fileindex::Indexer;
+use tokio::sync::{Mutex, RwLock};
+use tokio::{select, try_join};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+
+use stigmerge_peer::actor::{
+    ConnectionState, OneShot, Operator, ResponseChannel, WithVeilidConnection,
+};
+use stigmerge_peer::content_addressable::ContentAddressable;
+use stigmerge_peer::node::Veilid;
+use stigmerge_peer::peer_resolver::PeerResolver;
+use stigmerge_peer::seeder::{self, Seeder};
+use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
+use stigmerge_peer::share_resolver::ShareResolver;
+use stigmerge_peer::types::{PieceState, ShareInfo};
+use stigmerge_peer::Error;
+use stigmerge_peer::{new_routing_context, piece_verifier};
 
 /// Seeder announcer CLI arguments
 #[derive(Parser, Debug)]
@@ -14,23 +32,6 @@ struct Args {
     #[arg(help = "Path to the file to seed")]
     file: PathBuf,
 }
-
-use stigmerge_peer::seeder::{self, Seeder};
-use stigmerge_peer::types::{PieceState, ShareInfo};
-use tokio::select;
-use tokio::sync::{Mutex, RwLock};
-use tokio_util::sync::CancellationToken;
-use tracing::info;
-
-use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{
-    ConnectionState, OneShot, Operator, ResponseChannel, WithVeilidConnection,
-};
-use stigmerge_peer::content_addressable::ContentAddressable;
-use stigmerge_peer::node::Veilid;
-use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
-use stigmerge_peer::Error;
-use stigmerge_peer::{new_routing_context, piece_verifier, Node};
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Error> {
@@ -87,6 +88,15 @@ async fn main() -> std::result::Result<(), Error> {
     let verified_rx = verifier.subscribe_verified();
     let mut verifier_op = Operator::new(cancel.clone(), verifier, OneShot);
 
+    // Set up share resolver
+    let share_resolver = ShareResolver::new(node.clone());
+    let share_target_rx = share_resolver.subscribe_target();
+    let share_resolver_op = Operator::new(
+        cancel.clone(),
+        share_resolver,
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
+    );
+
     // Set up the seeder
     let share = ShareInfo {
         key,
@@ -95,9 +105,20 @@ async fn main() -> std::result::Result<(), Error> {
         want_index: index.clone(),
         root: root.clone(),
     };
+    let peer_resolver = PeerResolver::new(node.clone());
+    let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
+    let peer_resolver_op = Operator::new(
+        cancel.clone(),
+        peer_resolver,
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
+    );
+
     let seeder_clients = seeder::Clients {
-        update_rx: node.subscribe_veilid_update(),
         verified_rx,
+        peer_resolver: peer_resolver_op,
+        discovered_peers_rx,
+        share_target_rx,
+        share_resolver_tx: share_resolver_op.request_tx.clone(),
     };
 
     let mut seeder_op = Operator::new(
@@ -137,7 +158,11 @@ async fn main() -> std::result::Result<(), Error> {
         }
     }
 
-    announce_op.join().await.expect("announce task");
-    seeder_op.join().await.expect("seeder task");
+    try_join!(
+        announce_op.join(),
+        seeder_op.join(),
+        share_resolver_op.join(),
+    )
+    .expect("tasks");
     Ok(())
 }
