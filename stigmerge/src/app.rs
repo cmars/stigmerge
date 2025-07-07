@@ -162,7 +162,8 @@ impl App {
 
         // Set up share resolver
         let share_resolver = ShareResolver::new(node.clone());
-        let share_target_rx = share_resolver.subscribe_target();
+        let fetcher_share_target_rx = share_resolver.subscribe_target();
+        let seeder_share_target_rx = share_resolver.subscribe_target();
         let mut share_resolver_op = Operator::new(
             cancel.clone(),
             share_resolver,
@@ -298,7 +299,7 @@ impl App {
             piece_verifier: piece_verifier_op,
             have_announcer,
             share_resolver: share_resolver_op,
-            share_target_rx: share_target_rx.resubscribe(),
+            share_target_rx: fetcher_share_target_rx,
         };
 
         // Create and run fetcher
@@ -320,7 +321,7 @@ impl App {
         let seeder_clients = seeder::Clients {
             verified_rx,
             share_resolver_tx,
-            share_target_rx,
+            share_target_rx: seeder_share_target_rx,
             peer_resolver: peer_resolver_op,
             discovered_peers_rx,
         };

@@ -151,6 +151,7 @@ impl<N: Node> Fetcher<N> {
             match res {
                 Ok(state) => self.state = state,
                 Err(e) => {
+                    debug!("{e}");
                     if is_cancelled(&e) {
                         break;
                     }
@@ -326,7 +327,9 @@ impl<N: Node> Fetcher<N> {
             .try_into()
             .unwrap();
         let total_length: u64 = self.share.want_index.payload().length().try_into().unwrap();
+
         let mut refresh_routes_interval = interval(Duration::from_secs(30));
+
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -442,7 +445,7 @@ impl<N: Node> Fetcher<N> {
                         None => {
                             // We can't dispatch the block, re-queue the block for fetching when conditions improve.
                             self.pending_fetch_tx.send_async(block).await.context(Unrecoverable::new("send pending block fetch"))?;
-                            return Err(anyhow::anyhow!("no peers available"));
+                            warn!("no peers available");
                         }
                     };
                 }

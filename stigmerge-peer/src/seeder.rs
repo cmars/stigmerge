@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use stigmerge_fileindex::{BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
@@ -58,18 +58,21 @@ pub struct Seeder<N: Node> {
     share: ShareInfo,
 
     files: HashMap<u32, File>,
+    advertised_peers: HashSet<TypedRecordKey>,
     piece_map: PieceMap,
 }
 
 impl<N: Node> Seeder<N> {
     pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
         let update_rx = node.subscribe_veilid_update();
+        let advertised_peers = [share.key.clone()].into_iter().collect();
         Seeder {
             node,
             clients,
             update_rx,
             share,
             files: HashMap::new(),
+            advertised_peers,
             piece_map: PieceMap::new(),
         }
     }
@@ -132,10 +135,16 @@ impl<P: Node> Actor for Seeder<P> {
                         res => res
                     }.context(Unrecoverable::new("receive share target update"))?;
                     debug!("share target update for {key}: {target:?}");
-                    if let Err(e) = self.node.request_advertise_peer(
-                        &target,
-                        &self.share.key).await.with_context(|| format!("advertising our share to new peer")) {
-                            warn!("{e}");
+                    if !self.advertised_peers.contains(&key) {
+                        match self.node.request_advertise_peer(&target, &self.share.key).await {
+                            Ok(()) => {
+                                debug!("advertised {} to peer {}", &self.share.key, key);
+                                self.advertised_peers.insert(key);
+                            }
+                            Err(e) => {
+                                warn!("advertise to peer {}: {e}", key);
+                            }
+                        }
                     }
                 }
                 res = self.clients.discovered_peers_rx.recv() => {
@@ -172,7 +181,22 @@ impl<P: Node> Actor for Seeder<P> {
                                         self.node.reply_block_contents(veilid_app_call.id(), None).await?;
                                     }
                                 }
-                                _ => {}  // Ignore other request types
+                                _ => {}
+                            }
+                        }
+                        VeilidUpdate::AppMessage(veilid_app_message) => {
+                            let req = proto::Request::decode(veilid_app_message.message())?;
+                            match req {
+                                proto::Request::AdvertisePeer(peer_req) => {
+                                    debug!("discovered advertised peer {}", peer_req.key);
+                                    self.clients.share_resolver_tx.send_async(share_resolver::Request::Index{
+                                        response_tx: ResponseChannel::default(),
+                                        key: peer_req.key,
+                                        want_index_digest: Some(self.share.want_index_digest),
+                                        root: self.share.root.to_owned(),
+                                    }).await.context(Unrecoverable::new("send share_resolver request"))?;
+                                }
+                                _ => {}
                             }
                         }
                         VeilidUpdate::Shutdown => {
