@@ -16,7 +16,6 @@ use stigmerge_peer::actor::{
 };
 use stigmerge_peer::content_addressable::ContentAddressable;
 use stigmerge_peer::node::Veilid;
-use stigmerge_peer::peer_resolver::PeerResolver;
 use stigmerge_peer::seeder::{self, Seeder};
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
 use stigmerge_peer::share_resolver::ShareResolver;
@@ -105,18 +104,9 @@ async fn main() -> std::result::Result<(), Error> {
         want_index: index.clone(),
         root: root.clone(),
     };
-    let peer_resolver = PeerResolver::new(node.clone());
-    let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
-    let peer_resolver_op = Operator::new(
-        cancel.clone(),
-        peer_resolver,
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-    );
 
     let seeder_clients = seeder::Clients {
         verified_rx,
-        peer_resolver: peer_resolver_op,
-        discovered_peers_rx,
         share_target_rx,
         share_resolver_tx: share_resolver_op.request_tx.clone(),
     };

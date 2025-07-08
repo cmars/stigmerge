@@ -19,7 +19,6 @@ use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
 use stigmerge_peer::actor::{ResponseChannel, UntilCancelled};
 use stigmerge_peer::content_addressable::ContentAddressable;
-use stigmerge_peer::peer_resolver::PeerResolver;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
 use tokio::select;
 use tokio::spawn;
@@ -226,17 +225,8 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     };
 
     // Set up seeder
-    let peer_resolver = PeerResolver::new(node.clone());
-    let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
-    let peer_resolver_op = Operator::new(
-        cancel.clone(),
-        peer_resolver,
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-    );
     let seeder_clients = seeder::Clients {
         verified_rx,
-        peer_resolver: peer_resolver_op,
-        discovered_peers_rx,
         share_target_rx,
         share_resolver_tx,
     };

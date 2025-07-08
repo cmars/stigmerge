@@ -24,7 +24,6 @@ use stigmerge_peer::{
     have_announcer::HaveAnnouncer,
     new_routing_context,
     node::{Node, Veilid},
-    peer_resolver::PeerResolver,
     piece_verifier::PieceVerifier,
     seeder::{self, Seeder},
     share_announcer::{self, ShareAnnouncer},
@@ -310,20 +309,10 @@ impl App {
         let fetcher_task = spawn(fetcher.run(cancel.clone(), conn_state.clone()));
 
         // Set up seeder
-        let peer_resolver = PeerResolver::new(node.clone());
-        let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
-        let peer_resolver_op = Operator::new(
-            cancel.clone(),
-            peer_resolver,
-            WithVeilidConnection::new(node.clone(), conn_state.clone()),
-        );
-
         let seeder_clients = seeder::Clients {
             verified_rx,
             share_resolver_tx,
             share_target_rx: seeder_share_target_rx,
-            peer_resolver: peer_resolver_op,
-            discovered_peers_rx,
         };
 
         let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
