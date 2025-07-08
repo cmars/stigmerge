@@ -56,6 +56,8 @@ pub struct StubNode {
         Arc<Mutex<dyn Fn(&TypedRecordKey) -> Result<PieceMap> + Send + 'static>>,
     pub announce_peer_result:
         Arc<Mutex<dyn Fn(&[u8], Option<TypedRecordKey>, u16) -> Result<()> + Send + 'static>>,
+    pub known_peers_result:
+        Arc<Mutex<dyn Fn(&[u8]) -> Result<Vec<TypedRecordKey>> + Send + 'static>>,
     pub reset_peers_result: Arc<Mutex<dyn Fn(&[u8], u16) -> Result<()> + Send + 'static>>,
     pub resolve_peers_result:
         Arc<Mutex<dyn Fn(&TypedRecordKey) -> Result<Vec<PeerInfo>> + Send + 'static>>,
@@ -127,6 +129,9 @@ impl StubNode {
                     panic!("unexpected call to announce_peer")
                 },
             )),
+            known_peers_result: Arc::new(Mutex::new(|_payload_digest: &[u8]| {
+                panic!("unexpected call to known_peers")
+            })),
             reset_peers_result: Arc::new(Mutex::new(|_payload_digest: &[u8], _max_subkey: u16| {
                 panic!("unexpected call to reset_peers")
             })),
@@ -244,5 +249,9 @@ impl Node for StubNode {
         key: &TypedRecordKey,
     ) -> Result<()> {
         (*(self.request_advertise_peer_result.lock().unwrap()))(target, key)
+    }
+
+    async fn known_peers(&mut self, payload_digest: &[u8]) -> Result<Vec<TypedRecordKey>> {
+        (*(self.known_peers_result.lock().unwrap()))(payload_digest)
     }
 }
