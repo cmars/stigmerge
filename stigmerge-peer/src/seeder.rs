@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::Context;
 use stigmerge_fileindex::{BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
@@ -57,15 +57,19 @@ pub struct Seeder<N: Node> {
     share: ShareInfo,
 
     files: HashMap<u32, File>,
-    known_peers: HashSet<TypedRecordKey>,
+    known_peers: HashMap<TypedRecordKey, u16>,
     advertisements: HashMap<(TypedRecordKey, TypedRecordKey), Timestamp>,
     piece_map: PieceMap,
+
+    announce_request_tx: flume::Sender<(TypedRecordKey, u16)>,
+    announce_request_rx: flume::Receiver<(TypedRecordKey, u16)>,
 }
 
 impl<N: Node> Seeder<N> {
     pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
         let update_rx = node.subscribe_veilid_update();
-        let known_peers = [share.key].into_iter().collect();
+        let known_peers = [(share.key, 0u16)].into_iter().collect();
+        let (announce_request_tx, announce_request_rx) = flume::unbounded();
         Seeder {
             node,
             clients,
@@ -75,6 +79,9 @@ impl<N: Node> Seeder<N> {
             known_peers,
             advertisements: HashMap::new(),
             piece_map: PieceMap::new(),
+
+            announce_request_tx,
+            announce_request_rx,
         }
     }
 
@@ -107,9 +114,9 @@ impl<N: Node> Seeder<N> {
     }
 
     async fn advertise_peers(&mut self, key: &TypedRecordKey, target: &Target) -> Result<()> {
-        self.known_peers.insert(*key);
-        for known_peer in self.known_peers.iter() {
-            // Don't advertise to ourselves
+        self.add_known_peer(key).await?;
+        for known_peer in self.known_peers.keys() {
+            // Don't advertise a key to itself
             if known_peer == key {
                 continue;
             }
@@ -127,7 +134,7 @@ impl<N: Node> Seeder<N> {
             // Attempt to advertise
             match self.node.request_advertise_peer(target, known_peer).await {
                 Ok(()) => {
-                    debug!("advertised {known_peer} to {key}");
+                    trace!("advertised {known_peer} to {key}");
                     self.advertisements
                         .insert((known_peer.to_owned(), key.to_owned()), Timestamp::now());
                 }
@@ -136,6 +143,38 @@ impl<N: Node> Seeder<N> {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn add_known_peers(&mut self) -> Result<()> {
+        let known_peers = self.node.known_peers(&self.share.want_index_digest).await?;
+        for key in known_peers.iter() {
+            self.add_known_peer(key).await?;
+            trace!("loaded known peer {key}");
+
+            self.clients
+                .share_resolver_tx
+                .send_async(share_resolver::Request::Index {
+                    response_tx: ResponseChannel::default(),
+                    key: *key,
+                    want_index_digest: Some(self.share.want_index_digest),
+                    root: self.share.root.to_owned(),
+                })
+                .await
+                .context(Unrecoverable::new("send share_resolver request"))?;
+        }
+        Ok(())
+    }
+
+    async fn add_known_peer(&mut self, key: &TypedRecordKey) -> Result<()> {
+        if let None = self.known_peers.get(key) {
+            let index = self.known_peers.len().try_into().unwrap();
+            self.known_peers.insert(*key, index);
+            self.announce_request_tx
+                .send_async((*key, index))
+                .await
+                .context(Unrecoverable::new("schedule peer announce"))?;
+        };
         Ok(())
     }
 }
@@ -150,6 +189,7 @@ impl<P: Node> Actor for Seeder<P> {
         request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
         let mut buf = [0u8; BLOCK_SIZE_BYTES];
+        self.add_known_peers().await?;
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -208,6 +248,18 @@ impl<P: Node> Actor for Seeder<P> {
                             cancel.cancel();
                         }
                         _ => {}
+                    }
+                }
+                res = self.announce_request_rx.recv_async() => {
+                    let (peer_key, subkey) = res.context(Unrecoverable::new("receive peer announce"))?;
+                    match self.node.announce_peer(&self.share.want_index_digest, Some(peer_key), subkey).await {
+                        Ok(_) => {
+                            trace!("announce peer {peer_key} subkey {subkey}");
+                        }
+                        Err(e) => {
+                            warn!("announce peer {peer_key} subkey {subkey}: {e}");
+                            self.announce_request_tx.send((peer_key, subkey)).context(Unrecoverable::new("requeue announce peer"))?;
+                        }
                     }
                 }
             }
@@ -295,6 +347,7 @@ mod tests {
                 Ok(())
             },
         ));
+        node.known_peers_result = Arc::new(Mutex::new(move |_index_digest: &[u8]| Ok(vec![])));
 
         let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
             .expect("key");
@@ -421,6 +474,7 @@ mod tests {
                 Ok(())
             },
         ));
+        node.known_peers_result = Arc::new(Mutex::new(move |_index_digest: &[u8]| Ok(vec![])));
 
         let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
             .expect("key");

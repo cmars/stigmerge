@@ -94,6 +94,11 @@ pub trait Node: Clone + Send {
         subkey: u16,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
+    fn known_peers(
+        &mut self,
+        payload_digest: &[u8],
+    ) -> impl std::future::Future<Output = Result<Vec<TypedRecordKey>>> + Send;
+
     fn reset_peers(
         &mut self,
         payload_digest: &[u8],

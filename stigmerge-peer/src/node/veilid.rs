@@ -477,6 +477,7 @@ impl Node for Veilid {
         subkey: u16,
     ) -> Result<()> {
         let rc = self.routing_context.read().await;
+        // Update the peer in this node's peer DHT
         let (peer_map_dht, _o_cnt) = self
             .open_or_create_peer_map_record(&rc, payload_digest)
             .await?;
@@ -496,7 +497,37 @@ impl Node for Veilid {
                     .await?;
             }
         }
+        // Update the peer in this node's local db
+        let api = rc.api();
+        let ts = api.table_store()?;
+        let table_name = format!("stigmerge_known_peers_{}", hex::encode(payload_digest));
+        let db = ts.open(&table_name, 1).await?;
+        match peer_key {
+            Some(peer_key) => {
+                db.store_json(0, subkey.to_be_bytes().as_slice(), &peer_key)
+                    .await?;
+            }
+            None => {
+                db.delete_json::<TypedRecordKey>(0, subkey.to_be_bytes().as_slice())
+                    .await?;
+            }
+        };
         Ok(())
+    }
+
+    async fn known_peers(&mut self, payload_digest: &[u8]) -> Result<Vec<TypedRecordKey>> {
+        let rc = self.routing_context.read().await;
+        let api = rc.api();
+        let ts = api.table_store()?;
+        let table_name = format!("stigmerge_known_peers_{}", hex::encode(payload_digest));
+        let db = ts.open(&table_name, 1).await?;
+        let mut res = vec![];
+        for subkey in db.get_keys(0).await?.iter() {
+            if let Some(peer_key) = db.load_json(0, subkey).await? {
+                res.push(peer_key);
+            }
+        }
+        Ok(res)
     }
 
     async fn reset_peers(&mut self, payload_digest: &[u8], max_subkey: u16) -> Result<()> {
