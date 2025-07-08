@@ -13,7 +13,7 @@ edition = "2021"
 homepage = "https://github.com/cmars/stigmerge"
 license = "MPL-2.0"
 repository = "https://github.com/cmars/stigmerge"
-version = "0.5.2"
+version = "0.5.3"
 
 [workspace.metadata.release]
 shared-version = true
