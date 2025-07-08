@@ -7,8 +7,6 @@ mod error;
 pub mod have_announcer;
 pub mod have_resolver;
 pub mod node;
-pub mod peer_announcer;
-pub mod peer_resolver;
 mod peer_tracker;
 mod piece_map;
 pub mod piece_verifier;

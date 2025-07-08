@@ -10,12 +10,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
-use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
+use veilid_core::{Target, Timestamp, TimestampDuration, TypedRecordKey, VeilidUpdate};
 
 use crate::{
-    actor::{Actor, Operator, Respondable, ResponseChannel},
+    actor::{Actor, Respondable, ResponseChannel},
     error::{CancelError, Unrecoverable},
-    peer_resolver,
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
     share_resolver,
@@ -58,21 +57,23 @@ pub struct Seeder<N: Node> {
     share: ShareInfo,
 
     files: HashMap<u32, File>,
-    advertised_peers: HashSet<TypedRecordKey>,
+    known_peers: HashSet<TypedRecordKey>,
+    advertisements: HashMap<(TypedRecordKey, TypedRecordKey), Timestamp>,
     piece_map: PieceMap,
 }
 
 impl<N: Node> Seeder<N> {
     pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
         let update_rx = node.subscribe_veilid_update();
-        let advertised_peers = [share.key.clone()].into_iter().collect();
+        let known_peers = [share.key].into_iter().collect();
         Seeder {
             node,
             clients,
             update_rx,
             share,
             files: HashMap::new(),
-            advertised_peers,
+            known_peers,
+            advertisements: HashMap::new(),
             piece_map: PieceMap::new(),
         }
     }
@@ -103,6 +104,39 @@ impl<N: Node> Seeder<N> {
             self.files.insert(block_req.piece, fh);
         }
         Ok(self.files.get_mut(&block_req.piece).unwrap())
+    }
+
+    async fn advertise_peers(&mut self, key: &TypedRecordKey, target: &Target) -> Result<()> {
+        self.known_peers.insert(*key);
+        for known_peer in self.known_peers.iter() {
+            // Don't advertise to ourselves
+            if known_peer == key {
+                continue;
+            }
+            // Don't advertise the same peer to the same target too often
+            if let Some(last_adv_time) = self
+                .advertisements
+                .get(&(known_peer.to_owned(), key.to_owned()))
+            {
+                if Timestamp::now().saturating_sub(*last_adv_time) < TimestampDuration::new_secs(30)
+                {
+                    trace!("advertised {known_peer} to {key} too recently");
+                    continue;
+                }
+            }
+            // Attempt to advertise
+            match self.node.request_advertise_peer(target, known_peer).await {
+                Ok(()) => {
+                    debug!("advertised {known_peer} to {key}");
+                    self.advertisements
+                        .insert((known_peer.to_owned(), key.to_owned()), Timestamp::now());
+                }
+                Err(e) => {
+                    warn!("advertise {known_peer} to {key}: {e}");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -135,36 +169,7 @@ impl<P: Node> Actor for Seeder<P> {
                         res => res
                     }.context(Unrecoverable::new("receive share target update"))?;
                     debug!("share target update for {key}: {target:?}");
-                    if !self.advertised_peers.contains(&key) {
-                        match self.node.request_advertise_peer(&target, &self.share.key).await {
-                            Ok(()) => {
-                                debug!("advertised {} to peer {}", &self.share.key, key);
-                                self.advertised_peers.insert(key);
-                            }
-                            Err(e) => {
-                                warn!("advertise to peer {}: {e}", key);
-                            }
-                        }
-                    }
-                }
-                res = self.clients.discovered_peers_rx.recv() => {
-                    let (key, peer_info) = match res {
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        res => res,
-                    }.context(Unrecoverable::new("receive discovered peer"))?;
-                    debug!("discovered peer {} from {}", peer_info.key(), key);
-                    self.clients.share_resolver_tx.send_async(share_resolver::Request::Index{
-                        response_tx: ResponseChannel::default(),
-                        key,
-                        want_index_digest: Some(self.share.want_index_digest),
-                        root: self.share.root.to_owned(),
-                    }).await.context(Unrecoverable::new("send share_resolver request"))?;
-                    self.clients.peer_resolver.call(peer_resolver::Request::Watch{
-                        response_tx: ResponseChannel::default(),
-                        key: peer_info.key().to_owned(),
-                    }).await.err().map(|e| {
-                        warn!("failed to watch peers of discovered peer {} at {key}: {e}", peer_info.key());
-                    });
+                    self.advertise_peers(&key, &target).await?;
                 }
                 res = self.update_rx.recv() => {
                     let update = res.context(Unrecoverable::new("receive veilid update"))?;
@@ -225,10 +230,8 @@ impl<P: Node> Actor for Seeder<P> {
 
 pub struct Clients {
     pub verified_rx: broadcast::Receiver<PieceState>,
-    pub peer_resolver: Operator<peer_resolver::Request>,
     pub share_resolver_tx: flume::Sender<share_resolver::Request>,
     pub share_target_rx: broadcast::Receiver<(TypedRecordKey, Target)>,
-    pub discovered_peers_rx: broadcast::Receiver<(TypedRecordKey, proto::PeerInfo)>,
 }
 
 #[cfg(test)]
@@ -306,18 +309,12 @@ mod tests {
         };
 
         // Create clients
-        let cancel = CancellationToken::new();
-        let peer_resolver = peer_resolver::PeerResolver::new(node.clone());
-        let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
-        let peer_resolver_op = Operator::new(cancel.clone(), peer_resolver, OneShot);
         let (share_resolver_tx, _share_resolver_rx) = flume::unbounded();
         let (_share_target_tx, share_target_rx) = broadcast::channel(16);
         let clients = Clients {
             verified_rx,
-            peer_resolver: peer_resolver_op,
             share_resolver_tx,
             share_target_rx,
-            discovered_peers_rx,
         };
 
         // Create cancellation token
@@ -439,15 +436,10 @@ mod tests {
 
         // Create clients
         let cancel = CancellationToken::new();
-        let peer_resolver = peer_resolver::PeerResolver::new(node.clone());
-        let discovered_peers_rx = peer_resolver.subscribe_discovered_peers();
-        let peer_resolver_op = Operator::new(cancel.clone(), peer_resolver, OneShot);
         let (share_resolver_tx, _share_resolver_rx) = flume::unbounded();
         let (_share_target_tx, share_target_rx) = broadcast::channel(16);
         let clients = Clients {
             verified_rx,
-            peer_resolver: peer_resolver_op,
-            discovered_peers_rx,
             share_resolver_tx,
             share_target_rx,
         };

@@ -10,7 +10,6 @@ use veilid_core::{
 use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
 
 use crate::{
-    peer_announcer::DEFAULT_MAX_PEERS,
     piece_map::PieceMap,
     proto::{
         AdvertisePeerRequest, BlockRequest, Decoder, Encoder, HaveMapRef, Header, PeerInfo,
@@ -20,6 +19,8 @@ use crate::{
 };
 
 use super::{Node, TypedRecordKey};
+
+const MAX_PEERS: u16 = 128;
 
 pub struct Veilid {
     routing_context: Arc<RwLock<RoutingContext>>,
@@ -109,7 +110,7 @@ impl Veilid {
         let api = rc.api();
         let ts = api.table_store()?;
         let db = ts.open("stigmerge_peer_map_dht", 2).await?;
-        let o_cnt = DEFAULT_MAX_PEERS;
+        let o_cnt = MAX_PEERS;
         let maybe_dht_key = db.load_json(0, payload_digest).await?;
         let maybe_dht_owner_keypair = db.load_json(1, payload_digest).await?;
         if let (Some(dht_key), Some(dht_owner_keypair)) = (maybe_dht_key, maybe_dht_owner_keypair) {
