@@ -22,7 +22,7 @@ COPY --from=builder /src/examples/fly.io/secure-envelopes.png .
 VOLUME /state
 ENV STATE_DIR=/state
 
-ENV RUST_LOG="veilid_core=error,stigmerge=debug"
+ENV RUST_LOG="veilid_core=error,stigmerge=debug,stigmerge_peer=debug"
 ENV NODE_ADDR=":5150"
 
 EXPOSE 5150/udp
