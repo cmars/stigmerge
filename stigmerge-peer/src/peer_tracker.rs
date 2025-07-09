@@ -6,13 +6,13 @@ use veilid_core::{Target, TypedRecordKey};
 use crate::{error::is_route_invalid, types::FileBlockFetch, Error, Result};
 
 #[derive(Debug, Clone)]
-struct PeerStatus {
+pub struct PeerStatus {
     fetch_ok_count: u32,
     fetch_err_count: u32,
 }
 
 impl PeerStatus {
-    fn score(&self) -> i32 {
+    pub fn score(&self) -> i32 {
         TryInto::<i32>::try_into(self.fetch_ok_count).unwrap()
             - TryInto::<i32>::try_into(self.fetch_err_count).unwrap()
     }
@@ -67,7 +67,7 @@ impl PeerTracker {
         status.fetch_ok_count += 1;
     }
 
-    pub async fn fetch_err(&mut self, key: &TypedRecordKey, err: &Error) {
+    pub fn fetch_err(&mut self, key: &TypedRecordKey, err: &Error) {
         if !self.peer_status.contains_key(&key) {
             self.peer_status.insert(key.clone(), PeerStatus::default());
         }
@@ -76,8 +76,7 @@ impl PeerTracker {
         status.fetch_err_count += if is_route_invalid(&err) { 10 } else { 1 };
     }
 
-    #[cfg(test)]
-    async fn status(&self, key: &TypedRecordKey) -> Option<PeerStatus> {
+    pub fn status(&self, key: &TypedRecordKey) -> Option<PeerStatus> {
         self.peer_status.get(&key).map(|st| st.to_owned())
     }
 
@@ -195,28 +194,26 @@ mod tests {
         tracker.update(key1.clone(), target1.clone());
 
         // Route error
-        tracker
-            .fetch_err(
-                &key1,
-                &VeilidAPIError::InvalidTarget {
-                    message: "nope".to_string(),
-                }
-                .into(),
-            )
-            .await;
+        tracker.fetch_err(
+            &key1,
+            &VeilidAPIError::InvalidTarget {
+                message: "nope".to_string(),
+            }
+            .into(),
+        );
         // Route errors are more heavily penalized
-        assert_eq!(tracker.status(&key1).await.unwrap().score(), -10);
+        assert_eq!(tracker.status(&key1).unwrap().score(), -10);
 
         // Increase score for key1
         tracker.fetch_ok(&key1);
         tracker.fetch_ok(&key1);
         // oks are counted
-        assert_eq!(tracker.status(&key1).await.unwrap().score(), 2);
+        assert_eq!(tracker.status(&key1).unwrap().score(), 2);
 
-        tracker.fetch_err(&key1, &Error::msg("nope")).await;
+        tracker.fetch_err(&key1, &Error::msg("nope"));
 
         // error wipes out oks
-        assert_eq!(tracker.status(&key1).await.unwrap().score(), -1);
+        assert_eq!(tracker.status(&key1).unwrap().score(), -1);
     }
 
     #[tokio::test]

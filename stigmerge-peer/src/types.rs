@@ -14,7 +14,7 @@ pub struct ShareInfo {
     pub root: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FileBlockFetch {
     pub file_index: usize,
     pub piece_index: usize,
