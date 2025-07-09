@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -7,7 +8,7 @@ use tokio::sync::{broadcast, watch, MutexGuard};
 use tokio::time::{interval, sleep};
 use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, enabled, error, info, trace, warn, Level};
 use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::actor::{ConnectionState, ConnectionStateHandle, ResponseChannel};
@@ -42,6 +43,8 @@ pub struct Fetcher<N: Node> {
     peer_tracker: PeerTracker,
 
     update_rx: broadcast::Receiver<VeilidUpdate>,
+
+    fetched_block_peer: HashMap<FileBlockFetch, TypedRecordKey>,
 }
 
 pub struct Clients {
@@ -108,6 +111,8 @@ impl<N: Node> Fetcher<N> {
             peer_tracker: PeerTracker::new(),
 
             update_rx,
+
+            fetched_block_peer: HashMap::new(),
         }
     }
 
@@ -364,6 +369,12 @@ impl<N: Node> Fetcher<N> {
                 }
                 _ = refresh_routes_interval.tick() => {
                     self.refresh_share_targets().await?;
+                    if enabled!(Level::TRACE) {
+                        for share_key in self.peer_tracker.keys() {
+                            trace!("peer score for {share_key}: {:?}",
+                                self.peer_tracker.status(share_key).map(|status| status.score()));
+                        }
+                    }
                 }
                 res = self.verify_resp_rx.recv_async() => {
                     match res.context(Unrecoverable::new("receive piece verification"))? {
@@ -409,15 +420,23 @@ impl<N: Node> Fetcher<N> {
                             // Re-fetch all the blocks in the failed piece
                             let piece_blocks = piece_length / BLOCK_SIZE_BYTES + if piece_length % BLOCK_SIZE_BYTES > 0 { 1 } else { 0 };
                             for block_index in 0..piece_blocks  {
-                                // TODO: spread these requests across peers
-                                // TODO: update peer stats, bad pieces should be penalized
-                                self.pending_fetch_tx.send_async(
-                                    FileBlockFetch {
+                                let block = FileBlockFetch {
                                         file_index,
                                         piece_index,
                                         piece_offset: 0,
                                         block_index
-                                    }).await.context(Unrecoverable::new("enqueue block fetch for invalid piece"))?;
+                                    } ;
+                                if let Some(block_peer) = self.fetched_block_peer.remove(&block) {
+                                    // Attribute a block fetch error to the peer whence it was fetched, if known.
+                                    // This could cause cooperating peers to be temporarily unfairly penalized when
+                                    // contributing to a piece with a defector.
+                                    //
+                                    // However, in subsequent pieces the defector should be caught and more severely
+                                    // downgraded, since all the blocks would be attributed to the defector.
+                                    self.peer_tracker.fetch_err(&block_peer, &Error::msg("invalid piece"));
+                                }
+                                self.pending_fetch_tx.send_async(block).await.context(
+                                    Unrecoverable::new("enqueue block fetch for invalid piece"))?;
                             }
                         }
                         piece_verifier::Response::IncompletePiece { .. } => {}
@@ -486,11 +505,13 @@ impl<N: Node> Fetcher<N> {
                                 response_tx: ResponseChannel::default(),
                             }, self.verify_resp_tx.clone()).await.context(
                                 Unrecoverable::new("defer piece verification for fetched block"))?;
+                            // Attribute this block to the peer whence it was fetched.
+                            self.fetched_block_peer.insert(block, share_key);
                         }
                         Ok(block_fetcher::Response::FetchFailed { share_key, block, err, .. }) => {
-                            trace!("fetch block failed: {:?}", err);
-                            // Update peer stats with failure
-                            self.peer_tracker.fetch_err(&share_key, &err).await;
+                            trace!("fetch block from {share_key} failed: {:?}", err);
+                            // Update peer stats with block fetch failure.
+                            self.peer_tracker.fetch_err(&share_key, &err);
                             self.pending_fetch_tx.send_async(block).await.context(
                                 Unrecoverable::new("enqueue failed block fetch"))?;
                         }
