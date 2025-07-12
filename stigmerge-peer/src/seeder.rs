@@ -185,6 +185,7 @@ mod tests {
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
         proto::{BlockRequest, Encoder, Header},
+        seeder,
         tests::{temp_file, StubNode},
     };
 
@@ -281,22 +282,12 @@ mod tests {
         let encoded_req = req.encode().expect("encode request");
         let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
 
-        // Assert that a block request gets a reply. Retry with a backoff delay,
-        // as the seeder main loop subscribes on start, which is scheduled
-        // concurrently.
-        let mut got_reply = false;
-        for i in 0..30 {
-            update_tx
-                .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
-                .expect("send app call");
-            if let Ok(Some(_)) =
-                time::timeout(Duration::from_millis(i * 10), replied_rx.recv()).await
-            {
-                got_reply = true;
-                break;
-            }
-        }
-        assert!(got_reply, "expected app_call reply");
+        update_tx
+            .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
+            .expect("send app call");
+        time::timeout(Duration::from_secs(1), replied_rx.recv())
+            .await
+            .expect("confirm app_call");
 
         // Cancel the seeder
         cancel.cancel();
@@ -376,7 +367,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // Create seeder
-        let operator = Operator::new(
+        let mut operator = Operator::new(
             cancel.clone(),
             Seeder::new(node, share_info, verified_rx),
             OneShot,
@@ -389,22 +380,21 @@ mod tests {
 
         let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
 
-        // Assert that a block request gets a reply. Retry with a backoff delay,
-        // as the seeder main loop subscribes on start, which is scheduled
-        // concurrently.
-        let mut got_reply = false;
-        for i in 0..30 {
-            update_tx
-                .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
-                .expect("send app call");
-            if let Ok(Some(_)) =
-                time::timeout(Duration::from_millis(i * 10), replied_rx.recv()).await
-            {
-                got_reply = true;
-                break;
-            }
-        }
-        assert!(got_reply, "expected app_call reply");
+        // Making a synchronous call to the seeder ensures we're in the event
+        // loop and reacting to app_calls.
+        operator
+            .call(seeder::Request::HaveMap {
+                response_tx: ResponseChannel::default(),
+            })
+            .await
+            .expect("call");
+
+        update_tx
+            .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
+            .expect("send app call");
+        time::timeout(Duration::from_secs(1), replied_rx.recv())
+            .await
+            .expect("confirm app_call");
 
         // Cancel the seeder
         cancel.cancel();
