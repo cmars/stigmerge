@@ -178,6 +178,10 @@ impl<Req: Respondable + Send + Sync + 'static> Operator<Req> {
         }
     }
 
+    pub fn ready(&self) -> bool {
+        !self.request_tx.is_full()
+    }
+
     pub async fn defer(
         &mut self,
         mut req: Req,

@@ -606,7 +606,7 @@ impl Node for Veilid {
             .open_dht_record(peer_map_ref.key().to_owned(), None)
             .await?;
         let mut peers = vec![];
-        for subkey in 0..peer_map_ref.subkeys() {
+        for subkey in 0..dht_rec.schema().max_subkey() {
             match rc
                 .get_dht_value(dht_rec.key().to_owned(), subkey.into(), true)
                 .await?
@@ -619,10 +619,11 @@ impl Node for Veilid {
                     }
                 }
                 None => {
-                    return Err(Error::msg(format!(
+                    trace!(
                         "peer {peer_key} peer map {} missing expected subkey value {subkey}",
                         dht_rec.key()
-                    )))
+                    );
+                    break;
                 }
             };
         }

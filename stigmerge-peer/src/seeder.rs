@@ -9,15 +9,14 @@ use tokio::{
     sync::broadcast,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
-use veilid_core::{Target, Timestamp, TimestampDuration, TypedRecordKey, VeilidUpdate};
+use tracing::trace;
+use veilid_core::VeilidUpdate;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     error::{CancelError, Unrecoverable},
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
-    share_resolver,
     types::{PieceState, ShareInfo},
     Node, Result,
 };
@@ -51,37 +50,23 @@ pub enum Response {
 
 pub struct Seeder<N: Node> {
     node: N,
-    clients: Clients,
-    update_rx: broadcast::Receiver<VeilidUpdate>,
+    verified_rx: broadcast::Receiver<PieceState>,
 
     share: ShareInfo,
 
     files: HashMap<u32, File>,
-    known_peers: HashMap<TypedRecordKey, u16>,
-    advertisements: HashMap<(TypedRecordKey, TypedRecordKey), Timestamp>,
     piece_map: PieceMap,
-
-    announce_request_tx: flume::Sender<(TypedRecordKey, u16)>,
-    announce_request_rx: flume::Receiver<(TypedRecordKey, u16)>,
 }
 
 impl<N: Node> Seeder<N> {
-    pub fn new(node: N, share: ShareInfo, clients: Clients) -> Self {
-        let update_rx = node.subscribe_veilid_update();
-        let known_peers = [(share.key, 0u16)].into_iter().collect();
-        let (announce_request_tx, announce_request_rx) = flume::unbounded();
+    pub fn new(node: N, share: ShareInfo, verified_rx: broadcast::Receiver<PieceState>) -> Self {
         Seeder {
             node,
-            clients,
-            update_rx,
             share,
-            files: HashMap::new(),
-            known_peers,
-            advertisements: HashMap::new(),
-            piece_map: PieceMap::new(),
+            verified_rx,
 
-            announce_request_tx,
-            announce_request_rx,
+            files: HashMap::new(),
+            piece_map: PieceMap::new(),
         }
     }
 
@@ -112,71 +97,6 @@ impl<N: Node> Seeder<N> {
         }
         Ok(self.files.get_mut(&block_req.piece).unwrap())
     }
-
-    async fn advertise_peers(&mut self, key: &TypedRecordKey, target: &Target) -> Result<()> {
-        self.add_known_peer(key).await?;
-        for known_peer in self.known_peers.keys() {
-            // Don't advertise a key to itself
-            if known_peer == key {
-                continue;
-            }
-            // Don't advertise the same peer to the same target too often
-            if let Some(last_adv_time) = self
-                .advertisements
-                .get(&(known_peer.to_owned(), key.to_owned()))
-            {
-                if Timestamp::now().saturating_sub(*last_adv_time) < TimestampDuration::new_secs(30)
-                {
-                    trace!("advertised {known_peer} to {key} too recently");
-                    continue;
-                }
-            }
-            // Attempt to advertise
-            match self.node.request_advertise_peer(target, known_peer).await {
-                Ok(()) => {
-                    trace!("advertised {known_peer} to {key}");
-                    self.advertisements
-                        .insert((known_peer.to_owned(), key.to_owned()), Timestamp::now());
-                }
-                Err(e) => {
-                    warn!("advertise {known_peer} to {key}: {e}");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn add_known_peers(&mut self) -> Result<()> {
-        let known_peers = self.node.known_peers(&self.share.want_index_digest).await?;
-        for key in known_peers.iter() {
-            self.add_known_peer(key).await?;
-            trace!("loaded known peer {key}");
-
-            self.clients
-                .share_resolver_tx
-                .send_async(share_resolver::Request::Index {
-                    response_tx: ResponseChannel::default(),
-                    key: *key,
-                    want_index_digest: Some(self.share.want_index_digest),
-                    root: self.share.root.to_owned(),
-                })
-                .await
-                .context(Unrecoverable::new("send share_resolver request"))?;
-        }
-        Ok(())
-    }
-
-    async fn add_known_peer(&mut self, key: &TypedRecordKey) -> Result<()> {
-        if let None = self.known_peers.get(key) {
-            let index = self.known_peers.len().try_into().unwrap();
-            self.known_peers.insert(*key, index);
-            self.announce_request_tx
-                .send_async((*key, index))
-                .await
-                .context(Unrecoverable::new("schedule peer announce"))?;
-        };
-        Ok(())
-    }
 }
 
 impl<P: Node> Actor for Seeder<P> {
@@ -188,8 +108,9 @@ impl<P: Node> Actor for Seeder<P> {
         cancel: CancellationToken,
         request_rx: flume::Receiver<Self::Request>,
     ) -> Result<()> {
+        self.files.clear();
+        let mut update_rx = self.node.subscribe_veilid_update();
         let mut buf = [0u8; BLOCK_SIZE_BYTES];
-        self.add_known_peers().await?;
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -199,19 +120,11 @@ impl<P: Node> Actor for Seeder<P> {
                     let req = res.with_context(|| format!("seeder: receive request"))?;
                     self.handle_request(req).await?;
                 }
-                res = self.clients.verified_rx.recv() => {
+                res = self.verified_rx.recv() => {
                     let piece_state = res.context(Unrecoverable::new("receive verified piece update"))?;
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }
-                res = self.clients.share_target_rx.recv() => {
-                    let (key, target) = match res {
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        res => res
-                    }.context(Unrecoverable::new("receive share target update"))?;
-                    debug!("share target update for {key}: {target:?}");
-                    self.advertise_peers(&key, &target).await?;
-                }
-                res = self.update_rx.recv() => {
+                res = update_rx.recv() => {
                     let update = res.context(Unrecoverable::new("receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {
@@ -229,37 +142,10 @@ impl<P: Node> Actor for Seeder<P> {
                                 _ => {}
                             }
                         }
-                        VeilidUpdate::AppMessage(veilid_app_message) => {
-                            let req = proto::Request::decode(veilid_app_message.message())?;
-                            match req {
-                                proto::Request::AdvertisePeer(peer_req) => {
-                                    debug!("discovered advertised peer {}", peer_req.key);
-                                    self.clients.share_resolver_tx.send_async(share_resolver::Request::Index{
-                                        response_tx: ResponseChannel::default(),
-                                        key: peer_req.key,
-                                        want_index_digest: Some(self.share.want_index_digest),
-                                        root: self.share.root.to_owned(),
-                                    }).await.context(Unrecoverable::new("send share_resolver request"))?;
-                                }
-                                _ => {}
-                            }
-                        }
                         VeilidUpdate::Shutdown => {
                             cancel.cancel();
                         }
                         _ => {}
-                    }
-                }
-                res = self.announce_request_rx.recv_async() => {
-                    let (peer_key, subkey) = res.context(Unrecoverable::new("receive peer announce"))?;
-                    match self.node.announce_peer(&self.share.want_index_digest, Some(peer_key), subkey).await {
-                        Ok(_) => {
-                            trace!("announce peer {peer_key} subkey {subkey}");
-                        }
-                        Err(e) => {
-                            warn!("announce peer {peer_key} subkey {subkey}: {e}");
-                            self.announce_request_tx.send((peer_key, subkey)).context(Unrecoverable::new("requeue announce peer"))?;
-                        }
                     }
                 }
             }
@@ -280,11 +166,7 @@ impl<P: Node> Actor for Seeder<P> {
     }
 }
 
-pub struct Clients {
-    pub verified_rx: broadcast::Receiver<PieceState>,
-    pub share_resolver_tx: flume::Sender<share_resolver::Request>,
-    pub share_target_rx: broadcast::Receiver<(TypedRecordKey, Target)>,
-}
+pub struct Clients {}
 
 #[cfg(test)]
 mod tests {
@@ -361,20 +243,11 @@ mod tests {
             root: root_dir,
         };
 
-        // Create clients
-        let (share_resolver_tx, _share_resolver_rx) = flume::unbounded();
-        let (_share_target_tx, share_target_rx) = broadcast::channel(16);
-        let clients = Clients {
-            verified_rx,
-            share_resolver_tx,
-            share_target_rx,
-        };
-
         // Create cancellation token
         let cancel = CancellationToken::new();
         let mut operator = Operator::new(
             cancel.clone(),
-            Seeder::new(node, share_info, clients),
+            Seeder::new(node, share_info, verified_rx),
             OneShot,
         );
 
@@ -407,13 +280,23 @@ mod tests {
         let req = proto::Request::BlockRequest(block_req);
         let encoded_req = req.encode().expect("encode request");
         let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
-        update_tx
-            .send(VeilidUpdate::AppCall(Box::new(app_call)))
-            .expect("send app call");
 
-        time::timeout(Duration::from_secs(1), replied_rx.recv())
-            .await
-            .expect("replied");
+        // Assert that a block request gets a reply. Retry with a backoff delay,
+        // as the seeder main loop subscribes on start, which is scheduled
+        // concurrently.
+        let mut got_reply = false;
+        for i in 0..30 {
+            update_tx
+                .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
+                .expect("send app call");
+            if let Ok(Some(_)) =
+                time::timeout(Duration::from_millis(i * 10), replied_rx.recv()).await
+            {
+                got_reply = true;
+                break;
+            }
+        }
+        assert!(got_reply, "expected app_call reply");
 
         // Cancel the seeder
         cancel.cancel();
@@ -455,6 +338,7 @@ mod tests {
         // Create a stub peer with mock reply_block_contents
         let mut node = StubNode::new();
         let update_tx = node.update_tx.clone();
+        let _update_rx = update_tx.subscribe();
 
         let reply_contents_called = Arc::new(Mutex::new(false));
         let reply_contents_data = Arc::new(Mutex::new(Vec::new()));
@@ -490,18 +374,11 @@ mod tests {
 
         // Create clients
         let cancel = CancellationToken::new();
-        let (share_resolver_tx, _share_resolver_rx) = flume::unbounded();
-        let (_share_target_tx, share_target_rx) = broadcast::channel(16);
-        let clients = Clients {
-            verified_rx,
-            share_resolver_tx,
-            share_target_rx,
-        };
 
         // Create seeder
         let operator = Operator::new(
             cancel.clone(),
-            Seeder::new(node, share_info, clients),
+            Seeder::new(node, share_info, verified_rx),
             OneShot,
         );
 
@@ -512,13 +389,22 @@ mod tests {
 
         let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
 
-        update_tx
-            .send(VeilidUpdate::AppCall(Box::new(app_call)))
-            .expect("send app call");
-
-        time::timeout(Duration::from_secs(1), replied_rx.recv())
-            .await
-            .expect("replied");
+        // Assert that a block request gets a reply. Retry with a backoff delay,
+        // as the seeder main loop subscribes on start, which is scheduled
+        // concurrently.
+        let mut got_reply = false;
+        for i in 0..30 {
+            update_tx
+                .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
+                .expect("send app call");
+            if let Ok(Some(_)) =
+                time::timeout(Duration::from_millis(i * 10), replied_rx.recv()).await
+            {
+                got_reply = true;
+                break;
+            }
+        }
+        assert!(got_reply, "expected app_call reply");
 
         // Cancel the seeder
         cancel.cancel();

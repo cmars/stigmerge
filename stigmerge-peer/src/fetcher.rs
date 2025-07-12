@@ -442,7 +442,7 @@ impl<N: Node> Fetcher<N> {
                         piece_verifier::Response::IncompletePiece { .. } => {}
                     }
                 }
-                res = self.pending_fetch_rx.recv_async() => {
+                res = self.pending_fetch_rx.recv_async(), if self.clients.block_fetcher.ready() => {
                     let block = res.context(Unrecoverable::new("receive pending block fetch"))?;
                     match match self.peer_tracker.share_target(&block) {
                         Ok(Some((share_key, target))) => Some((share_key, target)),

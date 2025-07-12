@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use stigmerge_fileindex::Indexer;
+use stigmerge_peer::peer_gossip::PeerGossip;
 use tokio::sync::{Mutex, RwLock};
 use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
@@ -105,15 +106,20 @@ async fn main() -> std::result::Result<(), Error> {
         root: root.clone(),
     };
 
-    let seeder_clients = seeder::Clients {
-        verified_rx,
-        share_target_rx,
-        share_resolver_tx: share_resolver_op.request_tx.clone(),
-    };
+    let gossip_op = Operator::new(
+        cancel.clone(),
+        PeerGossip::new(
+            node.clone(),
+            share.clone(),
+            share_resolver_op.request_tx.clone(),
+            share_target_rx,
+        ),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
+    );
 
     let mut seeder_op = Operator::new(
         cancel.clone(),
-        Seeder::new(node.clone(), share, seeder_clients),
+        Seeder::new(node.clone(), share, verified_rx),
         WithVeilidConnection::new(node.clone(), conn_state.clone()),
     );
 
@@ -152,6 +158,7 @@ async fn main() -> std::result::Result<(), Error> {
         announce_op.join(),
         seeder_op.join(),
         share_resolver_op.join(),
+        gossip_op.join(),
     )
     .expect("tasks");
     Ok(())

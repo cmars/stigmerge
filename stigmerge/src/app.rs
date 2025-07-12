@@ -24,8 +24,9 @@ use stigmerge_peer::{
     have_announcer::HaveAnnouncer,
     new_routing_context,
     node::{Node, Veilid},
+    peer_gossip::PeerGossip,
     piece_verifier::PieceVerifier,
-    seeder::{self, Seeder},
+    seeder::Seeder,
     share_announcer::{self, ShareAnnouncer},
     share_resolver::{self, ShareResolver},
     types::ShareInfo,
@@ -308,14 +309,20 @@ impl App {
         self.add_fetch_progress(&cancel, &mut tasks, fetcher.subscribe_fetcher_status())?;
         let fetcher_task = spawn(fetcher.run(cancel.clone(), conn_state.clone()));
 
-        // Set up seeder
-        let seeder_clients = seeder::Clients {
-            verified_rx,
-            share_resolver_tx,
-            share_target_rx: seeder_share_target_rx,
-        };
+        let gossip_op = Operator::new(
+            cancel.clone(),
+            PeerGossip::new(
+                node.clone(),
+                share.clone(),
+                share_resolver_tx,
+                seeder_share_target_rx,
+            ),
+            WithVeilidConnection::new(node.clone(), conn_state.clone()),
+        );
+        tasks.spawn(gossip_op.join());
 
-        let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
+        // Set up seeder
+        let seeder = Seeder::new(node.clone(), share.clone(), verified_rx);
         let seeder_op = Operator::new(
             cancel.clone(),
             seeder,
@@ -409,7 +416,6 @@ impl App {
                             }
                             _ => {}
                         }
-                        sleep(Duration::from_millis(250)).await;
                     }
                 }
             }

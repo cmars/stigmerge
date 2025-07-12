@@ -19,6 +19,7 @@ use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
 use stigmerge_peer::actor::{ResponseChannel, UntilCancelled};
 use stigmerge_peer::content_addressable::ContentAddressable;
+use stigmerge_peer::peer_gossip::PeerGossip;
 use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
 use tokio::select;
 use tokio::spawn;
@@ -34,7 +35,7 @@ use stigmerge_peer::have_announcer::HaveAnnouncer;
 use stigmerge_peer::new_routing_context;
 use stigmerge_peer::node::{Node, Veilid};
 use stigmerge_peer::piece_verifier::PieceVerifier;
-use stigmerge_peer::seeder::{self, Seeder};
+use stigmerge_peer::seeder::Seeder;
 use stigmerge_peer::share_resolver::{self, ShareResolver};
 use stigmerge_peer::types::ShareInfo;
 use stigmerge_peer::{Error, Result};
@@ -224,14 +225,19 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         share_target_rx: share_target_rx.resubscribe(),
     };
 
-    // Set up seeder
-    let seeder_clients = seeder::Clients {
-        verified_rx,
-        share_target_rx,
-        share_resolver_tx,
-    };
+    let gossip_op = Operator::new(
+        cancel.clone(),
+        PeerGossip::new(
+            node.clone(),
+            share.clone(),
+            share_resolver_tx,
+            share_target_rx,
+        ),
+        WithVeilidConnection::new(node.clone(), conn_state.clone()),
+    );
 
-    let seeder = Seeder::new(node.clone(), share.clone(), seeder_clients);
+    // Set up seeder
+    let seeder = Seeder::new(node.clone(), share.clone(), verified_rx);
     let seeder_op = Operator::new(
         cancel.clone(),
         seeder,
@@ -260,6 +266,9 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         }
         join_res = seeder_op.join() => {
             join_res.expect("seeder task");
+        }
+        join_res = gossip_op.join() => {
+            join_res.expect("gossip task");
         }
     }
 
