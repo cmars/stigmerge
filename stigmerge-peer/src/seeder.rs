@@ -272,7 +272,7 @@ mod tests {
                     }
                 }
             }
-            time::sleep(Duration::from_millis(i)).await;
+            time::sleep(Duration::from_millis(i * 10)).await;
         }
         assert!(confirmed_have_map, "confirm verified block");
 

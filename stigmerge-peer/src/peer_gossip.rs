@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use tokio::{select, sync::broadcast};
@@ -22,12 +22,16 @@ pub struct PeerGossip<N: Node> {
 
     known_peers: HashMap<TypedRecordKey, u16>,
     advertisements: HashMap<(TypedRecordKey, TypedRecordKey), Timestamp>,
+    blocked_peers: HashSet<TypedRecordKey>,
 
     announce_request_tx: flume::Sender<(TypedRecordKey, u16)>,
     announce_request_rx: flume::Receiver<(TypedRecordKey, u16)>,
 
     resolve_request_tx: flume::Sender<TypedRecordKey>,
     resolve_request_rx: flume::Receiver<TypedRecordKey>,
+
+    share_resolver_resp_tx: flume::Sender<share_resolver::Response>,
+    share_resolver_resp_rx: flume::Receiver<share_resolver::Response>,
 }
 
 impl<N: Node> PeerGossip<N> {
@@ -39,6 +43,7 @@ impl<N: Node> PeerGossip<N> {
     ) -> Self {
         let (announce_request_tx, announce_request_rx) = flume::unbounded();
         let (resolve_request_tx, resolve_request_rx) = flume::unbounded();
+        let (share_resolver_resp_tx, share_resolver_resp_rx) = flume::unbounded();
 
         Self {
             node,
@@ -48,11 +53,14 @@ impl<N: Node> PeerGossip<N> {
 
             known_peers: HashMap::new(),
             advertisements: HashMap::new(),
+            blocked_peers: HashSet::new(),
 
             announce_request_tx,
             announce_request_rx,
             resolve_request_tx,
             resolve_request_rx,
+            share_resolver_resp_tx,
+            share_resolver_resp_rx,
         }
     }
 
@@ -93,22 +101,15 @@ impl<N: Node> PeerGossip<N> {
         let known_peers = self.node.known_peers(&self.share.want_index_digest).await?;
         for key in known_peers.iter() {
             self.add_known_peer(key).await?;
-            trace!("loaded known peer {key}");
-
-            self.share_resolver_tx
-                .send_async(share_resolver::Request::Index {
-                    response_tx: ResponseChannel::default(),
-                    key: *key,
-                    want_index_digest: Some(self.share.want_index_digest),
-                    root: self.share.root.to_owned(),
-                })
-                .await
-                .context(Unrecoverable::new("send share_resolver request"))?;
+            trace!("added known peer {key}");
         }
         Ok(())
     }
 
     async fn add_known_peer(&mut self, key: &TypedRecordKey) -> Result<()> {
+        if self.blocked_peers.contains(key) {
+            return Ok(());
+        }
         if let None = self.known_peers.get(key) {
             let index = self.known_peers.len().try_into().unwrap();
             self.known_peers.insert(*key, index);
@@ -120,6 +121,15 @@ impl<N: Node> PeerGossip<N> {
                 .send_async(*key)
                 .await
                 .context(Unrecoverable::new("schedule peer resolve"))?;
+            self.share_resolver_tx
+                .send_async(share_resolver::Request::Index {
+                    response_tx: ResponseChannel::default(),
+                    key: *key,
+                    want_index_digest: Some(self.share.want_index_digest),
+                    root: self.share.root.to_owned(),
+                })
+                .await
+                .context(Unrecoverable::new("send share_resolver request"))?;
         };
         Ok(())
     }
@@ -196,7 +206,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                                 proto::Request::AdvertisePeer(peer_req) => {
                                     debug!("discovered advertised peer {}", peer_req.key);
                                     self.share_resolver_tx.send_async(share_resolver::Request::Index{
-                                        response_tx: ResponseChannel::default(),
+                                        response_tx: self.share_resolver_resp_tx.clone().into(),
                                         key: peer_req.key,
                                         want_index_digest: Some(self.share.want_index_digest),
                                         root: self.share.root.to_owned(),
@@ -219,7 +229,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                         }
                         Err(e) => {
                             warn!("announce peer {peer_key} subkey {subkey}: {e}");
-                            self.announce_request_tx.send((peer_key, subkey)).context(Unrecoverable::new("requeue announce peer"))?;
+                            self.announce_request_tx.send_async((peer_key, subkey)).await.context(Unrecoverable::new("requeue announce peer"))?;
                         }
                     }
                 }
@@ -231,8 +241,21 @@ impl<N: Node> Actor for PeerGossip<N> {
                         }
                         Err(e) => {
                             warn!("resolve peer {peer_key}: {e}");
-                            self.resolve_request_tx.send(peer_key).context(Unrecoverable::new("requeue announce peer"))?;
+                            self.resolve_request_tx.send_async(peer_key).await.context(Unrecoverable::new("requeue announce peer"))?;
                         }
+                    }
+                }
+                res = self.share_resolver_resp_rx.recv_async() => {
+                    let resp = res.context(Unrecoverable::new("receive share resolver response"))?;
+                    match resp {
+                        share_resolver::Response::BadIndex { key } => {
+                            if let Some(blocked_subkey) = self.known_peers.remove(&key) {
+                                self.announce_request_tx.send_async(
+                                    (self.share.key, blocked_subkey)).await.context(Unrecoverable::new("replace blocked peer with share key"))?;
+                            }
+                            self.blocked_peers.insert(key);
+                        }
+                        _ => {}
                     }
                 }
             }
