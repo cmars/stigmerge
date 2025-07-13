@@ -98,10 +98,13 @@ impl<N: Node> PeerGossip<N> {
     }
 
     async fn add_known_peers(&mut self) -> Result<()> {
-        let known_peers = self.node.known_peers(&self.share.want_index_digest).await?;
+        let known_peers = self
+            .node
+            .known_peers(&self.share.want_index.payload().digest())
+            .await?;
+        trace!("known peers: {known_peers:?}");
         for key in known_peers.iter() {
             self.add_known_peer(key).await?;
-            trace!("added known peer {key}");
         }
         Ok(())
     }
@@ -130,6 +133,7 @@ impl<N: Node> PeerGossip<N> {
                 })
                 .await
                 .context(Unrecoverable::new("send share_resolver request"))?;
+            trace!("added known peer {key}");
         };
         Ok(())
     }
@@ -223,7 +227,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                 }
                 res = self.announce_request_rx.recv_async() => {
                     let (peer_key, subkey) = res.context(Unrecoverable::new("receive peer announce"))?;
-                    match self.node.announce_peer(&self.share.want_index_digest, Some(peer_key), subkey).await {
+                    match self.node.announce_peer(&self.share.want_index.payload().digest(), Some(peer_key), subkey).await {
                         Ok(_) => {
                             trace!("announce peer {peer_key} subkey {subkey}");
                         }

@@ -113,13 +113,15 @@ impl Veilid {
         let o_cnt = MAX_PEERS;
         let maybe_dht_key = db.load_json(0, payload_digest).await?;
         let maybe_dht_owner_keypair = db.load_json(1, payload_digest).await?;
+        let schema = DHTSchema::dflt(o_cnt)?;
         if let (Some(dht_key), Some(dht_owner_keypair)) = (maybe_dht_key, maybe_dht_owner_keypair) {
-            return Ok((rc.open_dht_record(dht_key, dht_owner_keypair).await?, o_cnt));
+            let dht_rec = rc.open_dht_record(dht_key, dht_owner_keypair).await?;
+            if *dht_rec.schema() == schema {
+                return Ok((dht_rec, o_cnt));
+            }
         }
 
-        let dht_rec = rc
-            .create_dht_record(DHTSchema::dflt(o_cnt)?, None, None)
-            .await?;
+        let dht_rec = rc.create_dht_record(schema, None, None).await?;
         let dht_owner = KeyPair::new(
             dht_rec.owner().to_owned(),
             dht_rec
@@ -491,6 +493,10 @@ impl Node for Veilid {
                     None,
                 )
                 .await?;
+                trace!(
+                    "peer key {} subkey {subkey}: set to {peer_info:?}",
+                    peer_map_dht.key()
+                );
             }
             None => {
                 rc.set_dht_value(peer_map_dht.key().to_owned(), subkey.into(), vec![], None)
@@ -607,18 +613,33 @@ impl Node for Veilid {
             .await?;
         let mut peers = vec![];
         for subkey in 0..dht_rec.schema().max_subkey() {
+            trace!(
+                "checking peer {peer_key} peer map {} subkey {subkey}",
+                dht_rec.key()
+            );
             match rc
                 .get_dht_value(dht_rec.key().to_owned(), subkey.into(), true)
                 .await?
             {
                 Some(data) => {
                     if data.data_size() > 0 {
-                        // revoked peers are blanked out
                         let peer_info = PeerInfo::decode(data.data())?;
+                        trace!(
+                            "peer {peer_key} peer map {} subkey {subkey}: found {peer_info:?}",
+                            dht_rec.key()
+                        );
                         peers.push(peer_info);
+                    } else {
+                        // Empty value is a marker for "end of peers" list
+                        trace!(
+                            "peer {peer_key} peer map {} subkey {subkey}: no value",
+                            dht_rec.key()
+                        );
+                        break;
                     }
                 }
                 None => {
+                    // No value is a marker for "end of peers" list
                     trace!(
                         "peer {peer_key} peer map {} missing expected subkey value {subkey}",
                         dht_rec.key()
@@ -627,6 +648,7 @@ impl Node for Veilid {
                 }
             };
         }
+        trace!("peers: {peers:?}");
         Ok(peers)
     }
 }
