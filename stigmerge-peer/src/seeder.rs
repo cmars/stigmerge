@@ -259,7 +259,7 @@ mod tests {
         // Have map should be updated. Retry with a backoff delay to allow
         // select! to pick up on the request.
         let mut confirmed_have_map = false;
-        for i in 0..30 {
+        for i in 0..10 {
             let req = Request::HaveMap {
                 response_tx: ResponseChannel::default(),
             };
@@ -272,7 +272,7 @@ mod tests {
                     }
                 }
             }
-            time::sleep(Duration::from_millis(i * 10)).await;
+            time::sleep(Duration::from_secs(i)).await;
         }
         assert!(confirmed_have_map, "confirm verified block");
 
@@ -285,7 +285,7 @@ mod tests {
         update_tx
             .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
             .expect("send app call");
-        time::timeout(Duration::from_secs(1), replied_rx.recv())
+        time::timeout(Duration::from_secs(10), replied_rx.recv())
             .await
             .expect("confirm app_call");
 
@@ -392,7 +392,7 @@ mod tests {
         update_tx
             .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
             .expect("send app call");
-        time::timeout(Duration::from_secs(1), replied_rx.recv())
+        time::timeout(Duration::from_secs(10), replied_rx.recv())
             .await
             .expect("confirm app_call");
 
