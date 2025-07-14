@@ -7,20 +7,58 @@
 
 stigmerge sends and receives file content anonymously over the [Veilid](https://veilid.com) network.
 
+# Quick start
+
+## Seeding a file
+
+Similar to bittorrent, stigmerge users cannot fetch a file unless it's currently being seeded by a peer.
+
+`stigmerge seed <file>` indexes and seeds a file, displaying the dht key which can be used to fetch it. For example (demo file obtained from the Internet Archive):
+
+```
+stigmerge seed ~/Videos/Max\ Headroom\ S1E1\ -\ Blipverts.mp4
+```
+
+![stigmerge seed command output, displaying the DHT key VLD0:0C9I9V_rcW17FQ_Zd2BB1wg9e-YmlEHh2vFySoat5Ls](media/seed.png)
+
+## Fetching a file
+
+`stigmerge fetch <dht key>` fetches a file from peers seeding it, storing it
+in the current working directory by default. Note the DHT key
+`VLD0:0C9I9V_rcW17FQ_Zd2BB1wg9e-YmlEHh2vFySoat5Ls` displayed above; the seeder
+provides this key to others in order for them to fetch it.
+
+```
+stigmerge fetch VLD0:0C9I9V_rcW17FQ_Zd2BB1wg9e-YmlEHh2vFySoat5Ls
+```
+
+![stigmerge fetch command output, displaying a partial download in progress](media/fetch.png)
+
+Note that this peer is also seeding the share to its own DHT key,
+`VLD0:dJ4DHoakg8DZ_Kz9rhgMcY0eqlCP1AE_izZMU29EsL4`, even while it is still
+fetching the content from other peers. There are no leechers in a stigmerge swarm; all peers are
+seeders. Peers also support the underlying Veilid network as [Veilid nodes](https://veilid.com/how-it-works/).
+
+## Gossip
+
+stigmerge peers "gossip" with each other, announcing themselves to the peers
+they fetch from, and exchanging other peers they have discovered in the swarm
+with each other. These relationships are posted to the Veilid DHT, so that even
+when a peer drops offline, its last-known neighbors can still be followed from
+the share DHT to join the swarm.
+
+A peer might start by fetching blocks of a payload from the initially provided
+peer, but eventually it will attempt other peers, and gravitate toward the most
+productive peers.
+
 # Usage
 
-`stigmerge seed <file>` indexes and seeds a file, displaying the dht key which can be used to fetch it.
-
-[![asciicast](https://asciinema.org/a/663366.svg)](https://asciinema.org/a/663366)
-
-`stigmerge fetch <dht key> [<dht key> [...]] [-o <directory>]` fetches a file
-while it's being seeded (defaults to current directory) from one or more peers.
-
-[![asciicast](https://asciinema.org/a/663367.svg)](https://asciinema.org/a/663367)
-
-Similar to bittorrent, stigmerge cannot fetch a file unless it's being seeded by a peer.
-
 See `stigmerge --help` for more options.
+
+TODO: explain some of the highlights here:
+- state dir
+- output dir
+- index digest auth
 
 ## Try it!
 
@@ -103,13 +141,15 @@ this is currently necessary.
 
 What's on the roadmap for a 1.0 release.
 
-## Trackers
-
-Trackers will enable a swarm of stigmerge peers to operate more like bittorrent, where blocks may be simultaneously seeded and fetched.
-
 ## Multi-file shares
 
 The stigmerge wire protocol and indexing structures support multi-file shares, but this hasn't been fully implemented yet.
+
+## Improving the network
+
+There's a lot of opportunity to hint to peers which blocks are available.
+
+There may be a need to shed load and throttle traffic.
 
 # Troubleshooting
 
@@ -142,7 +182,5 @@ Github is used for CICD and especially [release automation](https://blog.orhun.d
 ## Contributions
 
 Branches and releases are regularly mirrored to [Codeberg](https://codeberg.org/cmars/stigmerge). Pull requests might be accepted from either, if they fit with the project plans and goals.
-
-This project used to be hosted on Gitlab, but I've deleted my original account there, and will only use Gitlab for contributions when necessary. Why? [Gitlab is a collaborator](https://archive.is/okSlz).
 
 Open an issue and ask before picking up a branch and proposing, for best results.
