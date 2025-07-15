@@ -62,7 +62,7 @@ TODO: explain some of the highlights here:
 
 ## Try it!
 
-Try fetching a test file with `stigmerge fetch VLD0:yb7Mz4g-BaFzn2qDt-xCPzsbzlJz7iq1MOFFBaCXqTw`.
+Try fetching a test file with `stigmerge fetch VLD0:Q0TGVjxV-LjDtpsj1wojsEBx8SU9egVwSlKo0bNjQoY`.
 
 This is seeding from a secret location.
 
