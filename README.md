@@ -74,9 +74,11 @@ Install a [binary release](https://github.com/cmars/stigmerge/releases) on Linux
 
 Substitute `docker` for `podman` if necessary.
 
-Build the container with `podman build -t stigmerge .`
+Build the container with `podman build -t stigmerge .` or pull [stigmerge/stigmerge](https://hub.docker.com/r/stigmerge/stigmerge):latest.
 
-Mount the /data volume to seed or fetch files. The current working directory defaults to this volume in the container.
+Mount `/data` to seed files from or fetch files to the host. The current working directory defaults to this volume in the container.
+
+Mount `/state` to access details about the peer, such as the share key for distribution.
 
 The following example seeds a file `linux.iso` located at `./data/linux.iso`.
 
@@ -87,13 +89,14 @@ podman run --rm \
     stigmerge seed linux.iso
 ```
 
-Look for the log message containing the share record key, like this:
+The share key for this peer is written to `/state/share_key`. 
 
 ```
-2025-06-28T00:54:30.118142Z  INFO stigmerge::app: announced share, key: VLD0:RDwOzUCVwY2EhL4z1C_od1J2JMS8oZbPgIuI6k5sS0I
+$ cat state/share_key
+VLD0:RDwOzUCVwY2EhL4z1C_od1J2JMS8oZbPgIuI6k5sS0I
 ```
 
-Another peer could fetch this file to ~/Downloads/linux.iso with
+Another peer could then fetch this file to ~/Downloads/linux.iso with
 
 ```bash
 podman run --rm \
@@ -126,6 +129,8 @@ Or add the default package to a legacy `home.nix` with something like:
 
 Stigmerge can be compiled from source and run on the command-line with [Termux](https://termux.dev) on Android.
 
+Rust compilation can be memory intensive, and may OOM on memory-constrained devices.
+
 You'll need to install Rust and Cargo to build it, and the following runtime dependencies:
 
 ```bash
@@ -141,9 +146,25 @@ this is currently necessary.
 
 What's on the roadmap for a 1.0 release.
 
+## Native UI App
+
+Currently evaluating Tauri for a cross-platform desktop / mobile app. I've considered Flutter but Rust and JS are more familiar than Dart.
+
+## Magnet links
+
+Stigmerge magnet links would encode payload and index digests, and a set of bootstrap peers to locate & discover the active swarm.
+
 ## Multi-file shares
 
 The stigmerge wire protocol and indexing structures support multi-file shares, but this hasn't been fully implemented yet.
+
+## Larger share sizes
+
+Veilid's DHT places an upper limit on how large an index can be, currently around 32GB payload size (see #256).
+
+One easy solution to this: allow larger sized pieces for larger shares. This comes with tradeoffs. Larger pieces are less error tolerant; a failed piece requires a larger re-fetch.
+
+Another alternative is to keep the piece size fixed at 1MB, and chain DHTs to store large indexes.
 
 ## Improving the network
 
@@ -161,7 +182,9 @@ stigmerge operates an embedded Veilid node, which requires a synchronized local 
 
 Logging can be configured with the [RUST_LOG environment variable](https://docs.rs/env_logger/latest/env_logger/#enabling-logging).
 
-`RUST_LOG=debug` will enable all debug-level logging in stigmerge as well as veilid-core, which may be useful for troubleshooting low-level Veilid network problems and reporting issues.
+Log levels can be set on a per-crate basis to focus on a specific problem area without getting flooded with debug or trace-level noise from other parts of the application.
+
+Default logging for the `stigmerge` CLI is equivalent to `RUST_LOG=stigmerge=debug,stigmerge_peer=debug`.
 
 ## Issues
 
