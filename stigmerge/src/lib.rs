@@ -5,6 +5,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 pub mod app;
 pub mod cli;
+pub mod share;
 
 pub use app::App;
 pub use cli::Cli;

@@ -4,6 +4,8 @@ use anyhow::{Error, Result};
 use clap::{arg, Parser, Subcommand};
 use sha2::{Digest, Sha256};
 
+use crate::share;
+
 #[derive(Parser, Debug)]
 #[command(name = "stigmerge")]
 #[command(bin_name = "stigmerge")]
@@ -97,4 +99,50 @@ pub enum Commands {
         path: PathBuf,
     },
     Version,
+}
+
+impl Commands {
+    pub fn share_args(&self) -> Result<(share::Mode, share::Config)> {
+        Ok(match self {
+            Commands::Fetch {
+                share_keys: share_key_strings,
+                index_digest,
+                output_path,
+                fetchers,
+            } => {
+                let want_index_digest = match index_digest {
+                    Some(digest_string) => {
+                        let digest = hex::decode(digest_string)?;
+                        Some(
+                            digest
+                                .try_into()
+                                .map_err(|_| Error::msg("invalid digest length"))?,
+                        )
+                    }
+                    None => None,
+                };
+                let mut share_keys = vec![];
+                for share_key_string in share_key_strings {
+                    share_keys.push(share_key_string.parse()?);
+                }
+                (
+                    share::Mode::Fetch {
+                        root: output_path.into(),
+                        want_index_digest,
+                        share_keys,
+                    },
+                    share::Config {
+                        n_fetchers: TryInto::<u8>::try_into(*fetchers)?,
+                    },
+                )
+            }
+            Commands::Seed { path } => (
+                share::Mode::Seed {
+                    path: path.to_owned(),
+                },
+                share::Config::default(),
+            ),
+            Commands::Version => return Err(Error::msg("invalid command")),
+        })
+    }
 }

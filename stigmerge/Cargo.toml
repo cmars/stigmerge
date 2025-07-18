@@ -16,6 +16,10 @@ path-guid = "F2AA53E2-105C-4A4F-BE29-C072AB5754A2"
 license = false
 eula = false
 
+[lib]
+name = "stigmerge"
+path = "src/lib.rs"
+
 [[bin]]
 name = "stigmerge"
 
