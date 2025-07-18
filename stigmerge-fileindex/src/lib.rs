@@ -208,7 +208,7 @@ pub struct FileBlockRef {
 }
 
 /// Progress of an indexing process.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Progress {
     pub length: u64,
     pub position: u64,
