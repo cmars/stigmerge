@@ -1,7 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use anyhow::Context;
 use tokio::{select, sync::broadcast};
+use tokio_utils::MultiRateLimiter;
 use tracing::{debug, trace, warn};
 use veilid_core::{Target, Timestamp, TimestampDuration, TypedRecordKey, VeilidUpdate};
 
@@ -184,6 +188,7 @@ impl<N: Node> Actor for PeerGossip<N> {
     ) -> Result<()> {
         self.add_known_peers().await?;
         let mut update_rx = self.node.subscribe_veilid_update();
+        let limiter = MultiRateLimiter::new(Duration::from_secs(5));
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -225,7 +230,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                         _ => {}
                     }
                 }
-                res = self.announce_request_rx.recv_async() => {
+                res = limiter.throttle("announce", || self.announce_request_rx.recv_async()) => {
                     let (peer_key, subkey) = res.context(Unrecoverable::new("receive peer announce"))?;
                     match self.node.announce_peer(&self.share.want_index.payload().digest(), Some(peer_key), subkey).await {
                         Ok(_) => {
@@ -237,7 +242,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                         }
                     }
                 }
-                res = self.resolve_request_rx.recv_async() => {
+                res = limiter.throttle("resolve", || self.resolve_request_rx.recv_async()) => {
                     let peer_key = res.context(Unrecoverable::new("receive peer resolve"))?;
                     match self.resolve_peers(&peer_key).await {
                         Ok(_) => {

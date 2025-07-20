@@ -26,6 +26,7 @@ stigmerge_fileindex = { version = "0", path = "../stigmerge-fileindex" }
 thiserror = "2.0"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tokio-utils = { version = "0.1" }
 tracing = { workspace = true }
 veilid-core = { workspace = true }
 
