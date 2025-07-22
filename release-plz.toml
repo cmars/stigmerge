@@ -26,6 +26,9 @@ publish_allow_dirty = false
 # disable running `cargo-semver-checks`
 semver_check = false
 
+# prepare releases for features and fixes
+release_commits = "^(feat|fix):"
+
 [[package]]
 name = "stigmerge_fileindex"
 
