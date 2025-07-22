@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.5.7] - 2025-07-20
+## [0.5.8] - 2025-07-20
 
 ### 🚜 Refactor
 
