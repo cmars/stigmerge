@@ -50,3 +50,6 @@ sha2 = "0.10"
 tempfile = "3.13"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+
+[package.metadata.docs.rs]
+rustc-args = [ "--cfg" , "doc"]
