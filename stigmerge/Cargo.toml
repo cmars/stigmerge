@@ -8,7 +8,7 @@ edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.5.8"
+version = "0.5.9"
 
 [package.metadata.wix]
 upgrade-guid = "B2D446B7-C4C2-4939-8A9E-C6039D89BAE8"
