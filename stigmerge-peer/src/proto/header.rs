@@ -3,7 +3,7 @@ use capnp::{
     serialize,
 };
 use stigmerge_fileindex::Index;
-use veilid_core::{TypedRecordKey, ValueData};
+use veilid_core::{RecordKey, TypedRecordKey, ValueData};
 
 use super::{
     stigmerge_capnp::header, Decoder, Digest, Encoder, Error, PublicKey, Result, MAX_INDEX_BYTES,
@@ -45,15 +45,17 @@ impl Encoder for Header {
             typed_key_builder.set_kind(have_map_ref.key.kind.into());
 
             let mut key_builder = typed_key_builder.reborrow().init_key();
-            key_builder.set_p0(u64::from_be_bytes(have_map_ref.key.value[0..8].try_into()?));
+            key_builder.set_p0(u64::from_be_bytes(
+                have_map_ref.key.value.bytes[0..8].try_into()?,
+            ));
             key_builder.set_p1(u64::from_be_bytes(
-                have_map_ref.key.value[8..16].try_into()?,
+                have_map_ref.key.value.bytes[8..16].try_into()?,
             ));
             key_builder.set_p2(u64::from_be_bytes(
-                have_map_ref.key.value[16..24].try_into()?,
+                have_map_ref.key.value.bytes[16..24].try_into()?,
             ));
             key_builder.set_p3(u64::from_be_bytes(
-                have_map_ref.key.value[24..32].try_into()?,
+                have_map_ref.key.value.bytes[24..32].try_into()?,
             ));
 
             have_map_builder.set_subkeys(have_map_ref.subkeys);
@@ -67,15 +69,17 @@ impl Encoder for Header {
             typed_key_builder.set_kind(peer_map_ref.key.kind.into());
 
             let mut key_builder = typed_key_builder.reborrow().init_key();
-            key_builder.set_p0(u64::from_be_bytes(peer_map_ref.key.value[0..8].try_into()?));
+            key_builder.set_p0(u64::from_be_bytes(
+                peer_map_ref.key.value.bytes[0..8].try_into()?,
+            ));
             key_builder.set_p1(u64::from_be_bytes(
-                peer_map_ref.key.value[8..16].try_into()?,
+                peer_map_ref.key.value.bytes[8..16].try_into()?,
             ));
             key_builder.set_p2(u64::from_be_bytes(
-                peer_map_ref.key.value[16..24].try_into()?,
+                peer_map_ref.key.value.bytes[16..24].try_into()?,
             ));
             key_builder.set_p3(u64::from_be_bytes(
-                peer_map_ref.key.value[24..32].try_into()?,
+                peer_map_ref.key.value.bytes[24..32].try_into()?,
             ));
 
             peer_map_builder.set_subkeys(peer_map_ref.subkeys);
@@ -124,7 +128,7 @@ impl Decoder for Header {
                     key[16..24].clone_from_slice(&key_reader.get_p2().to_be_bytes()[..]);
                     key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
                     header = header.with_have_map(HaveMapRef {
-                        key: TypedRecordKey::new(kind, key.into()),
+                        key: TypedRecordKey::new(kind, RecordKey::new(key)),
                         subkeys: have_map_ref_reader.get_subkeys(),
                     });
                 }
@@ -143,7 +147,10 @@ impl Decoder for Header {
                     key[16..24].clone_from_slice(&key_reader.get_p2().to_be_bytes()[..]);
                     key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
                     header = header.with_peer_map(PeerMapRef {
-                        key: TypedRecordKey::new(typed_key_reader.get_kind().into(), key.into()),
+                        key: TypedRecordKey::new(
+                            typed_key_reader.get_kind().into(),
+                            RecordKey::new(key),
+                        ),
                         subkeys: peer_map_ref_reader.get_subkeys(),
                     });
                 }
@@ -282,7 +289,7 @@ mod tests {
     use std::path::PathBuf;
 
     use stigmerge_fileindex::{Index, PayloadSpec};
-    use veilid_core::{CryptoKind, TypedRecordKey};
+    use veilid_core::{CryptoKind, RecordKey, TypedRecordKey};
 
     use crate::proto::{Decoder, Encoder, HaveMapRef, Header, PeerMapRef};
 
@@ -309,8 +316,8 @@ mod tests {
         let route_data = vec![1u8, 2u8, 3u8, 4u8];
 
         // Create TypedKeys for peer map and have map
-        let peer_key = TypedRecordKey::new(CryptoKind::default(), [0xaa; 32].into());
-        let have_key = TypedRecordKey::new(CryptoKind::default(), [0xbb; 32].into());
+        let peer_key = TypedRecordKey::new(CryptoKind::default(), RecordKey::new([0xaa; 32]));
+        let have_key = TypedRecordKey::new(CryptoKind::default(), RecordKey::new([0xbb; 32]));
 
         // Create the peer map ref and have map ref
         let peer_map_ref = PeerMapRef::new(peer_key, 10);
