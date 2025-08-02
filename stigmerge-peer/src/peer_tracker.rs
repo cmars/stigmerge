@@ -119,7 +119,7 @@ mod tests {
     fn create_typed_key(id: u8) -> TypedRecordKey {
         let mut key_bytes = [0u8; 32];
         key_bytes[0] = id;
-        TypedRecordKey::new(CryptoKind::default(), RecordKey::from(key_bytes))
+        TypedRecordKey::new(CryptoKind::default(), RecordKey::new(key_bytes))
     }
 
     // Helper function to create a Target for testing
