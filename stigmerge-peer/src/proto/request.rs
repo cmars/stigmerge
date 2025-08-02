@@ -2,7 +2,7 @@ use capnp::{
     message::{self, ReaderOptions},
     serialize,
 };
-use veilid_core::TypedRecordKey;
+use veilid_core::{RecordKey, TypedRecordKey};
 
 use super::{
     stigmerge_capnp::request, Decoder, Encoder, Error, PublicKey, Result, MAX_INDEX_BYTES,
@@ -44,16 +44,16 @@ impl Encoder for Request {
 
                 let mut key_builder = typed_key_builder.reborrow().init_key();
                 key_builder.set_p0(u64::from_be_bytes(
-                    advertise_req.key.value[0..8].try_into()?,
+                    advertise_req.key.value.bytes[0..8].try_into()?,
                 ));
                 key_builder.set_p1(u64::from_be_bytes(
-                    advertise_req.key.value[8..16].try_into()?,
+                    advertise_req.key.value.bytes[8..16].try_into()?,
                 ));
                 key_builder.set_p2(u64::from_be_bytes(
-                    advertise_req.key.value[16..24].try_into()?,
+                    advertise_req.key.value.bytes[16..24].try_into()?,
                 ));
                 key_builder.set_p3(u64::from_be_bytes(
-                    advertise_req.key.value[24..32].try_into()?,
+                    advertise_req.key.value.bytes[24..32].try_into()?,
                 ));
             }
         }
@@ -93,7 +93,10 @@ impl Decoder for Request {
                 }
 
                 Ok(Request::AdvertisePeer(AdvertisePeerRequest {
-                    key: TypedRecordKey::new(typed_key_reader.get_kind().into(), key.into()),
+                    key: TypedRecordKey::new(
+                        typed_key_reader.get_kind().into(),
+                        RecordKey::new(key),
+                    ),
                 }))
             }
             Err(e) => Err(e.into()),
@@ -103,7 +106,7 @@ impl Decoder for Request {
 
 #[cfg(test)]
 mod tests {
-    use veilid_core::CryptoKind;
+    use veilid_core::{CryptoKind, RecordKey};
 
     use super::*;
 
@@ -117,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_advertise_peer() {
-        let key = TypedRecordKey::new(CryptoKind::default(), [0xaa; 32].into());
+        let key = TypedRecordKey::new(CryptoKind::default(), RecordKey::new([0xaa; 32]));
         let message = Request::AdvertisePeer(AdvertisePeerRequest { key });
         let encoded = message.encode().unwrap();
         let decoded = Request::decode(&encoded).unwrap();
