@@ -4248,9 +4248,9 @@ dependencies = [
 
 [[package]]
 name = "veilid-core"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aed956d750cfa4bdaa3838fcb069bc6c07fda778f7a79ebb8b752eb1c73987ba"
+checksum = "709cbd186b9e94960c4d3957b40402ec166b8a262b156f9ce73a2da23f1bd099"
 dependencies = [
  "argon2",
  "async-tls",
@@ -4367,9 +4367,9 @@ dependencies = [
 
 [[package]]
 name = "veilid-tools"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2f8ea5024138071fcb290441fa3cbb98d1ae37109764b65a48af4dadb8c1ae5"
+checksum = "a7a28dd110d1a605ce3fba3e08126df705b88c67bbda0970064e8aa886663d6f"
 dependencies = [
  "android_logger 0.13.3",
  "async-io",

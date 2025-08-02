@@ -2,7 +2,7 @@ use capnp::{
     message::{self, ReaderOptions},
     serialize,
 };
-use veilid_core::{Timestamp, TypedRecordKey};
+use veilid_core::{RecordKey, Timestamp, TypedRecordKey};
 
 use super::{stigmerge_capnp::peer_info, Decoder, Encoder, PublicKey};
 
@@ -42,10 +42,10 @@ impl Encoder for PeerInfo {
         typed_key_builder.set_kind(self.key.kind.into());
 
         let mut key_builder = typed_key_builder.reborrow().init_key();
-        key_builder.set_p0(u64::from_be_bytes(self.key.value[0..8].try_into()?));
-        key_builder.set_p1(u64::from_be_bytes(self.key.value[8..16].try_into()?));
-        key_builder.set_p2(u64::from_be_bytes(self.key.value[16..24].try_into()?));
-        key_builder.set_p3(u64::from_be_bytes(self.key.value[24..32].try_into()?));
+        key_builder.set_p0(u64::from_be_bytes(self.key.value.bytes[0..8].try_into()?));
+        key_builder.set_p1(u64::from_be_bytes(self.key.value.bytes[8..16].try_into()?));
+        key_builder.set_p2(u64::from_be_bytes(self.key.value.bytes[16..24].try_into()?));
+        key_builder.set_p3(u64::from_be_bytes(self.key.value.bytes[24..32].try_into()?));
 
         peer_info_builder.set_updated_at(self.updated_at.into());
 
@@ -68,7 +68,7 @@ impl Decoder for PeerInfo {
         key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
 
         Ok(Self {
-            key: TypedRecordKey::new(typed_key_reader.get_kind().into(), key.into()),
+            key: TypedRecordKey::new(typed_key_reader.get_kind().into(), RecordKey::new(key)),
             updated_at: Timestamp::new(peer_info_reader.get_updated_at()),
         })
     }
