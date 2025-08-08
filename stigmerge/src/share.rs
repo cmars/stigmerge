@@ -209,6 +209,7 @@ impl<N: Node + Send + Sync + 'static> Share<N> {
                 anyhow::bail!("failed to announce share")
             }
         };
+        self.tasks.spawn(share_announcer_op.join());
 
         let share = ShareInfo {
             key: share_key,
