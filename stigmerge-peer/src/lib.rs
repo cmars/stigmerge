@@ -45,15 +45,11 @@ pub async fn new_routing_context(
             warn!("dispatching veilid update: {:?}", e);
         }
     });
-    let config_state_path = Arc::new(state_dir.to_owned());
-    let config_ns = Arc::new(ns.to_owned());
-    let config_callback = Arc::new(move |key| {
-        veilid_config::callback((*config_state_path).to_owned(), (*config_ns).clone(), key)
-    });
 
+    let config = veilid_config::get_config(String::from(state_dir.to_owned()), ns);
     // Start Veilid API
     let api: veilid_core::VeilidAPI =
-        veilid_core::api_startup(update_callback, config_callback).await?;
+        veilid_core::api_startup_config(update_callback, config).await?;
     api.attach().await?;
 
     let routing_context = api.routing_context()?;
