@@ -5,7 +5,7 @@ use tokio::{
     select, spawn,
     sync::{broadcast, oneshot, watch, Mutex, MutexGuard},
     task::{self, JoinSet},
-    time::{interval, sleep},
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
@@ -338,7 +338,6 @@ impl<N: Node> WithVeilidConnection<N> {
         cancel: CancellationToken,
         state: MutexGuard<'a, ConnectionState>,
     ) -> Result<()> {
-        let mut reset_interval = interval(Duration::from_secs(120));
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -361,10 +360,6 @@ impl<N: Node> WithVeilidConnection<N> {
                         }
                         _ => {}
                     }
-                }
-                _ = reset_interval.tick() => {
-                    warn!("resetting connection");
-                    self.node.reset().await?;
                 }
             }
         }

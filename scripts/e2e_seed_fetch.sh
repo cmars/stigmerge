@@ -4,6 +4,11 @@ cd $(dirname $0)/..
 
 set -euxo pipefail
 
+# Delay increments by one until the max poll delay is reached
+# So a max poll delay of 30 will allow an overall timeout of
+# 1+2+...+25 = 300s
+max_poll_delay=25
+
 seed_dir=$(mktemp -d)
 fetch_dir=$(mktemp -d)
 trap "rm -rf ${seed_dir} ${fetch_dir}" EXIT
@@ -26,7 +31,7 @@ run_seed &
 seed_pid=$!
 trap "kill ${seed_pid}; rm -rf ${seed_dir} ${fetch_dir}" EXIT
 
-for i in {1..20}; do
+for i in $(seq $max_poll_delay); do
     seed_key=$(get_seed_key || true)
     if [ -n "${seed_key}" ]; then
         break
@@ -46,7 +51,7 @@ fi
 fetch_pid=$!
 trap "kill ${seed_pid} ${fetch_pid}; rm -rf ${seed_dir} ${fetch_dir}" EXIT
 
-for i in {1..20}; do
+for i in $(seq $max_poll_delay); do
     if [ -e ${fetch_dir}/testfile ]; then
         fetch_digest=$(sha256sum ${fetch_dir}/testfile | cut -d' ' -f1)
         if [ "${digest}" = "${fetch_digest}" ]; then
