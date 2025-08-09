@@ -1,13 +1,4 @@
-use std::env;
-
 use veilid_core::VeilidConfig;
-
-pub fn node_addr() -> Option<String> {
-    match env::var("NODE_ADDR") {
-        Ok(val) => Some(val),
-        Err(_) => None,
-    }
-}
 
 pub fn get_config(state_dir: String, ns: Option<String>) -> VeilidConfig {
     return VeilidConfig {

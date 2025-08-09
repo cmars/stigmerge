@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 use tracing::warn;
-use veilid_core::{RoutingContext, VeilidUpdate};
+use veilid_core::{RoutingContext, VeilidConfig, VeilidUpdate};
 
 pub use error::{is_cancelled, is_unrecoverable, CancelError, Error, Result};
 pub use node::{Node, Veilid};
@@ -33,11 +33,24 @@ pub use node::{Node, Veilid};
 #[cfg(test)]
 pub mod tests;
 
+const DEFAULT_UPDATE_BUFFER_SIZE: usize = 1024;
+
 pub async fn new_routing_context(
     state_dir: &str,
     ns: Option<String>,
 ) -> Result<(RoutingContext, broadcast::Receiver<VeilidUpdate>)> {
-    let (update_tx, update_rx) = broadcast::channel(1024);
+    new_routing_context_from_config(
+        veilid_config::get_config(state_dir.to_owned(), ns),
+        DEFAULT_UPDATE_BUFFER_SIZE,
+    )
+    .await
+}
+
+pub async fn new_routing_context_from_config(
+    config: VeilidConfig,
+    update_buffer_size: usize,
+) -> Result<(RoutingContext, broadcast::Receiver<VeilidUpdate>)> {
+    let (update_tx, update_rx) = broadcast::channel(update_buffer_size);
 
     // Configure Veilid core
     let update_callback = Arc::new(move |change: VeilidUpdate| {
@@ -46,7 +59,6 @@ pub async fn new_routing_context(
         }
     });
 
-    let config = veilid_config::get_config(String::from(state_dir.to_owned()), ns);
     // Start Veilid API
     let api: veilid_core::VeilidAPI =
         veilid_core::api_startup_config(update_callback, config).await?;
