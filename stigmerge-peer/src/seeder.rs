@@ -178,7 +178,11 @@ mod tests {
     };
 
     use stigmerge_fileindex::Index;
-    use tokio::{sync::mpsc, time};
+    use tokio::{
+        runtime::{Builder, RngSeed},
+        sync::mpsc,
+        time,
+    };
     use tokio_util::sync::CancellationToken;
     use veilid_core::{OperationId, TypedRecordKey, VeilidAppCall};
 
@@ -195,71 +199,80 @@ mod tests {
         Header::new([0xab; 32], 42, 1, [0xcd; 99].as_slice(), None, None)
     }
 
-    #[tokio::test]
-    async fn test_seeder_block_request_for_verified_piece() {
-        // Create a test file with known content
-        const BLOCK_DATA: u8 = 0xa5;
-        let tf = temp_file(BLOCK_DATA, BLOCK_SIZE_BYTES * PIECE_SIZE_BLOCKS * 2); // 2 pieces
-        let tf_path = tf.path().to_path_buf();
-        let root_dir = tf_path.parent().unwrap().to_path_buf();
+    #[test]
+    fn test_seeder_block_request_for_verified_piece() {
+        let seed = RngSeed::from_bytes(b"test");
 
-        // Create a mock index
-        let index = create_test_index(&tf_path).await;
+        let rt = Builder::new_current_thread()
+            .enable_time()
+            .rng_seed(seed) // Apply the seed for deterministic polling order
+            .build_local(Default::default())
+            .unwrap();
 
-        // Set up channels
-        let (verified_tx, verified_rx) = broadcast::channel(16);
+        rt.block_on(async {
+            // Create a test file with known content
+            const BLOCK_DATA: u8 = 0xa5;
+            let tf = temp_file(BLOCK_DATA, BLOCK_SIZE_BYTES * PIECE_SIZE_BLOCKS * 2); // 2 pieces
+            let tf_path = tf.path().to_path_buf();
+            let root_dir = tf_path.parent().unwrap().to_path_buf();
 
-        // Create a stub peer with mock reply_block_contents
-        let mut node = StubNode::new();
-        let update_tx = node.update_tx.clone();
-        let reply_contents_called = Arc::new(Mutex::new(false));
-        let reply_contents_data = Arc::new(Mutex::new(Vec::new()));
-        let reply_contents_called_clone = reply_contents_called.clone();
-        let reply_contents_data_clone = reply_contents_data.clone();
+            // Create a mock index
+            let index = create_test_index(&tf_path).await;
 
-        let (replied_tx, mut replied_rx) = mpsc::channel(1);
+            // Set up channels
+            let (verified_tx, verified_rx) = broadcast::channel(16);
 
-        node.reply_block_contents_result = Arc::new(Mutex::new(
-            move |_call_id: OperationId, contents: Option<&[u8]>| {
-                *reply_contents_called_clone.lock().unwrap() = true;
-                *reply_contents_data_clone.lock().unwrap() = match contents {
-                    Some(contents) => contents.to_vec(),
-                    None => vec![],
-                };
-                replied_tx.try_send(()).expect("replied");
-                Ok(())
-            },
-        ));
-        node.known_peers_result = Arc::new(Mutex::new(move |_index_digest: &[u8]| Ok(vec![])));
+            // Create a stub peer with mock reply_block_contents
+            let mut node = StubNode::new();
+            let update_tx = node.update_tx.clone();
+            let reply_contents_called = Arc::new(Mutex::new(false));
+            let reply_contents_data = Arc::new(Mutex::new(Vec::new()));
+            let reply_contents_called_clone = reply_contents_called.clone();
+            let reply_contents_data_clone = reply_contents_data.clone();
 
-        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
-            .expect("key");
+            let (replied_tx, mut replied_rx) = mpsc::channel(1);
 
-        // Create share info
-        let share_info = ShareInfo {
-            key: fake_key,
-            header: test_header(),
-            want_index: index,
-            want_index_digest: [0u8; 32],
-            root: root_dir,
-        };
+            node.reply_block_contents_result = Arc::new(Mutex::new(
+                move |_call_id: OperationId, contents: Option<&[u8]>| {
+                    *reply_contents_called_clone.lock().unwrap() = true;
+                    *reply_contents_data_clone.lock().unwrap() = match contents {
+                        Some(contents) => contents.to_vec(),
+                        None => vec![],
+                    };
+                    replied_tx.try_send(()).expect("replied");
+                    Ok(())
+                },
+            ));
+            node.known_peers_result = Arc::new(Mutex::new(move |_index_digest: &[u8]| Ok(vec![])));
 
-        // Create cancellation token
-        let cancel = CancellationToken::new();
-        let mut operator = Operator::new(
-            cancel.clone(),
-            Seeder::new(node, share_info, verified_rx),
-            OneShot,
-        );
+            let fake_key =
+                TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+                    .expect("key");
 
-        // First, send a verified piece notification with confirmation it's applied
-        let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
-        verified_tx.send(piece_state).expect("send verified piece");
+            // Create share info
+            let share_info = ShareInfo {
+                key: fake_key,
+                header: test_header(),
+                want_index: index,
+                want_index_digest: [0u8; 32],
+                root: root_dir,
+            };
 
-        // Have map should be updated. Retry with a backoff delay to allow
-        // select! to pick up on the request.
-        let mut confirmed_have_map = false;
-        for i in 0..10 {
+            // Create cancellation token
+            let cancel = CancellationToken::new();
+            let mut operator = Operator::new(
+                cancel.clone(),
+                Seeder::new(node, share_info, verified_rx),
+                OneShot,
+            );
+
+            // First, send a verified piece notification with confirmation it's applied
+            let piece_state = PieceState::new(0, 0, 0, PIECE_SIZE_BLOCKS, PIECE_SIZE_BLOCKS - 1);
+            verified_tx.send(piece_state).expect("send verified piece");
+
+            // Have map should be updated. Retry with a backoff delay to allow
+            // select! to pick up on the request.
+            let mut confirmed_have_map = false;
             let req = Request::HaveMap {
                 response_tx: ResponseChannel::default(),
             };
@@ -268,48 +281,46 @@ mod tests {
                 Response::HaveMap(have_map) => {
                     if !have_map.is_empty() {
                         confirmed_have_map = true;
-                        break;
                     }
                 }
             }
-            time::sleep(Duration::from_secs(i)).await;
-        }
-        assert!(confirmed_have_map, "confirm verified block");
+            assert!(confirmed_have_map, "confirm verified block");
 
-        // Send a block request for the verified piece
-        let block_req = BlockRequest { piece: 0, block: 0 };
-        let req = proto::Request::BlockRequest(block_req);
-        let encoded_req = req.encode().expect("encode request");
-        let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
+            // Send a block request for the verified piece
+            let block_req = BlockRequest { piece: 0, block: 0 };
+            let req = proto::Request::BlockRequest(block_req);
+            let encoded_req = req.encode().expect("encode request");
+            let app_call = VeilidAppCall::new(None, None, encoded_req, 42u64.into());
 
-        update_tx
-            .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
-            .expect("send app call");
-        time::timeout(Duration::from_secs(10), replied_rx.recv())
-            .await
-            .expect("confirm app_call");
+            update_tx
+                .send(VeilidUpdate::AppCall(Box::new(app_call.clone())))
+                .expect("send app call");
+            time::timeout(Duration::from_secs(10), replied_rx.recv())
+                .await
+                .expect("confirm app_call");
 
-        // Cancel the seeder
-        cancel.cancel();
-        operator.join().await.expect_err("cancelled");
+            // Cancel the seeder
+            cancel.cancel();
+            operator.join().await.expect_err("cancelled");
 
-        // Verify reply_block_contents was called
-        assert!(
-            *reply_contents_called.lock().unwrap(),
-            "reply_block_contents should be called"
-        );
+            // Verify reply_block_contents was called
+            assert!(
+                *reply_contents_called.lock().unwrap(),
+                "reply_block_contents should be called"
+            );
 
-        // Verify the data returned matches what we expect
-        let reply_data = reply_contents_data.lock().unwrap();
-        assert_eq!(
-            reply_data.len(),
-            BLOCK_SIZE_BYTES,
-            "should return full block"
-        );
-        assert!(
-            reply_data.iter().all(|&b| b == BLOCK_DATA),
-            "all bytes should match the pattern"
-        );
+            // Verify the data returned matches what we expect
+            let reply_data = reply_contents_data.lock().unwrap();
+            assert_eq!(
+                reply_data.len(),
+                BLOCK_SIZE_BYTES,
+                "should return full block"
+            );
+            assert!(
+                reply_data.iter().all(|&b| b == BLOCK_DATA),
+                "all bytes should match the pattern"
+            );
+        });
     }
 
     #[tokio::test]
