@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 use tracing::warn;
-use veilid_core::{RoutingContext, VeilidConfig, VeilidUpdate};
+use veilid_core::{RoutingContext, Sequencing, VeilidConfig, VeilidUpdate};
 
 pub use error::{is_cancelled, is_unrecoverable, CancelError, Error, Result};
 pub use node::{Node, Veilid};
@@ -65,5 +65,6 @@ pub async fn new_routing_context_from_config(
     api.attach().await?;
 
     let routing_context = api.routing_context()?;
+    let routing_context = routing_context.with_sequencing(Sequencing::NoPreference);
     Ok((routing_context, update_rx))
 }
