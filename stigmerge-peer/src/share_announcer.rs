@@ -1,10 +1,10 @@
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use anyhow::Context;
 use stigmerge_fileindex::Index;
-use tokio::select;
+use tokio::{select, time::{interval, MissedTickBehavior}};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, trace};
 use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::{
@@ -112,6 +112,8 @@ pub enum Response {
     },
 }
 
+const REANNOUNCE_INTERVAL_SECS: u64 = 600;
+
 impl<P: Node> Actor for ShareAnnouncer<P> {
     type Request = Request;
     type Response = Response;
@@ -123,10 +125,14 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
     ) -> Result<()> {
         let mut update_rx = self.node.subscribe_veilid_update();
         let mut public_internet_ready = false;
+        let mut reannounce_interval = interval(Duration::from_secs(REANNOUNCE_INTERVAL_SECS));
+        reannounce_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        reannounce_interval.reset();
         loop {
             match self.share {
                 None => {
                     self.announce().await?;
+                    reannounce_interval.reset();
                 }
                 Some(ShareAnnounce { target, .. }) => {
                     select! {
@@ -142,9 +148,11 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                                 let update = res.with_context(|| format!("share_announcer: receive veilid update"))?;
                                 match update {
                                     VeilidUpdate::RouteChange(route_change) => {
+                                        trace!("current route {route_id}, dead routes {:?}", route_change.dead_routes);
                                         if route_change.dead_routes.contains(route_id) {
                                             info!("route changed, reannouncing");
                                             self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
+                                            reannounce_interval.reset();
                                         }
                                     },
                                     VeilidUpdate::Attachment(veilid_state_attachment) => {
@@ -152,6 +160,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                                             if veilid_state_attachment.public_internet_ready {
                                                 info!("attachment public internet ready, reannouncing");
                                                 self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
+                                                reannounce_interval.reset();
                                             }
                                             public_internet_ready = veilid_state_attachment.public_internet_ready;
                                         }
@@ -162,6 +171,10 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                                     _ => {}
                                 }
                             }
+                        }
+                        _ = reannounce_interval.tick() => {
+                            info!("reannouncing after {:?}", reannounce_interval.period());
+                            self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
                         }
                     }
                 }
