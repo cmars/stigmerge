@@ -79,10 +79,10 @@ impl App {
         let res = self.run_with_node(cancel, node.clone()).await;
         trace!("run_with_node completed");
         if let Err(e) = node.shutdown().await {
-            warn!("{e}");
+            warn!(err = ?e);
         }
         if let Err(e) = res {
-            error!("{e}");
+            error!(err = ?e);
             return Err(e);
         }
         Ok(())

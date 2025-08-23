@@ -6,12 +6,14 @@ use std::{
 use anyhow::Context;
 use tokio::{select, sync::broadcast};
 use tokio_utils::MultiRateLimiter;
-use tracing::{debug, trace, warn};
-use veilid_core::{Target, Timestamp, TimestampDuration, TypedRecordKey, VeilidUpdate};
+use tracing::{trace, warn};
+use veilid_core::{
+    Target, Timestamp, TimestampDuration, TypedRecordKey, VeilidAPIError, VeilidUpdate,
+};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::Unrecoverable,
+    error::{as_veilid, Unrecoverable},
     proto::{self, Decoder},
     share_resolver,
     types::ShareInfo,
@@ -93,9 +95,12 @@ impl<N: Node> PeerGossip<N> {
                     self.advertisements
                         .insert((known_peer.to_owned(), key.to_owned()), Timestamp::now());
                 }
-                Err(e) => {
-                    warn!("advertise {known_peer} to {key}: {e}");
-                }
+                Err(e) => match as_veilid(&e) {
+                    Some(VeilidAPIError::InvalidTarget { message }) => {
+                        trace!(?known_peer, ?key, err = ?message, "advertise peer");
+                    }
+                    _ => warn!(?known_peer, ?key, err = ?e, "advertise peer"),
+                },
             }
         }
         Ok(())
@@ -203,7 +208,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         res => res
                     }.context(Unrecoverable::new("receive share target update"))?;
-                    debug!("share target update for {key}: {target:?}");
+                    trace!(?key, ?target, "share target update");
                     self.advertise_peers(&key, &target).await?;
                 }
                 res = update_rx.recv() => {
@@ -213,7 +218,8 @@ impl<N: Node> Actor for PeerGossip<N> {
                             let req = proto::Request::decode(veilid_app_message.message())?;
                             match req {
                                 proto::Request::AdvertisePeer(peer_req) => {
-                                    debug!("discovered advertised peer {}", peer_req.key);
+                                    trace!(peer_key = ?peer_req.key, "receive advertised peer");
+                                    self.add_known_peer(&peer_req.key).await?;
                                     self.share_resolver_tx.send_async(share_resolver::Request::Index{
                                         response_tx: self.share_resolver_resp_tx.clone().into(),
                                         key: peer_req.key,
@@ -237,7 +243,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                             trace!("announce peer {peer_key} subkey {subkey}");
                         }
                         Err(e) => {
-                            warn!("announce peer {peer_key} subkey {subkey}: {e}");
+                            warn!(?peer_key, ?subkey, err = ?e, "announce peer");
                             self.announce_request_tx.send_async((peer_key, subkey)).await.context(Unrecoverable::new("requeue announce peer"))?;
                         }
                     }
@@ -249,7 +255,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                             trace!("resolve peer {peer_key}");
                         }
                         Err(e) => {
-                            warn!("resolve peer {peer_key}: {e}");
+                            warn!(?peer_key, err = ?e, "resolve peer");
                             self.resolve_request_tx.send_async(peer_key).await.context(Unrecoverable::new("requeue announce peer"))?;
                         }
                     }

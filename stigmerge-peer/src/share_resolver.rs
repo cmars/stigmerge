@@ -4,7 +4,7 @@ use anyhow::Context;
 use stigmerge_fileindex::Index;
 use tokio::{select, sync::broadcast};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, trace, warn};
+use tracing::{trace, warn};
 use veilid_core::{Target, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
@@ -246,7 +246,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                                 key: ch.key,
                                 prior_target: None
                             }).await {
-                                warn!("Failed to handle value change: {}", e);
+                                warn!(err = ?e, "watch value change");
                             }
                         }
                         VeilidUpdate::Shutdown => {
@@ -326,7 +326,7 @@ impl<P: Node> Actor for ShareResolver<P> {
 
         if let Some(valid_key) = resp.valid_key() {
             // Valid usable shares are watched.
-            info!("watch: share key {valid_key}");
+            trace!("watch: share key {valid_key}");
             self.watching.insert(*valid_key);
             self.node
                 .watch(*valid_key, ValueSubkeyRangeSet::single(0))

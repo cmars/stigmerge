@@ -8,7 +8,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, instrument, trace, warn, Level};
 use veilid_core::VeilidUpdate;
 
 use crate::{
@@ -301,6 +301,7 @@ impl ConnectionState {
     pub(super) fn disconnect(&self) {
         self.connected.send_if_modified(|val| {
             if *val {
+                info!("disconnected");
                 *val = false;
                 true
             } else {
@@ -312,6 +313,7 @@ impl ConnectionState {
     pub(super) fn connect(&self) {
         self.connected.send_if_modified(|val| {
             if !*val {
+                info!("connected");
                 *val = true;
                 true
             } else {
@@ -333,6 +335,7 @@ impl<N: Node> WithVeilidConnection<N> {
         }
     }
 
+    #[instrument(skip_all)]
     async fn disconnected<'a>(
         &mut self,
         cancel: CancellationToken,
@@ -376,6 +379,9 @@ impl<
         N: Node,
     > Runner<A> for WithVeilidConnection<N>
 {
+    #[instrument(skip_all, err(level = Level::TRACE), fields(
+        actor = %std::any::type_name::<A>(),
+    ))]
     async fn run(
         &mut self,
         actor_inner: A,
@@ -415,21 +421,21 @@ impl<
                 }
                 join_res = actor_task => {
                     let res = join_res?;
-                    warn!("actor run: {:?}", res);
+                    trace!(?res, "actor task completed");
                     match res {
                         Ok(()) => {
-                            info!("actor run: ok");
+                            trace!("actor run: ok");
                             return Ok(());
                         }
                         Err(e) => {
-                            error!("{:?}", e);
+                            error!(err = ?e);
                             if e.is_transient() {
                                 sleep(exp_backoff.next_backoff().unwrap_or(exp_backoff.max_interval)).await;
                                 retries += 1;
                                 if retries < MAX_TRANSIENT_RETRIES {
                                     continue;
                                 }
-                                warn!("too many transient errors");
+                                warn!(err = ?e, retries, "too many transient errors");
                             } else if is_unrecoverable(&e) {
                                 cancel.cancel();
                                 return Err(e);

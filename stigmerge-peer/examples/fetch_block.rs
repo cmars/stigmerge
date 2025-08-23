@@ -181,7 +181,7 @@ async fn main() -> std::result::Result<(), Error> {
                 let delay = fetch_backoff
                     .next_backoff()
                     .ok_or(anyhow::anyhow!("out of retries"))?;
-                warn!("Failed to fetch block: {}, delaying {:?}", err, delay);
+                warn!(?err, ?delay, "failed to fetch block");
                 tokio::time::sleep(delay).await;
             }
         }

@@ -244,7 +244,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                         if let Some(have_map_ref) = header.have_map() {
                             self.have_to_share_map.remove(have_map_ref.key());
                             if let Err(e) = self.node.cancel_watch(have_map_ref.key()).await {
-                                warn!("cancel watch: {}", e);
+                                warn!(err = ?e, "cancel watch");
                             }
                         }
                         (

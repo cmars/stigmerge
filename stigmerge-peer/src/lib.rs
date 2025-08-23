@@ -55,7 +55,7 @@ pub async fn new_routing_context_from_config(
     // Configure Veilid core
     let update_callback = Arc::new(move |change: VeilidUpdate| {
         if let Err(e) = update_tx.send(change) {
-            warn!("dispatching veilid update: {:?}", e);
+            warn!(err = ?e, "dispatching veilid update");
         }
     });
 
