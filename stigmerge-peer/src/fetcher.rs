@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -8,7 +9,7 @@ use tokio::sync::{broadcast, watch, MutexGuard};
 use tokio::time::{interval, sleep};
 use tokio::{select, try_join};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, enabled, error, info, trace, warn, Level};
+use tracing::{enabled, error, info, instrument, trace, warn, Level};
 use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::actor::{ConnectionState, ConnectionStateHandle, ResponseChannel};
@@ -61,6 +62,25 @@ pub enum State {
     Planning { have_index: Index },
     Fetching,
     Done,
+}
+
+impl Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            State::Indexing => write!(f, "Indexing"),
+            State::Planning { have_index } => match have_index.files().len() {
+                0 => write!(f, "Planning"),
+                n => write!(
+                    f,
+                    "Planning {}{}",
+                    have_index.files()[0].path().to_str().unwrap_or(""),
+                    if n > 1 { "..." } else { "" },
+                ),
+            },
+            State::Fetching => write!(f, "Fetching"),
+            State::Done => write!(f, "Done"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +140,7 @@ impl<N: Node> Fetcher<N> {
         self.status_rx.clone()
     }
 
+    #[instrument(skip_all)]
     pub async fn run(
         mut self,
         cancel: CancellationToken,
@@ -141,6 +162,7 @@ impl<N: Node> Fetcher<N> {
             };
 
             let cancel_iter = cancel.clone();
+            info!(state = %self.state);
             let res = match self.state {
                 State::Indexing => self.index(cancel_iter).await,
                 State::Planning { ref have_index } => {
@@ -156,7 +178,7 @@ impl<N: Node> Fetcher<N> {
             match res {
                 Ok(state) => self.state = state,
                 Err(e) => {
-                    debug!("{e}");
+                    error!(err = ?e);
                     if is_cancelled(&e) {
                         break;
                     }
@@ -171,13 +193,11 @@ impl<N: Node> Fetcher<N> {
                         if retries < crate::actor::MAX_TRANSIENT_RETRIES {
                             continue;
                         }
-                        warn!("too many transient errors");
+                        warn!(err = ?e, retries, "too many transient errors");
                     } else if is_unrecoverable(&e) {
                         cancel.cancel();
-                        error!("{e}");
+                        error!(err = ?e, "unrecoverable");
                         run_res = Err(e);
-                        break;
-                    } else if is_cancelled(&e) {
                         break;
                     }
                     {
@@ -196,8 +216,8 @@ impl<N: Node> Fetcher<N> {
         run_res
     }
 
+    #[instrument(skip_all, err)]
     async fn index(&mut self, cancel: CancellationToken) -> Result<State> {
-        debug!("indexing");
         let indexer = Indexer::from_wanted(&self.share.want_index)
             .await
             .context(Unrecoverable::new("indexer"))?;
@@ -246,16 +266,19 @@ impl<N: Node> Fetcher<N> {
         status_task_cancel.cancel();
         match status_task.await {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => debug!("status progress: {e}"),
-            Err(e) => debug!("status progress task: {e}"),
+            Ok(Err(e)) => warn!("status progress: {e}"),
+            Err(e) => warn!("status progress task: {e}"),
         };
 
         // Ready for planning
         Ok(State::Planning { have_index })
     }
 
+    #[instrument(skip_all, err, fields(
+        root = ?have_index.root(),
+        file_names = ?have_index.files().iter().map(|f| f.path()).collect::<Vec<&std::path::Path>>(),
+    ))]
     async fn plan(&mut self, cancel: CancellationToken, have_index: Index) -> Result<State> {
-        debug!("planning");
         let diff = self.share.want_index.diff(&have_index);
         let mut want_length = 0;
         let total_length = self.share.want_index.payload().length();
@@ -317,12 +340,12 @@ impl<N: Node> Fetcher<N> {
         })
     }
 
+    #[instrument(skip_all, err)]
     async fn fetch(
         &mut self,
         cancel: CancellationToken,
         mut conn_rx: watch::Receiver<bool>,
     ) -> Result<State> {
-        debug!("fetching");
         let total_pieces = self
             .share
             .want_index
@@ -348,7 +371,7 @@ impl<N: Node> Fetcher<N> {
                 }
                 res = self.clients.share_target_rx.recv() => {
                     let (key, target) = res.context(Unrecoverable::new("receive share target update"))?;
-                    debug!("share target update for {key}: {target:?}");
+                    trace!("share target update for {key}: {target:?}");
                     match self.peer_tracker.update(key, target.to_owned()) {
                         None => {
                             // Never seen this peer before, advertise ourselves to it
@@ -356,7 +379,7 @@ impl<N: Node> Fetcher<N> {
                             if let Err(e) = self.node.request_advertise_peer(
                                 &target,
                                 &self.share.key).await.with_context(|| format!("advertising our share to new peer")) {
-                                    warn!("{e}");
+                                    warn!(err = ?e);
                             }
                             refresh_routes_interval.reset();
                         }
@@ -448,7 +471,7 @@ impl<N: Node> Fetcher<N> {
                         Ok(Some((share_key, target))) => Some((share_key, target)),
                         Ok(None) => None,
                         Err(e) => {
-                            warn!("choose share target: {}", e);
+                            warn!(err = ?e, "choosing share target");
                             None
                         }
                     } {
@@ -521,6 +544,7 @@ impl<N: Node> Fetcher<N> {
         }
     }
 
+    #[instrument(skip_all, err)]
     async fn refresh_share_targets(&mut self) -> Result<()> {
         let share_keys = self
             .peer_tracker
@@ -528,7 +552,7 @@ impl<N: Node> Fetcher<N> {
             .map(|k| k.to_owned())
             .collect::<Vec<_>>();
         for share_key in share_keys {
-            debug!("refresh target for share key {share_key}");
+            trace!("refresh target for share key {share_key}");
             let resp = self
                 .clients
                 .share_resolver
@@ -544,13 +568,14 @@ impl<N: Node> Fetcher<N> {
                     self.peer_tracker.update(share_key.to_owned(), target);
                 }
                 other => {
-                    warn!("unexpected share resolver response: {:?}", other);
+                    warn!(response = ?other, "unexpected share resolver response");
                 }
             }
         }
         Ok(())
     }
 
+    #[instrument(skip_all, err)]
     async fn join(self) -> Result<()> {
         try_join!(
             self.clients.piece_verifier.join(),
@@ -561,12 +586,12 @@ impl<N: Node> Fetcher<N> {
         Ok(())
     }
 
+    #[instrument(skip_all, err)]
     async fn disconnected<'a>(
         &mut self,
         cancel: CancellationToken,
         state: MutexGuard<'a, ConnectionState>,
     ) -> Result<()> {
-        let mut reset_interval = interval(Duration::from_secs(120));
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -578,21 +603,17 @@ impl<N: Node> Fetcher<N> {
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
                             if veilid_state_attachment.public_internet_ready {
-                                info!("connected: {:?}", veilid_state_attachment);
+                                info!(?veilid_state_attachment, "connected");
                                 state.connect();
                                 return Ok(())
                             }
-                            info!("disconnected: {:?}", veilid_state_attachment);
+                            info!(?veilid_state_attachment);
                         }
                         VeilidUpdate::Shutdown => {
                             cancel.cancel();
                         }
                         _ => {}
                     }
-                }
-                _ = reset_interval.tick() => {
-                    warn!("resetting connection");
-                    self.node.reset().await?;
                 }
             }
         }

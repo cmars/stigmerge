@@ -3,7 +3,8 @@ use std::{cmp::min, path::Path, sync::Arc};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{trace, warn};
 use veilid_core::{
-    DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Sequencing, Stability, Target, ValueData, ValueSubkeyRangeSet, VeilidAPIError, VeilidUpdate, VALID_CRYPTO_KINDS
+    DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Sequencing, Stability,
+    Target, ValueData, ValueSubkeyRangeSet, VeilidAPIError, VeilidUpdate, VALID_CRYPTO_KINDS,
 };
 
 use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
@@ -283,11 +284,14 @@ impl Node for Veilid {
         let rc = self.routing_context.read().await;
         // Serialize index to index_bytes
         let index_bytes = index.encode()?;
-        let (announce_route, route_data) = rc.api().new_custom_private_route(
-            &VALID_CRYPTO_KINDS,
-            Stability::LowLatency,
-            Sequencing::NoPreference,
-        ).await?;
+        let (announce_route, route_data) = rc
+            .api()
+            .new_custom_private_route(
+                &VALID_CRYPTO_KINDS,
+                Stability::LowLatency,
+                Sequencing::NoPreference,
+            )
+            .await?;
         let mut header = Header::from_index(index, index_bytes.as_slice(), route_data.as_slice());
 
         let (have_map_key, have_map_subkeys) =
@@ -323,11 +327,14 @@ impl Node for Veilid {
         trace!(key = key.to_string());
         let rc = self.routing_context.read().await;
         self.release_prior_route(&rc, prior_route).await;
-        let (announce_route, route_data) = rc.api().new_custom_private_route(
-            &VALID_CRYPTO_KINDS,
-            Stability::LowLatency,
-            Sequencing::NoPreference,
-        ).await?;
+        let (announce_route, route_data) = rc
+            .api()
+            .new_custom_private_route(
+                &VALID_CRYPTO_KINDS,
+                Stability::LowLatency,
+                Sequencing::NoPreference,
+            )
+            .await?;
         let header = header.with_route_data(route_data);
         self.write_header(&rc, &key, &header).await?;
         Ok((Target::PrivateRoute(announce_route), header))

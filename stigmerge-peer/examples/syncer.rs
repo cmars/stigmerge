@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
     let res = run(node.clone()).await;
     let _ = node.shutdown().await;
     if let Err(e) = res {
-        error!(err = e.to_string());
+        error!(err = ?e);
         return Err(e);
     }
     Ok(())

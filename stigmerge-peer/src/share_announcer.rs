@@ -2,7 +2,10 @@ use std::{fmt, time::Duration};
 
 use anyhow::Context;
 use stigmerge_fileindex::Index;
-use tokio::{select, time::{interval, MissedTickBehavior}};
+use tokio::{
+    select,
+    time::{interval, MissedTickBehavior},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, trace};
 use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
