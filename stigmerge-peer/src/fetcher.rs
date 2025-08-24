@@ -13,7 +13,7 @@ use tracing::{enabled, error, info, instrument, trace, warn, Level};
 use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::actor::{ConnectionState, ConnectionStateHandle, ResponseChannel};
-use crate::error::{CancelError, Transient, Unrecoverable};
+use crate::error::{is_lagged, CancelError, Transient, Unrecoverable};
 use crate::peer_tracker::PeerTracker;
 use crate::types::{FileBlockFetch, PieceState, ShareInfo};
 use crate::{actor::Operator, have_announcer};
@@ -370,6 +370,7 @@ impl<N: Node> Fetcher<N> {
                     }
                 }
                 res = self.clients.share_target_rx.recv() => {
+                    if is_lagged(&res) { continue; }
                     let (key, target) = res.context(Unrecoverable::new("receive share target update"))?;
                     trace!("share target update for {key}: {target:?}");
                     match self.peer_tracker.update(key, target.to_owned()) {
@@ -599,6 +600,7 @@ impl<N: Node> Fetcher<N> {
                     return Err(CancelError.into())
                 }
                 res = self.update_rx.recv() => {
+                    if is_lagged(&res) { continue; }
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {

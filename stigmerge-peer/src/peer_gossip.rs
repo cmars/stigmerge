@@ -13,7 +13,7 @@ use veilid_core::{
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::{as_veilid, Unrecoverable},
+    error::{as_veilid, is_lagged, Unrecoverable},
     proto::{self, Decoder},
     share_resolver,
     types::ShareInfo,
@@ -204,6 +204,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                     self.handle_request(req).await?;
                 }
                 res = self.share_target_rx.recv() => {
+                    if is_lagged(&res) { continue; }
                     let (key, target) = match res {
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         res => res
@@ -212,6 +213,7 @@ impl<N: Node> Actor for PeerGossip<N> {
                     self.advertise_peers(&key, &target).await?;
                 }
                 res = update_rx.recv() => {
+                    if is_lagged(&res) { continue; }
                     let update = res.context(Unrecoverable::new("receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppMessage(veilid_app_message) => {

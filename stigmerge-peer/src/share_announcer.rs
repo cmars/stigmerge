@@ -12,7 +12,7 @@ use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::{CancelError, Unrecoverable},
+    error::{is_lagged, CancelError, Unrecoverable},
     proto::Header,
     Node, Result,
 };
@@ -147,6 +147,7 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                             self.handle_request(req).await?;
                         }
                         res = update_rx.recv() => {
+                            if is_lagged(&res) { continue; }
                             if let Target::PrivateRoute(ref route_id) = target {
                                 let update = res.with_context(|| format!("share_announcer: receive veilid update"))?;
                                 match update {

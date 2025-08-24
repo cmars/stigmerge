@@ -1,5 +1,6 @@
 use std::{fmt, io};
 
+use tokio::sync::broadcast;
 use veilid_core::VeilidAPIError;
 
 use crate::proto;
@@ -114,6 +115,13 @@ pub fn is_proto(e: &Error) -> bool {
 pub fn is_io(e: &Error) -> bool {
     match as_io(e) {
         Some(_) => true,
+        _ => false,
+    }
+}
+
+pub fn is_lagged<T>(result: &std::result::Result<T, broadcast::error::RecvError>) -> bool {
+    match result {
+        Err(broadcast::error::RecvError::Lagged(_)) => true,
         _ => false,
     }
 }

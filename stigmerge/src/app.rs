@@ -5,7 +5,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use stigmerge_peer::{
     actor::ConnectionState,
     fetcher::{self},
-    new_routing_context,
+    is_lagged, new_routing_context,
     node::{Node, Veilid},
     CancelError,
 };
@@ -166,6 +166,9 @@ impl App {
                         return Err(CancelError.into());
                     }
                     res = events.recv() => {
+                        if is_lagged(&res) {
+                            continue;
+                        }
                         let fetcher_status = match res? {
                             Event::FetcherStatus(status) => status,
                             _ => continue,
@@ -225,6 +228,7 @@ impl App {
                         return Err(CancelError.into());
                     }
                     res = events.recv() => {
+                        if is_lagged(&res) { continue; }
                         let (index_progress, verify_progress) = match res? {
                             Event::SeederLoading{ index_progress, verify_progress } => {
                                 (index_progress, verify_progress)
@@ -270,6 +274,7 @@ impl App {
                         return Err(CancelError.into());
                     }
                     res = events.recv() => {
+                        if is_lagged(&res) { continue; }
                         let share_info = match res? {
                             Event::ShareInfo(share_info) => share_info,
                             _ => continue,

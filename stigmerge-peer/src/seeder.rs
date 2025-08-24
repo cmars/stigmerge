@@ -14,7 +14,7 @@ use veilid_core::VeilidUpdate;
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::{CancelError, Unrecoverable},
+    error::{is_lagged, CancelError, Unrecoverable},
     piece_map::PieceMap,
     proto::{self, BlockRequest, Decoder},
     types::{PieceState, ShareInfo},
@@ -121,6 +121,7 @@ impl<P: Node> Actor for Seeder<P> {
                     self.handle_request(req).await?;
                 }
                 res = self.verified_rx.recv() => {
+                    if is_lagged(&res) { continue; }
                     let piece_state = res.context(Unrecoverable::new("receive verified piece update"))?;
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }
