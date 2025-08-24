@@ -8,7 +8,7 @@ use veilid_core::{TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
-    error::CancelError,
+    error::{is_lagged, CancelError},
     piece_map::PieceMap,
     Node, Result,
 };
@@ -153,6 +153,7 @@ impl<P: Node> Actor for HaveResolver<P> {
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
+                    if is_lagged(&res) { continue; }
                     let update = res.with_context(|| format!("have_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {

@@ -10,7 +10,7 @@ use veilid_core::{Target, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
     content_addressable::ContentAddressable,
-    error::{CancelError, Unrecoverable},
+    error::{is_lagged, CancelError, Unrecoverable},
     proto::{Digest, Header},
     Node, Result,
 };
@@ -233,6 +233,7 @@ impl<P: Node> Actor for ShareResolver<P> {
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
+                    if is_lagged(&res) { continue; }
                     let update = res.with_context(|| format!("share_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {

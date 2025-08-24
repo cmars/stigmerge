@@ -12,7 +12,7 @@ use tracing::{error, info, instrument, trace, warn, Level};
 use veilid_core::VeilidUpdate;
 
 use crate::{
-    error::{CancelError, Result, Transient},
+    error::{is_lagged, CancelError, Result, Transient},
     is_cancelled, is_unrecoverable, Error, Node,
 };
 
@@ -348,6 +348,7 @@ impl<N: Node> WithVeilidConnection<N> {
                     return Err(CancelError.into())
                 }
                 res = self.update_rx.recv() => {
+                    if is_lagged(&res) { continue; }
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
@@ -455,6 +456,7 @@ impl<
                     }
                 }
                 res = self.update_rx.recv() => {
+                    if is_lagged(&res) { continue; }
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
