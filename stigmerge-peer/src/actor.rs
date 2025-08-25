@@ -348,7 +348,10 @@ impl<N: Node> WithVeilidConnection<N> {
                     return Err(CancelError.into())
                 }
                 res = self.update_rx.recv() => {
-                    if is_lagged(&res) { continue; }
+                    if is_lagged(&res) {
+                        warn!("update_rx channel lagged in disconnected method");
+                        continue;
+                    }
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {
@@ -456,7 +459,10 @@ impl<
                     }
                 }
                 res = self.update_rx.recv() => {
-                    if is_lagged(&res) { continue; }
+                    if is_lagged(&res) {
+                        warn!("update_rx channel lagged in run method");
+                        continue;
+                    }
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {

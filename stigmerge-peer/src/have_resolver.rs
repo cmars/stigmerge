@@ -153,7 +153,10 @@ impl<P: Node> Actor for HaveResolver<P> {
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    if is_lagged(&res) { continue; }
+                    if is_lagged(&res) {
+                        warn!("update_rx channel lagged in have_resolver");
+                        continue;
+                    }
                     let update = res.with_context(|| format!("have_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {

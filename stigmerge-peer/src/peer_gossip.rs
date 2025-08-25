@@ -204,7 +204,10 @@ impl<N: Node> Actor for PeerGossip<N> {
                     self.handle_request(req).await?;
                 }
                 res = self.share_target_rx.recv() => {
-                    if is_lagged(&res) { continue; }
+                    if is_lagged(&res) {
+                        warn!("share_target_rx channel lagged in peer_gossip");
+                        continue;
+                    }
                     let (key, target) = match res {
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         res => res
@@ -213,7 +216,10 @@ impl<N: Node> Actor for PeerGossip<N> {
                     self.advertise_peers(&key, &target).await?;
                 }
                 res = update_rx.recv() => {
-                    if is_lagged(&res) { continue; }
+                    if is_lagged(&res) {
+                        warn!("update_rx channel lagged in peer_gossip");
+                        continue;
+                    }
                     let update = res.context(Unrecoverable::new("receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppMessage(veilid_app_message) => {

@@ -7,7 +7,7 @@ use tokio::{
     time::{interval, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
 
 use crate::{
@@ -147,7 +147,10 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
                             self.handle_request(req).await?;
                         }
                         res = update_rx.recv() => {
-                            if is_lagged(&res) { continue; }
+                            if is_lagged(&res) {
+                                warn!("update_rx channel lagged in share_announcer");
+                                continue;
+                            }
                             if let Target::PrivateRoute(ref route_id) = target {
                                 let update = res.with_context(|| format!("share_announcer: receive veilid update"))?;
                                 match update {

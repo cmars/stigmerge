@@ -167,6 +167,7 @@ impl App {
                     }
                     res = events.recv() => {
                         if is_lagged(&res) {
+                            warn!("events channel lagged in fetch progress handler");
                             continue;
                         }
                         let fetcher_status = match res? {
@@ -228,7 +229,10 @@ impl App {
                         return Err(CancelError.into());
                     }
                     res = events.recv() => {
-                        if is_lagged(&res) { continue; }
+                        if is_lagged(&res) {
+                            warn!("events channel lagged in seed indexer progress handler");
+                            continue;
+                        }
                         let (index_progress, verify_progress) = match res? {
                             Event::SeederLoading{ index_progress, verify_progress } => {
                                 (index_progress, verify_progress)
@@ -274,7 +278,10 @@ impl App {
                         return Err(CancelError.into());
                     }
                     res = events.recv() => {
-                        if is_lagged(&res) { continue; }
+                        if is_lagged(&res) {
+                            warn!("events channel lagged in state file handler");
+                            continue;
+                        }
                         let share_info = match res? {
                             Event::ShareInfo(share_info) => share_info,
                             _ => continue,
