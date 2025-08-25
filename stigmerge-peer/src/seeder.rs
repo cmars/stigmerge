@@ -9,7 +9,7 @@ use tokio::{
     sync::broadcast,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::trace;
+use tracing::{trace, warn};
 use veilid_core::VeilidUpdate;
 
 use crate::{
@@ -121,7 +121,10 @@ impl<P: Node> Actor for Seeder<P> {
                     self.handle_request(req).await?;
                 }
                 res = self.verified_rx.recv() => {
-                    if is_lagged(&res) { continue; }
+                    if is_lagged(&res) {
+                        warn!("verified_rx channel lagged in seeder");
+                        continue;
+                    }
                     let piece_state = res.context(Unrecoverable::new("receive verified piece update"))?;
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }

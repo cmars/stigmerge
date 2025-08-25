@@ -370,7 +370,10 @@ impl<N: Node> Fetcher<N> {
                     }
                 }
                 res = self.clients.share_target_rx.recv() => {
-                    if is_lagged(&res) { continue; }
+                    if is_lagged(&res) {
+                        warn!("share_target_rx channel lagged in fetch method");
+                        continue;
+                    }
                     let (key, target) = res.context(Unrecoverable::new("receive share target update"))?;
                     trace!("share target update for {key}: {target:?}");
                     match self.peer_tracker.update(key, target.to_owned()) {
@@ -600,7 +603,10 @@ impl<N: Node> Fetcher<N> {
                     return Err(CancelError.into())
                 }
                 res = self.update_rx.recv() => {
-                    if is_lagged(&res) { continue; }
+                    if is_lagged(&res) {
+                        warn!("update_rx channel lagged in disconnected method");
+                        continue;
+                    }
                     let update = res?;
                     match update {
                         VeilidUpdate::Attachment(veilid_state_attachment) => {

@@ -233,7 +233,10 @@ impl<P: Node> Actor for ShareResolver<P> {
                     self.handle_request(req).await?;
                 }
                 res = update_rx.recv() => {
-                    if is_lagged(&res) { continue; }
+                    if is_lagged(&res) {
+                        warn!("update_rx channel lagged in share_resolver");
+                        continue;
+                    }
                     let update = res.with_context(|| format!("share_resolver: receive veilid update"))?;
                     match update {
                         VeilidUpdate::ValueChange(ch) => {
