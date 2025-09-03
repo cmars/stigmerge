@@ -54,11 +54,33 @@ pub fn as_io(e: &Error) -> Option<&io::Error> {
 
 pub fn is_route_invalid(e: &Error) -> bool {
     match as_veilid(e) {
-        Some(&VeilidAPIError::InvalidTarget { .. }) => true,
-        Some(e) => {
-            let msg = e.to_string();
-            msg.contains("could not get remote private route") || msg.contains("Invalid target")
-        }
+        Some(err) => is_veilid_route_invalid(err),
+        None => false,
+    }
+}
+
+pub fn is_veilid_route_invalid(err: &VeilidAPIError) -> bool {
+    match err {
+        VeilidAPIError::InvalidTarget { .. } => true,
+        VeilidAPIError::Generic { ref message } => match message.as_str() {
+            "can't reach private route any more" => true,
+            "allocated route failed to test" => true,
+            "allocated route could not be tested" => true,
+            _ => false,
+        },
+        VeilidAPIError::TryAgain { ref message } => match message.as_str() {
+            "unable to allocate route until we have a valid PublicInternet network class" => true,
+            "not enough nodes to construct route at this time" => true,
+            "unable to find unique route at this time" => true,
+            "unable to assemble route until we have published peerinfo" => true,
+            _ => false,
+        },
+        VeilidAPIError::Internal { ref message } => match message.as_str() {
+            "no best key to test allocated route" => true,
+            "peer info should exist for route but doesn't" => true,
+            "route id does not exist" => true,
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -134,25 +156,17 @@ pub trait Transient {
 
 impl Transient for VeilidAPIError {
     fn is_transient(&self) -> bool {
+        if is_veilid_route_invalid(self) {
+            return false;
+        }
+
         match self {
             // Errors conditional on changing local or remote node states,
             // network conditions and other transient conditions.
             &VeilidAPIError::Timeout => true,
             &VeilidAPIError::TryAgain { .. } => true,
-            &VeilidAPIError::NoConnection { .. } => true,
-            &VeilidAPIError::NotInitialized => true,
             &VeilidAPIError::KeyNotFound { .. } => true,
-            &VeilidAPIError::Internal { .. } => true,
-
-            // These errors are not likely to be transient in nature.
-            &VeilidAPIError::Generic { .. } => false,
-            &VeilidAPIError::Unimplemented { .. } => false,
-            &VeilidAPIError::ParseError { .. } => false,
-            &VeilidAPIError::InvalidArgument { .. } => false,
-            &VeilidAPIError::MissingArgument { .. } => false,
-            &VeilidAPIError::AlreadyInitialized => false,
-            &VeilidAPIError::Shutdown => false,
-            &VeilidAPIError::InvalidTarget { .. } => false,
+            _ => false,
         }
     }
 }
