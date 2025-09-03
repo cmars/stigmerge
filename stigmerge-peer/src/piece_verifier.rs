@@ -26,9 +26,11 @@ pub struct PieceVerifier {
     verified_rx: broadcast::Receiver<PieceState>,
 }
 
+const PIECE_VERIFIER_CAPACITY: usize = 65536;
+
 impl PieceVerifier {
     pub async fn new(index: Arc<RwLock<Index>>) -> PieceVerifier {
-        let (verified_tx, verified_rx) = broadcast::channel(32768);
+        let (verified_tx, verified_rx) = broadcast::channel(PIECE_VERIFIER_CAPACITY);
         let pending_pieces = Self::empty_pieces(index.read().await.deref());
         let n_pieces = pending_pieces.len();
         PieceVerifier {

@@ -33,7 +33,7 @@ pub use node::{Node, Veilid};
 #[cfg(test)]
 pub mod tests;
 
-const DEFAULT_UPDATE_BUFFER_SIZE: usize = 1024;
+const DEFAULT_UPDATE_BUFFER_SIZE: usize = 262144;
 
 pub async fn new_routing_context(
     state_dir: &str,

@@ -89,6 +89,8 @@ pub struct Share<N: Node> {
     tasks: JoinSet<Result<()>>,
 }
 
+const SHARE_EVENTS_CAPACITY: usize = 131072;
+
 impl<N: Node + Send + Sync + 'static> Share<N> {
     pub fn new(
         node: N,
@@ -96,7 +98,7 @@ impl<N: Node + Send + Sync + 'static> Share<N> {
         mode: Mode,
         config: Config,
     ) -> Result<Self> {
-        let (events_tx, events_rx) = broadcast::channel(1024);
+        let (events_tx, events_rx) = broadcast::channel(SHARE_EVENTS_CAPACITY);
         let share = Self {
             node,
             conn_state,

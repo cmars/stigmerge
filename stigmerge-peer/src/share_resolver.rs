@@ -25,10 +25,12 @@ pub struct ShareResolver<N: Node> {
     watching: HashSet<TypedRecordKey>,
 }
 
+const SHARE_RESOLVER_CAPACITY: usize = 65536;
+
 impl<P: Node> ShareResolver<P> {
     /// Create a new share_resolver service.
     pub fn new(node: P) -> Self {
-        let (share_target_tx, share_target_rx) = broadcast::channel(32768);
+        let (share_target_tx, share_target_rx) = broadcast::channel(SHARE_RESOLVER_CAPACITY);
         Self {
             node,
             share_target_tx,
