@@ -129,6 +129,10 @@ impl<P: Node> Actor for Seeder<P> {
                     self.piece_map.set(piece_state.piece_index.try_into().unwrap());
                 }
                 res = update_rx.recv() => {
+                    if is_lagged(&res) {
+                        warn!("update_rx channel lagged in seeder");
+                        continue;
+                    }
                     let update = res.context(Unrecoverable::new("receive veilid update"))?;
                     match update {
                         VeilidUpdate::AppCall(veilid_app_call) => {

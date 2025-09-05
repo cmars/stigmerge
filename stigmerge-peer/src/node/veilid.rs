@@ -1,7 +1,7 @@
 use std::{cmp::min, path::Path, sync::Arc};
 
 use tokio::sync::{broadcast, RwLock};
-use tracing::{trace, warn};
+use tracing::{instrument, trace, warn};
 use veilid_core::{
     DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Sequencing, Stability,
     Target, ValueData, ValueSubkeyRangeSet, VeilidAPIError, VeilidUpdate, VALID_CRYPTO_KINDS,
@@ -265,6 +265,7 @@ impl Node for Veilid {
         self.update_rx.resubscribe()
     }
 
+    #[instrument(skip_all, err)]
     async fn reset(&mut self) -> Result<()> {
         let rc = self.routing_context.write().await;
         if let Err(e) = rc.api().detach().await {
@@ -274,12 +275,14 @@ impl Node for Veilid {
         Ok(())
     }
 
+    #[instrument(skip_all, err)]
     async fn shutdown(self) -> Result<()> {
         let rc = self.routing_context.write().await;
         rc.api().shutdown().await;
         Ok(())
     }
 
+    #[instrument(skip_all, err)]
     async fn announce_index(&mut self, index: &Index) -> Result<(TypedRecordKey, Target, Header)> {
         let rc = self.routing_context.read().await;
         // Serialize index to index_bytes
@@ -318,6 +321,7 @@ impl Node for Veilid {
         Ok((dht_key, Target::PrivateRoute(announce_route), header))
     }
 
+    #[instrument(skip_all, err)]
     async fn announce_route(
         &mut self,
         key: &TypedRecordKey,
@@ -337,9 +341,11 @@ impl Node for Veilid {
             .await?;
         let header = header.with_route_data(route_data);
         self.write_header(&rc, &key, &header).await?;
+        trace!(?announce_route, "announced new route");
         Ok((Target::PrivateRoute(announce_route), header))
     }
 
+    #[instrument(skip_all, err)]
     async fn resolve_route_index(
         &mut self,
         key: &TypedRecordKey,
@@ -355,6 +361,7 @@ impl Node for Veilid {
         Ok((Target::PrivateRoute(target), header, index))
     }
 
+    #[instrument(skip_all, err)]
     async fn resolve_route(
         &mut self,
         key: &TypedRecordKey,
