@@ -8,7 +8,7 @@ use tokio::{
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, trace, warn, Level};
+use tracing::{debug, error, info, instrument, trace, warn, Level};
 use veilid_core::VeilidUpdate;
 
 use crate::{
@@ -453,6 +453,8 @@ impl<
                                     st.disconnect();
                                     exp_backoff.reset();
                                     retries = 0;
+                                } else {
+                                    debug!("connection state lock held elsewhere");
                                 }
                             }
                         }
@@ -472,6 +474,8 @@ impl<
                                     st.disconnect();
                                     exp_backoff.reset();
                                     retries = 0;
+                                } else {
+                                    debug!("connection state lock held elsewhere");
                                 }
                             }
                         }
