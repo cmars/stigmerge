@@ -3,7 +3,9 @@ use std::{future::Future, path::Path};
 
 use backoff::ExponentialBackoff;
 use tokio::sync::broadcast;
-use veilid_core::{OperationId, Target, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
+use veilid_core::{
+    OperationId, Target, TypedKeyPair, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate,
+};
 
 use stigmerge_fileindex::Index;
 
@@ -20,10 +22,11 @@ pub trait Node: Clone + Send {
     fn announce_index(
         &mut self,
         index: &Index,
-    ) -> impl std::future::Future<Output = Result<(TypedRecordKey, Target, Header)>> + Send;
+    ) -> impl std::future::Future<Output = Result<(TypedRecordKey, TypedKeyPair, Target, Header)>> + Send;
     fn announce_route(
         &mut self,
         key: &TypedRecordKey,
+        owner_keypair: &TypedKeyPair,
         prior_route: Option<Target>,
         header: &Header,
     ) -> impl std::future::Future<Output = Result<(Target, Header)>> + Send;

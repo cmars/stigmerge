@@ -3,8 +3,9 @@ use std::{cmp::min, path::Path, sync::Arc};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{instrument, trace, warn};
 use veilid_core::{
-    DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Sequencing, Stability,
-    Target, ValueData, ValueSubkeyRangeSet, VeilidAPIError, VeilidUpdate, VALID_CRYPTO_KINDS,
+    AllowOffline, DHTRecordDescriptor, DHTSchema, KeyPair, OperationId, RoutingContext, Sequencing,
+    SetDHTValueOptions, Stability, Target, TypedKeyPair, ValueData, ValueSubkeyRangeSet,
+    VeilidAPIError, VeilidUpdate, VALID_CRYPTO_KINDS,
 };
 
 use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
@@ -138,6 +139,7 @@ impl Veilid {
         &self,
         rc: &RoutingContext,
         key: &TypedRecordKey,
+        owner_keypair: &TypedKeyPair,
         header: &Header,
     ) -> Result<()> {
         // Encode the header
@@ -150,8 +152,19 @@ impl Veilid {
             "writing header"
         );
 
-        rc.set_dht_value(key.to_owned(), 0, header_bytes, None)
-            .await?;
+        rc.set_dht_value(
+            key.to_owned(),
+            0,
+            header_bytes,
+            Some(SetDHTValueOptions {
+                writer: Some(KeyPair::new(
+                    owner_keypair.value.key.to_owned(),
+                    owner_keypair.value.secret.to_owned(),
+                )),
+                allow_offline: Some(AllowOffline::default()),
+            }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -283,7 +296,10 @@ impl Node for Veilid {
     }
 
     #[instrument(skip_all, err)]
-    async fn announce_index(&mut self, index: &Index) -> Result<(TypedRecordKey, Target, Header)> {
+    async fn announce_index(
+        &mut self,
+        index: &Index,
+    ) -> Result<(TypedRecordKey, TypedKeyPair, Target, Header)> {
         let rc = self.routing_context.read().await;
         // Serialize index to index_bytes
         let index_bytes = index.encode()?;
@@ -314,17 +330,31 @@ impl Node for Veilid {
 
         let dht_rec = self.open_or_create_dht_record(&rc, &header).await?;
         let dht_key = dht_rec.key().to_owned();
+        let owner_keypair = TypedKeyPair::new(
+            dht_key.kind,
+            KeyPair::new(
+                dht_rec.owner().to_owned(),
+                dht_rec.owner_secret().unwrap().to_owned(),
+            ),
+        );
         self.write_index_bytes(&rc, &dht_key, index_bytes.as_slice())
             .await?;
-        self.write_header(&rc, &dht_key, &header).await?;
+        self.write_header(&rc, &dht_key, &owner_keypair, &header)
+            .await?;
         trace!(header = format!("{:?}", header));
-        Ok((dht_key, Target::PrivateRoute(announce_route), header))
+        Ok((
+            dht_key,
+            owner_keypair,
+            Target::PrivateRoute(announce_route),
+            header,
+        ))
     }
 
     #[instrument(skip_all, err)]
     async fn announce_route(
         &mut self,
         key: &TypedRecordKey,
+        owner_keypair: &TypedKeyPair,
         prior_route: Option<Target>,
         header: &Header,
     ) -> Result<(Target, Header)> {
@@ -340,7 +370,8 @@ impl Node for Veilid {
             )
             .await?;
         let header = header.with_route_data(route_data);
-        self.write_header(&rc, &key, &header).await?;
+        self.write_header(&rc, &key, &owner_keypair, &header)
+            .await?;
         trace!(?announce_route, "announced new route");
         Ok((Target::PrivateRoute(announce_route), header))
     }
