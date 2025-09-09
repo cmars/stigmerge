@@ -7,8 +7,8 @@ use tokio::{
     time::{interval, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, trace, warn};
-use veilid_core::{Target, TypedRecordKey, VeilidUpdate};
+use tracing::{info, instrument, trace, warn};
+use veilid_core::{Target, TypedKeyPair, TypedRecordKey, VeilidUpdate};
 
 use crate::{
     actor::{Actor, Respondable, ResponseChannel},
@@ -26,6 +26,7 @@ pub struct ShareAnnouncer<N: Node> {
 #[derive(Clone)]
 struct ShareAnnounce {
     key: TypedRecordKey,
+    owner_keypair: TypedKeyPair,
     target: Target,
     header: Header,
 }
@@ -44,24 +45,29 @@ impl<N: Node> ShareAnnouncer<N> {
     }
 
     async fn announce(&mut self) -> Result<()> {
-        let (key, target, header) = self.node.announce_index(&self.index).await?;
+        let (key, owner_keypair, target, header) = self.node.announce_index(&self.index).await?;
         self.share = Some(ShareAnnounce {
-            key: key.clone(),
-            target: target.clone(),
-            header: header.clone(),
+            key,
+            owner_keypair,
+            target,
+            header,
         });
         Ok(())
     }
 
+    #[instrument(skip_all, err)]
     async fn reannounce(&mut self) -> Result<Response> {
         match self.share.as_mut() {
             Some(ShareAnnounce {
                 key,
+                owner_keypair,
                 target,
                 header,
             }) => {
-                let (updated_target, updated_header) =
-                    self.node.announce_route(key, Some(*target), header).await?;
+                let (updated_target, updated_header) = self
+                    .node
+                    .announce_route(key, owner_keypair, Some(*target), header)
+                    .await?;
                 *target = updated_target;
                 *header = updated_header;
                 Ok(Response::Announce {
@@ -189,10 +195,14 @@ impl<P: Node> Actor for ShareAnnouncer<P> {
         }
     }
 
+    #[instrument(skip_all)]
     async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
         let response = match self.reannounce().await {
             Ok(resp) => resp,
-            Err(_) => Response::NotAvailable,
+            Err(err) => {
+                warn!(?err, "reannounce failed");
+                Response::NotAvailable
+            }
         };
 
         req.response_tx()
@@ -223,7 +233,7 @@ mod tests {
 
     use stigmerge_fileindex::Indexer;
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{RouteId, Target, TypedRecordKey};
+    use veilid_core::{RouteId, Target, TypedKeyPair, TypedRecordKey};
 
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
@@ -245,16 +255,23 @@ mod tests {
         let mut node = StubNode::new();
         let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
             .expect("key");
+        let fake_keypair = TypedKeyPair::from_str("VLD0:xtDHaPt4hs9LEArA1l2bQFg8T0iLk2fdpfNtlVHfs7w:XWDwT_yVnRKAgl4du2lsqBAWwcJdzF8ICcLbbT-OQdw").expect("keypair");
         let fake_target = Target::PrivateRoute(RouteId::new([0u8; 32]));
 
         // Set up the announce_result mock
         let mock_key = fake_key.clone();
+        let mock_keypair = fake_keypair.clone();
         let mock_target = fake_target.clone();
         node.announce_result = Arc::new(Mutex::new(move |index: &stigmerge_fileindex::Index| {
             let index_bytes = index.encode().expect("encode index");
             let header =
                 Header::from_index(index, index_bytes.as_slice(), &[0xde, 0xad, 0xbe, 0xef]);
-            Ok((mock_key.clone(), mock_target.clone(), header))
+            Ok((
+                mock_key.clone(),
+                mock_keypair.clone(),
+                mock_target.clone(),
+                header,
+            ))
         }));
 
         // Create the service and channels
@@ -276,23 +293,33 @@ mod tests {
         let mut node = StubNode::new();
         let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
             .expect("key");
+        let fake_keypair = TypedKeyPair::from_str("VLD0:xtDHaPt4hs9LEArA1l2bQFg8T0iLk2fdpfNtlVHfs7w:XWDwT_yVnRKAgl4du2lsqBAWwcJdzF8ICcLbbT-OQdw").expect("keypair");
         let fake_target = Target::PrivateRoute(RouteId::new([0u8; 32]));
         let updated_target = Target::PrivateRoute(RouteId::new([1u8; 32]));
 
         // Set up the announce_result mock
         let mock_key = fake_key.clone();
+        let mock_keypair = fake_keypair.clone();
         let mock_target = fake_target.clone();
         node.announce_result = Arc::new(Mutex::new(move |index: &stigmerge_fileindex::Index| {
             let index_bytes = index.encode().expect("encode index");
             let header =
                 Header::from_index(index, index_bytes.as_slice(), &[0xde, 0xad, 0xbe, 0xef]);
-            Ok((mock_key.clone(), mock_target.clone(), header))
+            Ok((
+                mock_key.clone(),
+                mock_keypair.clone(),
+                mock_target.clone(),
+                header,
+            ))
         }));
 
         // Set up the reannounce_route_result mock
         let mock_updated_target = updated_target.clone();
         node.announce_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedRecordKey, _prior_route: Option<Target>, header: &Header| {
+            move |_key: &TypedRecordKey,
+                  _owner_keypair: &TypedKeyPair,
+                  _prior_route: Option<Target>,
+                  header: &Header| {
                 let updated_header = header.with_route_data(vec![0xde, 0xca, 0xfb, 0xad]);
                 Ok((mock_updated_target.clone(), updated_header))
             },

@@ -5,7 +5,9 @@ use std::{
 
 use stigmerge_fileindex::Index;
 use tokio::sync::broadcast;
-use veilid_core::{OperationId, Target, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
+use veilid_core::{
+    OperationId, Target, TypedKeyPair, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate,
+};
 
 use crate::{error::Result, piece_map::PieceMap};
 use crate::{
@@ -19,11 +21,21 @@ pub struct StubNode {
 
     pub reset_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
     pub shutdown_result: Arc<Mutex<dyn Fn() -> Result<()> + Send + 'static>>,
-    pub announce_result:
-        Arc<Mutex<dyn Fn(&Index) -> Result<(TypedRecordKey, Target, Header)> + Send + 'static>>,
+    pub announce_result: Arc<
+        Mutex<
+            dyn Fn(&Index) -> Result<(TypedRecordKey, TypedKeyPair, Target, Header)>
+                + Send
+                + 'static,
+        >,
+    >,
     pub announce_route_result: Arc<
         Mutex<
-            dyn Fn(&TypedRecordKey, Option<Target>, &Header) -> Result<(Target, Header)>
+            dyn Fn(
+                    &TypedRecordKey,
+                    &TypedKeyPair,
+                    Option<Target>,
+                    &Header,
+                ) -> Result<(Target, Header)>
                 + Send
                 + 'static,
         >,
@@ -74,9 +86,10 @@ impl StubNode {
                 panic!("unexpected call to announce")
             })),
             announce_route_result: Arc::new(Mutex::new(
-                |_key: &TypedRecordKey, _prior_route: Option<Target>, _header: &Header| {
-                    panic!("unexpected call to announce_route")
-                },
+                |_key: &TypedRecordKey,
+                 _owner_keypair: &TypedKeyPair,
+                 _prior_route: Option<Target>,
+                 _header: &Header| { panic!("unexpected call to announce_route") },
             )),
             resolve_route_index_result: Arc::new(Mutex::new(
                 |_key: &TypedRecordKey, _root: &Path| {
@@ -155,17 +168,21 @@ impl Node for StubNode {
         (*(self.shutdown_result.lock().unwrap()))()
     }
 
-    async fn announce_index(&mut self, index: &Index) -> Result<(TypedRecordKey, Target, Header)> {
+    async fn announce_index(
+        &mut self,
+        index: &Index,
+    ) -> Result<(TypedRecordKey, TypedKeyPair, Target, Header)> {
         (*(self.announce_result.lock().unwrap()))(index)
     }
 
     async fn announce_route(
         &mut self,
         key: &TypedRecordKey,
+        owner_keypair: &TypedKeyPair,
         prior_route: Option<Target>,
         header: &Header,
     ) -> Result<(Target, Header)> {
-        (*(self.announce_route_result.lock().unwrap()))(key, prior_route, header)
+        (*(self.announce_route_result.lock().unwrap()))(key, owner_keypair, prior_route, header)
     }
 
     async fn resolve_route_index(
