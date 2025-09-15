@@ -9,7 +9,7 @@ RUN groupadd -g ${gid} ${group}
 RUN useradd -u ${uid} -g ${group} -s /bin/sh -d /workspaces/stigmerge -m ${user} # <--- the '-m' create a user home directory
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update -qq && apt-get install -y git ca-certificates build-essential pkg-config libssl-dev
+RUN apt-get update -qq && apt-get install -y git ca-certificates build-essential pkg-config libssl-dev sudo gnupg
 
 # Switch to user
 USER ${uid}:${gid}
