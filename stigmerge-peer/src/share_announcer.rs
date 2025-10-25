@@ -1,245 +1,253 @@
-use std::{fmt, time::Duration};
+use std::{sync::Arc, time::Duration};
 
-use anyhow::Context;
 use stigmerge_fileindex::Index;
 use tokio::{
     select,
+    sync::Mutex,
     time::{interval, MissedTickBehavior},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, trace, warn};
-use veilid_core::{Target, TypedKeyPair, TypedRecordKey, VeilidUpdate};
-
-use crate::{
-    actor::{Actor, Respondable, ResponseChannel},
-    error::{is_lagged, CancelError, Unrecoverable},
-    proto::Header,
-    Node, Result,
+use tracing::{debug, info, instrument, trace, warn};
+use veilid_core::{RouteId, Sequencing, Stability, VeilidRouteChange, VALID_CRYPTO_KINDS};
+use veilnet::{
+    connection::{RoutingContext, UpdateHandler, API},
+    Connection,
 };
 
-pub struct ShareAnnouncer<N: Node> {
-    node: N,
-    index: Index,
-    share: Option<ShareAnnounce>,
+use crate::{
+    content_addressable::ContentAddressable,
+    proto::{Encoder, Header, PeerMapRef},
+    record::{StablePeersRecord, StableShareRecord},
+    retry::Retry,
+    types::LocalShareInfo,
+    CancelError, Result,
+};
+
+pub struct ShareAnnouncer<C: Connection> {
+    cancel: CancellationToken,
+    retry: Retry,
+    conn: C,
+    share_announce: Arc<Mutex<ShareAnnounce>>,
+    route_change_rx: flume::Receiver<Vec<RouteId>>,
 }
 
-#[derive(Clone)]
-struct ShareAnnounce {
-    key: TypedRecordKey,
-    owner_keypair: TypedKeyPair,
-    target: Target,
-    header: Header,
-}
-
-impl<N: Node> ShareAnnouncer<N> {
-    pub fn new(node: N, index: Index) -> ShareAnnouncer<N> {
-        ShareAnnouncer {
-            node,
-            index,
-            share: None,
-        }
-    }
-
-    pub fn share(&self) -> Option<(&TypedRecordKey, &Target)> {
-        self.share.as_ref().map(|share| (&share.key, &share.target))
-    }
-
-    async fn announce(&mut self) -> Result<()> {
-        let (key, owner_keypair, target, header) = self.node.announce_index(&self.index).await?;
-        self.share = Some(ShareAnnounce {
-            key,
-            owner_keypair,
-            target,
-            header,
-        });
-        Ok(())
-    }
-
-    #[instrument(skip_all, err)]
-    async fn reannounce(&mut self) -> Result<Response> {
-        match self.share.as_mut() {
-            Some(ShareAnnounce {
-                key,
-                owner_keypair,
-                target,
-                header,
-            }) => {
-                let (updated_target, updated_header) = self
-                    .node
-                    .announce_route(key, owner_keypair, Some(*target), header)
-                    .await?;
-                *target = updated_target;
-                *header = updated_header;
-                Ok(Response::Announce {
-                    key: *key,
-                    target: *target,
-                    header: header.clone(),
-                })
-            }
-            None => Ok(Response::NotAvailable),
-        }
-    }
-}
-
-pub enum Request {
-    Announce {
-        response_tx: ResponseChannel<Response>,
-    },
-}
-
-impl fmt::Debug for Request {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Announce { .. } => f.debug_struct("Announce").finish(),
-        }
-    }
-}
-
-impl Respondable for Request {
-    type Response = Response;
-
-    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
-        match self {
-            Request::Announce { response_tx } => *response_tx = ch,
-        }
-    }
-
-    fn response_tx(self) -> ResponseChannel<Self::Response> {
-        match self {
-            Request::Announce { response_tx } => response_tx,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum Response {
-    NotAvailable,
-    Announce {
-        key: TypedRecordKey,
-        target: Target,
-        header: Header,
-    },
-}
-
-const REANNOUNCE_INTERVAL_SECS: u64 = 600;
-
-impl<P: Node> Actor for ShareAnnouncer<P> {
-    type Request = Request;
-    type Response = Response;
-
-    async fn run(
-        &mut self,
+impl<C: Connection + Send + Sync + 'static> ShareAnnouncer<C> {
+    pub async fn new(
         cancel: CancellationToken,
-        request_rx: flume::Receiver<Self::Request>,
-    ) -> Result<()> {
-        let mut update_rx = self.node.subscribe_veilid_update();
-        let mut public_internet_ready = false;
-        let mut reannounce_interval = interval(Duration::from_secs(REANNOUNCE_INTERVAL_SECS));
+        retry: Retry,
+        mut conn: C,
+        index: Index,
+    ) -> Result<Self> {
+        let cancel = cancel.child_token();
+        let (dead_routes_handler, route_change_rx) = DeadRoutesHandler::new(cancel.clone());
+        conn.add_update_handler(Box::new(dead_routes_handler));
+        let share_announce = Arc::new(Mutex::new(ShareAnnounce::new(&mut conn, index).await?));
+        Ok(Self {
+            cancel,
+            retry,
+            conn,
+            share_announce,
+            route_change_rx,
+        })
+    }
+
+    pub async fn share_info(&self) -> LocalShareInfo {
+        let share_announce = self.share_announce.lock().await;
+        LocalShareInfo {
+            key: *share_announce.share_record.share_key(),
+            header: share_announce.header.clone(),
+            want_index_digest: share_announce.index_digest,
+            root: share_announce.index.root().to_path_buf(),
+            want_index: share_announce.index.clone(),
+        }
+    }
+
+    const REANNOUNCE_INTERVAL_SECS: u64 = 600;
+
+    pub async fn run(mut self) -> Result<()> {
+        let mut reannounce_interval = interval(Duration::from_secs(Self::REANNOUNCE_INTERVAL_SECS));
         reannounce_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         reannounce_interval.reset();
         loop {
-            match self.share {
-                None => {
-                    self.announce().await?;
-                    reannounce_interval.reset();
+            select! {
+                _ = self.cancel.cancelled() => {
+                    return Err(CancelError.into());
                 }
-                Some(ShareAnnounce { target, .. }) => {
-                    select! {
-                        _ = cancel.cancelled() => {
-                            return Err(CancelError.into());
-                        }
-                        res = request_rx.recv_async() => {
-                            let req = res.with_context(|| format!("share_announcer: receive request"))?;
-                            self.handle_request(req).await?;
-                        }
-                        res = update_rx.recv() => {
-                            if is_lagged(&res) {
-                                warn!("update_rx channel lagged in share_announcer");
-                                continue;
-                            }
-                            if let Target::PrivateRoute(ref route_id) = target {
-                                let update = res.with_context(|| format!("share_announcer: receive veilid update"))?;
-                                match update {
-                                    VeilidUpdate::RouteChange(route_change) => {
-                                        trace!("current route {route_id}, dead routes {:?}", route_change.dead_routes);
-                                        if route_change.dead_routes.contains(route_id) {
-                                            info!("route changed, reannouncing");
-                                            self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
-                                            reannounce_interval.reset();
-                                        }
-                                    },
-                                    VeilidUpdate::Attachment(veilid_state_attachment) => {
-                                        if veilid_state_attachment.public_internet_ready != public_internet_ready {
-                                            if veilid_state_attachment.public_internet_ready {
-                                                info!("attachment public internet ready, reannouncing");
-                                                self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
-                                                reannounce_interval.reset();
-                                            }
-                                            public_internet_ready = veilid_state_attachment.public_internet_ready;
-                                        }
-                                    }
-                                    VeilidUpdate::Shutdown => {
-                                        cancel.cancel();
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ = reannounce_interval.tick() => {
-                            info!("reannouncing after {:?}", reannounce_interval.period());
-                            self.reannounce().await.with_context(|| format!("share_announcer: route changed"))?;
-                        }
+                res = self.route_change_rx.recv_async() => {
+                    let mut share_announce = self.share_announce.lock().await;
+                    let dead_routes = res?;
+                    if dead_routes.contains(&share_announce.route_id) {
+                        backoff_retry!(self.cancel, self.retry, {
+                            let route_id = share_announce.reannounce(&mut self.conn).await.map_err(backoff::Error::transient)?;
+                            debug!(?route_id, "dead route, reannounce");
+                        }, {
+                            self.conn.reset().await?;
+                        })?;
                     }
+                }
+                _ = reannounce_interval.tick() => {
+                    backoff_retry!(self.cancel, self.retry, {
+                        let route_id = self.share_announce.lock().await.reannounce(&mut self.conn).await.map_err(backoff::Error::transient)?;
+                        info!(?route_id, interval = ?reannounce_interval.period(), "reannounce");
+                    }, {
+                        self.conn.reset().await?;
+                    })?;
                 }
             }
         }
-    }
-
-    #[instrument(skip_all)]
-    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
-        let response = match self.reannounce().await {
-            Ok(resp) => resp,
-            Err(err) => {
-                warn!(?err, "reannounce failed");
-                Response::NotAvailable
-            }
-        };
-
-        req.response_tx()
-            .send(response)
-            .await
-            .context(Unrecoverable::new("send response from share announcer"))?;
-
-        Ok(())
     }
 }
 
-impl<N: Node + Clone> Clone for ShareAnnouncer<N> {
-    fn clone(&self) -> Self {
-        Self {
-            node: self.node.clone(),
-            index: self.index.clone(),
-            share: self.share.clone(),
+pub struct ShareAnnounce {
+    index: Index,
+    index_digest: [u8; 32],
+    peers_record: StablePeersRecord,
+    share_record: StableShareRecord,
+    route_id: RouteId,
+    header: Header,
+}
+
+impl ShareAnnounce {
+    pub async fn new<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        mut index: Index,
+    ) -> Result<ShareAnnounce> {
+        let index_digest = index.digest()?;
+
+        // Establish and open peer & share records. These block on Veilid network attachment.
+        let mut peers_record = StablePeersRecord::new_local(conn, &index).await?;
+        let mut share_record = StableShareRecord::new_local(conn, &index).await?;
+
+        let (mut header, route_id) = {
+            let routing_context = conn.routing_context();
+            let (route_id, route_data) = routing_context
+                .api()
+                .new_custom_private_route(
+                    &VALID_CRYPTO_KINDS,
+                    Stability::LowLatency,
+                    Sequencing::NoPreference,
+                )
+                .await?;
+
+            let index_bytes = index.encode()?;
+            (
+                Header::from_index(&index, index_bytes.as_slice(), route_data.as_slice()),
+                route_id,
+            )
+        };
+
+        header.set_peer_map(PeerMapRef::new(
+            *peers_record.key(),
+            StablePeersRecord::MAX_PEERS,
+        ));
+        if let Err(err) = peers_record.load_peers(conn).await {
+            warn!(?err, peers_key = ?peers_record.key(), "failed to load peers");
         }
+
+        share_record.write_header(conn, &header).await?;
+        share_record.write_index(conn, &index).await?;
+
+        Ok(ShareAnnounce {
+            index,
+            index_digest,
+            peers_record,
+            share_record,
+            route_id,
+            header,
+        })
+    }
+
+    #[instrument(skip_all, err)]
+    async fn reannounce<C: Connection + Send + Sync + 'static>(
+        &mut self,
+        conn: &mut C,
+    ) -> Result<RouteId> {
+        {
+            conn.require_attachment().await?;
+        }
+
+        let route_id = {
+            let routing_context = conn.routing_context();
+
+            // Attempt to release a prior route
+            if let Err(err) = routing_context.api().release_private_route(self.route_id) {
+                debug!(?err, route_id = ?self.route_id, "release prior private route");
+            }
+
+            // Establish a new route
+            let (route_id, route_data) = routing_context
+                .api()
+                .new_custom_private_route(
+                    &VALID_CRYPTO_KINDS,
+                    Stability::LowLatency,
+                    Sequencing::NoPreference,
+                )
+                .await?;
+            // Update header with new route data
+            self.header.set_route_data(route_data);
+            self.route_id = route_id;
+            route_id
+        };
+
+        self.header.set_peer_map(PeerMapRef::new(
+            *self.peers_record.key(),
+            StablePeersRecord::MAX_PEERS,
+        ));
+
+        // Write updated share header
+        self.share_record.write_header(conn, &self.header).await?;
+        Ok(route_id)
+    }
+}
+
+struct DeadRoutesHandler {
+    cancel: CancellationToken,
+    dead_routes_tx: flume::Sender<Vec<RouteId>>,
+}
+
+impl DeadRoutesHandler {
+    fn new(cancel: CancellationToken) -> (DeadRoutesHandler, flume::Receiver<Vec<RouteId>>) {
+        let (route_change_tx, route_change_rx) = flume::unbounded();
+        (
+            Self {
+                cancel,
+                dead_routes_tx: route_change_tx,
+            },
+            route_change_rx,
+        )
+    }
+}
+
+impl UpdateHandler for DeadRoutesHandler {
+    fn route_change(&self, change: &VeilidRouteChange) {
+        if !change.dead_routes.is_empty() {
+            if let Err(err) = self.dead_routes_tx.send(change.dead_routes.to_owned()) {
+                warn!(?err, "failed to send route change");
+                self.cancel.cancel();
+            }
+        }
+    }
+    fn shutdown(&self) {
+        trace!("shutdown");
+        self.cancel.cancel();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        str::FromStr,
-        sync::{Arc, Mutex},
+    use std::sync::Arc;
+
+    use stigmerge_fileindex::{FileSpec, Indexer, PayloadPiece};
+    use tempfile::TempDir;
+    use veilid_core::{RouteId, TypedRecordKey};
+    use veilnet::connection::testing::{
+        create_test_api, StubAPI, StubConnection, StubRoutingContext,
     };
 
-    use stigmerge_fileindex::Indexer;
-    use tokio_util::sync::CancellationToken;
-    use veilid_core::{RouteId, Target, TypedKeyPair, TypedRecordKey};
-
     use crate::{
-        actor::{OneShot, Operator, ResponseChannel},
-        proto::{Encoder, Header},
-        share_announcer::{self, ShareAnnouncer},
-        tests::{temp_file, StubNode},
+        proto::{Decoder, Header},
+        share_announcer::ShareAnnounce,
+        tests::temp_file,
     };
 
     #[tokio::test]
@@ -251,33 +259,54 @@ mod tests {
             .expect("indexer");
         let index = indexer.index().await.expect("index");
 
-        // Create a stub peer with mock behavior
-        let mut node = StubNode::new();
-        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
-            .expect("key");
-        let fake_keypair = TypedKeyPair::from_str("VLD0:xtDHaPt4hs9LEArA1l2bQFg8T0iLk2fdpfNtlVHfs7w:XWDwT_yVnRKAgl4du2lsqBAWwcJdzF8ICcLbbT-OQdw").expect("keypair");
-        let fake_target = Target::PrivateRoute(RouteId::new([0u8; 32]));
-
-        // Set up the announce_result mock
-        let mock_key = fake_key.clone();
-        let mock_keypair = fake_keypair.clone();
-        let mock_target = fake_target.clone();
-        node.announce_result = Arc::new(Mutex::new(move |index: &stigmerge_fileindex::Index| {
-            let index_bytes = index.encode().expect("encode index");
-            let header =
-                Header::from_index(index, index_bytes.as_slice(), &[0xde, 0xad, 0xbe, 0xef]);
-            Ok((
-                mock_key.clone(),
-                mock_keypair.clone(),
-                mock_target.clone(),
-                header,
-            ))
+        // Create a connection with mock behavior
+        let temp_dir = TempDir::new().unwrap();
+        let veilid_api = create_test_api(temp_dir.path()).await.unwrap();
+        let mut api = StubAPI::new(veilid_api);
+        api.new_custom_private_route = Arc::new(tokio::sync::Mutex::new(|_, _, _| {
+            Ok((RouteId::new([0xa5u8; 32]), b"route data".to_vec()))
         }));
 
-        // Create the service and channels
-        let mut actor = ShareAnnouncer::new(node, index);
-        actor.announce().await.expect("announce");
-        assert_eq!(actor.share(), Some((&mock_key, &mock_target)));
+        let mut routing_context = StubRoutingContext::new(api);
+        let set_dht_key_calls = Arc::new(std::sync::Mutex::new(vec![]));
+        {
+            let set_dht_key_calls = set_dht_key_calls.clone();
+            routing_context.set_dht_value = Arc::new(tokio::sync::Mutex::new(
+                move |key: TypedRecordKey, subkey, data, _| {
+                    set_dht_key_calls.lock().unwrap().push((key, subkey, data));
+                    Ok(None)
+                },
+            ));
+        }
+        // Stub get_dht_value to return None (no existing peers)
+        routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
+            move |_key: TypedRecordKey, _subkey, _force_refresh| Ok(None),
+        ));
+
+        let mut conn = StubConnection::new(routing_context);
+        conn.require_attachment = Arc::new(tokio::sync::Mutex::new(|| Ok(())));
+
+        let fake_route_id = RouteId::new([0xa5u8; 32]);
+
+        let announce = ShareAnnounce::new(&mut conn, index.clone())
+            .await
+            .expect("announce");
+
+        let set_dht_key_calls = set_dht_key_calls.lock().unwrap();
+        assert_eq!(set_dht_key_calls.len(), 2);
+
+        assert_eq!(&set_dht_key_calls[0].0, announce.share_record.share_key());
+        let announced_header = Header::decode(set_dht_key_calls[0].2.as_slice()).unwrap();
+        assert_eq!(announced_header.route_data(), b"route data".as_slice());
+
+        let (payload_pieces, file_specs) =
+            <(Vec<PayloadPiece>, Vec<FileSpec>)>::decode(set_dht_key_calls[1].2.as_slice())
+                .unwrap();
+        assert_eq!(payload_pieces.len(), 1);
+        assert_eq!(file_specs.len(), 1);
+        assert_eq!(index.payload().pieces(), &payload_pieces);
+
+        assert_eq!(announce.route_id, fake_route_id);
     }
 
     #[tokio::test]
@@ -289,91 +318,86 @@ mod tests {
             .expect("indexer");
         let index = indexer.index().await.expect("index");
 
-        // Create a stub peer with mock behavior
-        let mut node = StubNode::new();
-        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
-            .expect("key");
-        let fake_keypair = TypedKeyPair::from_str("VLD0:xtDHaPt4hs9LEArA1l2bQFg8T0iLk2fdpfNtlVHfs7w:XWDwT_yVnRKAgl4du2lsqBAWwcJdzF8ICcLbbT-OQdw").expect("keypair");
-        let fake_target = Target::PrivateRoute(RouteId::new([0u8; 32]));
-        let updated_target = Target::PrivateRoute(RouteId::new([1u8; 32]));
+        // Create a connection with mock behavior
+        let temp_dir = TempDir::new().unwrap();
+        let veilid_api = create_test_api(temp_dir.path()).await.unwrap();
+        let mut api = StubAPI::new(veilid_api);
 
-        // Set up the announce_result mock
-        let mock_key = fake_key.clone();
-        let mock_keypair = fake_keypair.clone();
-        let mock_target = fake_target.clone();
-        node.announce_result = Arc::new(Mutex::new(move |index: &stigmerge_fileindex::Index| {
-            let index_bytes = index.encode().expect("encode index");
-            let header =
-                Header::from_index(index, index_bytes.as_slice(), &[0xde, 0xad, 0xbe, 0xef]);
-            Ok((
-                mock_key.clone(),
-                mock_keypair.clone(),
-                mock_target.clone(),
-                header,
-            ))
+        // Mock route creation - first for initial announce, then for reannounce
+        let route_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let route_counter_clone = route_counter.clone();
+        api.new_custom_private_route = Arc::new(tokio::sync::Mutex::new(move |_, _, _| {
+            let count = route_counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let route_id = if count == 0 {
+                RouteId::new([0xa5u8; 32]) // Initial route
+            } else {
+                RouteId::new([0x5au8; 32]) // Reannounce route
+            };
+            let route_data = if count == 0 {
+                b"initial route data".to_vec()
+            } else {
+                b"updated route data".to_vec()
+            };
+            Ok((route_id, route_data))
         }));
 
-        // Set up the reannounce_route_result mock
-        let mock_updated_target = updated_target.clone();
-        node.announce_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedRecordKey,
-                  _owner_keypair: &TypedKeyPair,
-                  _prior_route: Option<Target>,
-                  header: &Header| {
-                let updated_header = header.with_route_data(vec![0xde, 0xca, 0xfb, 0xad]);
-                Ok((mock_updated_target.clone(), updated_header))
-            },
-        ));
-
-        // Create the service and channels
-        let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareAnnouncer::new(node, index), OneShot);
-
-        // Send a reannounce request
-        match operator
-            .call(share_announcer::Request::Announce {
-                response_tx: ResponseChannel::default(),
-            })
-            .await
-            .expect("send request")
+        let release_private_route_calls = Arc::new(std::sync::Mutex::new(vec![]));
         {
-            share_announcer::Response::Announce {
-                key,
-                target,
-                header,
-            } => {
-                assert_eq!(key, fake_key);
-                assert_eq!(target, updated_target);
-                assert_eq!(header.route_data(), &[0xde, 0xca, 0xfb, 0xad])
-            }
-            _ => panic!("Expected Announce response"),
+            let release_private_route_calls = release_private_route_calls.clone();
+            api.release_private_route = Arc::new(std::sync::Mutex::new(move |route_id| {
+                release_private_route_calls.lock().unwrap().push(route_id);
+                Ok(())
+            }));
         }
 
-        // Initiate a shutdown
-        cancel.cancel();
+        let mut routing_context = StubRoutingContext::new(api);
+        let set_dht_key_calls = Arc::new(std::sync::Mutex::new(vec![]));
+        {
+            let set_dht_key_calls = set_dht_key_calls.clone();
+            routing_context.set_dht_value = Arc::new(tokio::sync::Mutex::new(
+                move |key: TypedRecordKey, subkey, data, _| {
+                    set_dht_key_calls.lock().unwrap().push((key, subkey, data));
+                    Ok(None)
+                },
+            ));
+        }
+        // Stub get_dht_value to return None (no existing peers)
+        routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
+            move |_key: TypedRecordKey, _subkey, _force_refresh| Ok(None),
+        ));
 
-        // Service run terminates
-        operator.join().await.expect_err("cancelled");
-    }
+        let mut conn = StubConnection::new(routing_context);
+        conn.require_attachment = Arc::new(tokio::sync::Mutex::new(|| Ok(())));
 
-    // This test directly tests the reannounce method without using the Actor trait
-    #[tokio::test]
-    async fn test_not_available_response() {
-        // Create a test file and index
-        let tf = temp_file(0xa5u8, 65536);
-        let indexer = Indexer::from_file(std::env::temp_dir().join(tf.path()).as_path())
+        // Create initial announce
+        let mut announce = ShareAnnounce::new(&mut conn, index.clone())
             .await
-            .expect("indexer");
-        let index = indexer.index().await.expect("index");
+            .expect("announce");
 
-        // Create a stub peer with mock behavior
-        let node = StubNode::new();
+        // Clear the initial calls to focus on reannounce
+        set_dht_key_calls.lock().unwrap().clear();
+        release_private_route_calls.lock().unwrap().clear();
 
-        // Create the service directly without using Operator
-        let mut announcer = ShareAnnouncer::new(node, index);
+        // Call reannounce
+        let new_route_id = announce.reannounce(&mut conn).await.expect("reannounce");
 
-        // Test the reannounce method directly with no share set
-        let response = announcer.reannounce().await.expect("reannounce");
-        assert!(matches!(response, share_announcer::Response::NotAvailable));
+        // Verify the old route was released
+        let release_calls = release_private_route_calls.lock().unwrap();
+        assert_eq!(release_calls.len(), 1);
+        assert_eq!(release_calls[0], RouteId::new([0xa5u8; 32])); // Initial route
+
+        // Verify the new route ID
+        assert_eq!(new_route_id, RouteId::new([0x5au8; 32])); // Updated route
+
+        // Verify the header was updated with new route data
+        let set_dht_calls = set_dht_key_calls.lock().unwrap();
+        assert_eq!(set_dht_calls.len(), 1); // Only header should be written during reannounce
+
+        assert_eq!(&set_dht_calls[0].0, announce.share_record.share_key());
+        let updated_header = Header::decode(set_dht_calls[0].2.as_slice()).unwrap();
+        assert_eq!(
+            updated_header.route_data(),
+            b"updated route data".as_slice()
+        );
     }
 }

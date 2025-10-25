@@ -9,7 +9,7 @@ use super::{stigmerge_capnp::peer_info, Decoder, Encoder, PublicKey};
 #[derive(Debug, PartialEq, Clone)]
 pub struct PeerInfo {
     key: TypedRecordKey,
-    updated_at: Timestamp,
+    pub(crate) updated_at: Timestamp,
 }
 
 impl PeerInfo {

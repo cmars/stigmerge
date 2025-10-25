@@ -1,7 +1,7 @@
 use veilid_core::VeilidConfig;
 
 pub fn get_config(state_dir: String, ns: Option<String>) -> VeilidConfig {
-    return VeilidConfig {
+    VeilidConfig {
         program_name: "stigmerge".into(),
         namespace: ns.unwrap_or_default(),
         table_store: veilid_core::VeilidConfigTableStore {
@@ -19,7 +19,7 @@ pub fn get_config(state_dir: String, ns: Option<String>) -> VeilidConfig {
             ..Default::default()
         },
         ..Default::default()
-    };
+    }
 }
 
 #[cfg(not(target_os = "android"))]

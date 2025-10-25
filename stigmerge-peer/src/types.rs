@@ -1,17 +1,26 @@
 use std::path::PathBuf;
 
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS, PIECE_SIZE_BYTES};
-use veilid_core::TypedRecordKey;
+use veilid_core::{RouteId, TypedRecordKey};
 
 use crate::proto::Header;
 
 #[derive(Debug, Clone)]
-pub struct ShareInfo {
+pub struct LocalShareInfo {
     pub key: TypedRecordKey,
     pub header: Header,
     pub want_index: Index,
     pub want_index_digest: [u8; 32],
     pub root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteShareInfo {
+    pub key: TypedRecordKey,
+    pub header: Header,
+    pub index: Index,
+    pub index_digest: [u8; 32],
+    pub route_id: RouteId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -80,7 +89,7 @@ impl PieceState {
             0 => true,
             size if size == PIECE_SIZE_BLOCKS => self.blocks == 0xffffffff,
             _ => {
-                let mask = 1 << self.block_count - 1;
+                let mask = 1 << (self.block_count - 1);
                 self.blocks & mask == mask
             }
         }

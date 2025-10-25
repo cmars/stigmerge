@@ -1,386 +1,317 @@
-use std::{collections::HashSet, fmt, path::PathBuf};
-
-use anyhow::Context;
-use stigmerge_fileindex::Index;
-use tokio::{select, sync::broadcast};
-use tokio_util::sync::CancellationToken;
-use tracing::{trace, warn};
-use veilid_core::{Target, TypedRecordKey, ValueSubkeyRangeSet, VeilidUpdate};
-
-use crate::{
-    actor::{Actor, Respondable, ResponseChannel},
-    content_addressable::ContentAddressable,
-    error::{is_lagged, CancelError, Unrecoverable},
-    proto::{Digest, Header},
-    Node, Result,
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
-/// The share_resolver service maintains private routes to the route posted at remote
-/// peers' share keys. It also validates that the remote peer is sharing
-/// the expected index by verifying its content digest.
-pub struct ShareResolver<N: Node> {
-    node: N,
-    share_target_tx: broadcast::Sender<(TypedRecordKey, Target)>,
-    share_target_rx: broadcast::Receiver<(TypedRecordKey, Target)>,
-    watching: HashSet<TypedRecordKey>,
+use tokio::{select, spawn, sync::Mutex, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, instrument, trace, warn};
+use veilid_core::{RouteId, TypedRecordKey, ValueSubkeyRangeSet, VeilidRouteChange};
+use veilnet::{
+    connection::{RoutingContext, UpdateHandler, API},
+    Connection,
+};
+
+use crate::{
+    content_addressable::ContentAddressable, error::CancelError, record::StableShareRecord,
+    types::RemoteShareInfo, Error, Result, Retry,
+};
+
+#[derive(Clone)]
+pub struct ShareResolver<C: Connection> {
+    inner: Arc<Mutex<ShareResolverInner<C>>>,
 }
 
-const SHARE_RESOLVER_CAPACITY: usize = 65536;
-
-impl<P: Node> ShareResolver<P> {
-    /// Create a new share_resolver service.
-    pub fn new(node: P) -> Self {
-        let (share_target_tx, share_target_rx) = broadcast::channel(SHARE_RESOLVER_CAPACITY);
-        Self {
-            node,
-            share_target_tx,
-            share_target_rx,
-            watching: HashSet::new(),
-        }
-    }
-
-    pub fn subscribe_target(&self) -> broadcast::Receiver<(TypedRecordKey, Target)> {
-        self.share_target_rx.resubscribe()
-    }
+struct TaskArgs<C: Connection> {
+    cancel: CancellationToken,
+    retry: Retry,
+    dead_routes_rx: flume::Receiver<Vec<RouteId>>,
+    inner: Arc<Mutex<ShareResolverInner<C>>>,
 }
 
-/// Share resolver request messages.
-pub enum Request {
-    /// Resolve the Index located at a remote share key, with a known index
-    /// digest, for merging into a local file share.
-    ///
-    /// If the remote share is valid, the share resolver will set up a
-    /// continual, automatically-renewed watch for this share key.
-    Index {
-        response_tx: ResponseChannel<Response>,
-        key: TypedRecordKey,
-        want_index_digest: Option<Digest>,
-        root: PathBuf,
-    },
-
-    /// Resolve the updated header for a remote share key, optionally providing
-    /// a prior known private route target to release if rotated.
-    ///
-    /// If the remote share is valid, the share resolver will set up a
-    /// continual, automatically-renewed watch for this share key.
-    Header {
-        response_tx: ResponseChannel<Response>,
-        key: TypedRecordKey,
-        prior_target: Option<Target>,
-    },
-
-    /// Stop watching this share key.
-    Remove {
-        response_tx: ResponseChannel<Response>,
-        key: TypedRecordKey,
-    },
-}
-
-impl fmt::Debug for Request {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Index {
-                response_tx: _,
-                key,
-                want_index_digest,
-                root,
-            } => f
-                .debug_struct("Index")
-                .field("key", key)
-                .field("want_index_digest", want_index_digest)
-                .field("root", root)
-                .finish(),
-            Self::Header {
-                response_tx: _,
-                key,
-                prior_target,
-            } => f
-                .debug_struct("Header")
-                .field("key", key)
-                .field("prior_target", prior_target)
-                .finish(),
-            Self::Remove {
-                response_tx: _,
-                key,
-            } => f.debug_struct("Remove").field("key", key).finish(),
-        }
-    }
-}
-
-impl Respondable for Request {
-    type Response = Response;
-
-    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
-        match self {
-            Request::Index { response_tx, .. } => *response_tx = ch,
-            Request::Header { response_tx, .. } => *response_tx = ch,
-            Request::Remove { response_tx, .. } => *response_tx = ch,
-        }
-    }
-
-    fn response_tx(self) -> ResponseChannel<Self::Response> {
-        match self {
-            Request::Index { response_tx, .. } => response_tx,
-            Request::Header { response_tx, .. } => response_tx,
-            Request::Remove { response_tx, .. } => response_tx,
-        }
-    }
-}
-
-impl Request {
-    /// Get the share key specified in the request.
-    fn key(&self) -> &TypedRecordKey {
-        match self {
-            Request::Index {
-                key,
-                want_index_digest: _,
-                root: _,
-                response_tx: _,
-            } => key,
-            Request::Header {
-                key,
-                prior_target: _,
-                response_tx: _,
-            } => key,
-            Request::Remove {
-                key,
-                response_tx: _,
-            } => key,
-        }
-    }
-}
-
-/// Share resolver response messages.
-#[derive(Clone, Debug)]
-pub enum Response {
-    /// Remote share is not available at the given key, with error cause.
-    NotAvailable {
-        key: TypedRecordKey,
-        err_msg: String,
-    },
-
-    /// Remote share has a bad index. This could be caused by a defective or malicious peer,
-    /// or the wrong share key given for the desired index digest.
-    BadIndex { key: TypedRecordKey },
-
-    /// Index is valid, in response to an Index request.
-    Index {
-        key: TypedRecordKey,
-        header: Header,
-        index: Index,
-        target: Target,
-    },
-
-    /// Header is updated. Could be in response to a header request, or unrequested if
-    /// the watch detects a change.
-    Header {
-        key: TypedRecordKey,
-        header: Header,
-        target: Target,
-    },
-
-    /// Acknowledgement that the share key watch has been removed.
-    Remove { key: TypedRecordKey },
-}
-
-impl Response {
-    /// Get the share key for a valid usable share.
-    fn valid_key(&self) -> Option<&TypedRecordKey> {
-        match self {
-            Response::NotAvailable { key: _, err_msg: _ } => None,
-            Response::BadIndex { key: _ } => None,
-            Response::Index {
-                key,
-                header: _,
-                index: _,
-                target: _,
-            } => Some(key),
-            Response::Header {
-                key,
-                header: _,
-                target: _,
-            } => Some(key),
-            Response::Remove { key: _ } => None,
-        }
-    }
-
-    pub fn target(&self) -> Option<&Target> {
-        match self {
-            Response::NotAvailable { .. } => None,
-            Response::BadIndex { .. } => None,
-            Response::Index { target, .. } => Some(target),
-            Response::Header { target, .. } => Some(target),
-            Response::Remove { .. } => None,
-        }
-    }
-}
-
-impl<P: Node> Actor for ShareResolver<P> {
-    type Request = Request;
-    type Response = Response;
-
-    async fn run(
-        &mut self,
+impl<C: Connection + Send + Sync + 'static> ShareResolver<C> {
+    pub fn new_task(
         cancel: CancellationToken,
-        request_rx: flume::Receiver<Self::Request>,
-    ) -> Result<()> {
-        let mut update_rx = self.node.subscribe_veilid_update();
+        retry: Retry,
+        conn: C,
+        root: &Path,
+    ) -> (Self, JoinHandle<Result<()>>) {
+        let (dead_routes_handler, dead_routes_rx) = DeadRoutesHandler::new(cancel.child_token());
+        conn.add_update_handler(Box::new(dead_routes_handler));
+        let inner = Arc::new(Mutex::new(ShareResolverInner::new(conn, root)));
+
+        let task = spawn(Self::run(TaskArgs {
+            cancel: cancel.child_token(),
+            retry,
+            dead_routes_rx,
+            inner: inner.clone(),
+        }));
+
+        (Self { inner }, task)
+    }
+
+    pub async fn subscribe(&self, handler: Box<dyn ShareHandler + Send + Sync>) {
+        self.inner.lock().await.add_share_handler(handler).await
+    }
+
+    pub async fn add_share(&self, key: &TypedRecordKey) -> Result<RemoteShareInfo> {
+        let share_info = self.inner.lock().await.resolve_and_watch(key).await?;
+        Ok(share_info)
+    }
+
+    pub async fn refresh_share(&self, route_id: &RouteId) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        let share = {
+            inner
+                .remote_shares
+                .get(route_id)
+                .ok_or(Error::msg("route_id not found"))?
+                .clone()
+        };
+        inner.refresh(share).await?;
+        Ok(())
+    }
+
+    pub async fn remove_share(&self, key: &TypedRecordKey) -> Result<()> {
+        self.inner.lock().await.remove(key).await?;
+        Ok(())
+    }
+
+    async fn run(args: TaskArgs<C>) -> Result<()> {
         loop {
             select! {
-                _ = cancel.cancelled() => {
+                _ = args.cancel.cancelled() => {
                     return Err(CancelError.into());
                 }
-                res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("share_resolver: receive request"))?;
-                    self.handle_request(req).await?;
-                }
-                res = update_rx.recv() => {
-                    if is_lagged(&res) {
-                        warn!("update_rx channel lagged in share_resolver");
-                        continue;
-                    }
-                    let update = res.with_context(|| format!("share_resolver: receive veilid update"))?;
-                    match update {
-                        VeilidUpdate::ValueChange(ch) => {
-                            if !self.watching.contains(&ch.key) {
-                                continue;
-                            }
-                            // FIXME: this may leak private routes.
-                            // TODO: keep track of prior routes and pass them here?
-                            if let Err(e) = self.handle_request(Request::Header {
-                                response_tx: ResponseChannel::default(),
-                                key: ch.key,
-                                prior_target: None
-                            }).await {
-                                warn!(err = ?e, "watch value change");
-                            }
+                res = args.dead_routes_rx.recv_async() => {
+                    let dead_routes = res?;
+                    for dead_route in dead_routes.iter() {
+                        let share = {
+                            args.inner.lock().await.remote_shares.get(dead_route).cloned()
+                        };
+                        if let Some(share) = share {
+                            backoff_retry!(args.cancel, args.retry, {
+                                args.inner.lock().await.refresh(share.clone()).await?;
+                            })?;
                         }
-                        VeilidUpdate::Shutdown => {
-                            cancel.cancel();
-                        }
-                        _ => {}
                     }
                 }
             }
         }
     }
+}
 
-    /// Handle a share_resolver request, provide a response.
-    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
-        let req_key = req.key().clone();
-        let (resp, mut response_tx) = match req {
-            Request::Index {
-                key,
-                want_index_digest,
-                root,
-                response_tx,
-            } => {
-                let (target, header, mut index) =
-                    self.node.resolve_route_index(&key, root.as_path()).await?;
-                let peer_index_digest = index.digest()?;
+struct ShareResolverInner<C: Connection> {
+    conn: C,
+    root: PathBuf,
+    remote_shares: HashMap<RouteId, RemoteShareInfo>,
+    handlers: HandlerChain,
+}
 
-                // If want_index_digest is None, skip verification
-                // Otherwise, verify the digest matches
-                let digest_matches = match want_index_digest {
-                    None => true, // Skip verification if None
-                    Some(digest) => peer_index_digest.as_slice() == digest,
-                };
-
-                if digest_matches {
-                    self.share_target_tx
-                        .send((key.to_owned(), target.to_owned()))
-                        .context(Unrecoverable::new("notify target on index"))?;
-                    (
-                        Response::Index {
-                            key: key.clone(),
-                            header,
-                            index,
-                            target,
-                        },
-                        response_tx,
-                    )
-                } else {
-                    (Response::BadIndex { key: key.clone() }, response_tx)
-                }
-            }
-            Request::Header {
-                key,
-                prior_target,
-                response_tx,
-            } => {
-                let (target, header) = self.node.resolve_route(&key, prior_target).await?;
-                self.share_target_tx
-                    .send((key.to_owned(), target.to_owned()))
-                    .context(Unrecoverable::new("notify target on header"))?;
-                (
-                    Response::Header {
-                        key: key.clone(),
-                        header,
-                        target,
-                    },
-                    response_tx,
-                )
-            }
-            Request::Remove { key, response_tx } => (
-                Response::Remove {
-                    // No need to do anything; this response key is not valid, causing an unwatch
-                    key: key.clone(),
-                },
-                response_tx,
-            ),
-        };
-
-        if let Some(valid_key) = resp.valid_key() {
-            // Valid usable shares are watched.
-            trace!("watch: share key {valid_key}");
-            self.watching.insert(*valid_key);
-            self.node
-                .watch(*valid_key, ValueSubkeyRangeSet::single(0))
-                .await?;
-        } else {
-            // Invalid or unusable shares are unwatched.
-            self.watching.remove(&req_key);
-            self.node.cancel_watch(&req_key).await?;
+impl<C: Connection + Send + Sync + 'static> ShareResolverInner<C> {
+    fn new(conn: C, root: &Path) -> Self {
+        Self {
+            conn,
+            root: root.to_path_buf(),
+            remote_shares: HashMap::new(),
+            handlers: HandlerChain::default(),
         }
-        trace!(?resp);
+    }
 
-        response_tx
-            .send(resp)
+    async fn add_share_handler(&mut self, handler: Box<dyn ShareHandler + Send + Sync>) {
+        self.handlers.add(handler);
+    }
+
+    #[instrument(skip(self), err)]
+    async fn resolve_and_watch(&mut self, key: &TypedRecordKey) -> Result<RemoteShareInfo> {
+        {
+            self.conn.require_attachment().await?;
+        }
+        // Ensure record is open before reading
+        let (_, header) = StableShareRecord::new_remote(&mut self.conn, key).await?;
+        debug!(
+            ?key,
+            want_index_digest = hex::encode(header.payload_digest()),
+            "read header"
+        );
+        let mut index =
+            StableShareRecord::read_index(&mut self.conn, key, &header, self.root.as_path())
+                .await?;
+        let index_digest = index.digest()?;
+        debug!(?key, index_digest = hex::encode(index_digest), "read index");
+
+        let routing_context = self.conn.routing_context();
+        let route_id = routing_context
+            .api()
+            .import_remote_private_route(header.route_data().to_vec())?;
+        debug!(?key, ?route_id, "private route to remote");
+
+        routing_context
+            .watch_dht_values(*key, Some(ValueSubkeyRangeSet::single(0)), None, None)
+            .await?;
+
+        let share = RemoteShareInfo {
+            key: *key,
+            header: header.clone(),
+            index,
+            index_digest,
+            route_id,
+        };
+        self.remote_shares.insert(share.route_id, share.clone());
+        self.handlers.share_changed(&share)?;
+        Ok(share)
+    }
+
+    async fn refresh(&mut self, mut share: RemoteShareInfo) -> Result<()> {
+        {
+            self.conn.require_attachment().await?;
+        }
+        let header = StableShareRecord::read_header(&mut self.conn, &share.key).await?;
+        if header.route_data() == share.header.route_data() {
+            return Ok(());
+        }
+
+        let routing_context = self.conn.routing_context();
+        let route_id = routing_context
+            .api()
+            .import_remote_private_route(header.route_data().to_vec())?;
+        let prior_route_id = share.route_id;
+        share.route_id = route_id;
+        if let Err(err) = routing_context.api().release_private_route(prior_route_id) {
+            warn!(?err, ?route_id, "release prior route");
+        }
+
+        self.remote_shares.insert(share.route_id, share.clone());
+        self.handlers.share_changed(&share)?;
+        Ok(())
+    }
+
+    async fn remove(&mut self, key: &TypedRecordKey) -> Result<()> {
+        let routing_context = self.conn.routing_context();
+        if let Err(err) = routing_context
+            .cancel_dht_watch(*key, Some(ValueSubkeyRangeSet::single(0)))
             .await
-            .context(Unrecoverable::new("send response from share resolver"))?;
+        {
+            warn!(?err, ?key, "cancel share watch");
+        }
+
+        let share = { self.remote_shares.values().find(|s| &s.key == key).cloned() };
+        if let Some(share) = share {
+            self.remote_shares.remove(&share.route_id);
+        }
         Ok(())
     }
 }
 
-impl<P: Node + Clone> Clone for ShareResolver<P> {
-    fn clone(&self) -> Self {
-        Self {
-            node: self.node.clone(),
-            share_target_tx: self.share_target_tx.clone(),
-            share_target_rx: self.share_target_rx.resubscribe(),
-            watching: self.watching.clone(),
+pub trait ShareHandler {
+    fn share_changed(&self, share: &RemoteShareInfo) -> Result<()>;
+}
+
+pub struct ShareNotifier {
+    remote_share_tx: flume::Sender<RemoteShareInfo>,
+    label: String,
+}
+
+impl ShareNotifier {
+    pub fn new(label: &str) -> (Self, flume::Receiver<RemoteShareInfo>) {
+        let (remote_share_tx, remote_share_rx) = flume::unbounded();
+        (
+            Self {
+                remote_share_tx,
+                label: label.to_string(),
+            },
+            remote_share_rx,
+        )
+    }
+}
+
+impl ShareHandler for ShareNotifier {
+    #[instrument(skip_all, fields(label = self.label), err)]
+    fn share_changed(&self, share: &RemoteShareInfo) -> Result<()> {
+        self.remote_share_tx.send(share.clone())?;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct HandlerChain {
+    handlers: Vec<Box<dyn ShareHandler + Send + Sync>>,
+}
+
+impl HandlerChain {
+    fn add(&mut self, handler: Box<dyn ShareHandler + Send + Sync>) {
+        self.handlers.push(handler);
+    }
+}
+
+impl ShareHandler for HandlerChain {
+    #[instrument(skip_all, fields(key = ?share.key))]
+    fn share_changed(&self, share: &RemoteShareInfo) -> Result<()> {
+        for handler in self.handlers.iter() {
+            if let Err(err) = handler.share_changed(share) {
+                warn!(?err);
+            }
         }
+        Ok(())
+    }
+}
+
+struct DeadRoutesHandler {
+    cancel: CancellationToken,
+    dead_routes_tx: flume::Sender<Vec<RouteId>>,
+}
+
+impl DeadRoutesHandler {
+    fn new(cancel: CancellationToken) -> (DeadRoutesHandler, flume::Receiver<Vec<RouteId>>) {
+        let (route_change_tx, route_change_rx) = flume::unbounded();
+        (
+            Self {
+                cancel,
+                dead_routes_tx: route_change_tx,
+            },
+            route_change_rx,
+        )
+    }
+}
+
+impl UpdateHandler for DeadRoutesHandler {
+    fn route_change(&self, change: &VeilidRouteChange) {
+        if !change.dead_remote_routes.is_empty() {
+            if let Err(err) = self
+                .dead_routes_tx
+                .send(change.dead_remote_routes.to_owned())
+            {
+                warn!(?err, "failed to send route change");
+                self.cancel.cancel();
+            }
+        }
+    }
+    fn shutdown(&self) {
+        trace!("shutdown");
+        self.cancel.cancel();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        path::Path,
-        str::FromStr,
-        sync::{Arc, Mutex},
-    };
+    use std::{str::FromStr, sync::Arc};
 
     use sha2::{Digest as _, Sha256};
     use stigmerge_fileindex::Indexer;
+    use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{RouteId, Target, TypedRecordKey, ValueSubkeyRangeSet};
+    use veilid_core::{DHTSchemaDFLT, RouteId, TypedRecordKey, ValueSubkeyRangeSet};
+    use veilnet::connection::{
+        testing::{create_test_api, StubAPI, StubConnection, StubRoutingContext},
+        RoutingContext,
+    };
 
-    use crate::actor::{OneShot, Operator, ResponseChannel};
     use crate::{
         proto::{Encoder, HaveMapRef, Header, PeerMapRef},
-        share_resolver::{self, ShareResolver},
-        tests::{temp_file, StubNode},
+        retry::Retry,
+        share_resolver::ShareResolver,
+        tests::temp_file,
     };
 
     #[tokio::test]
@@ -392,77 +323,141 @@ mod tests {
         let index = indexer.index().await.expect("index");
         let mut index_digest = Sha256::new();
         index_digest.update(index.encode().expect("encode index"));
-        let index_digest_bytes = index_digest.finalize();
 
-        let mut node = StubNode::new();
+        // Create a connection with mock behavior
+        let temp_dir = TempDir::new().unwrap();
+        let veilid_api = create_test_api(temp_dir.path()).await.unwrap();
+        let mut api = StubAPI::new(veilid_api);
+
+        // Mock route import
+        api.import_remote_private_route = Arc::new(std::sync::Mutex::new(|_route_data| {
+            Ok(RouteId::new([0u8; 32]))
+        }));
+
+        // Create a dummy public key for ValueData::new
+        let dummy_public_key = veilid_core::PublicKey::new([0u8; 32]);
+
         let mock_index = index.clone();
-        node.resolve_route_index_result =
-            Arc::new(Mutex::new(move |_key: &TypedRecordKey, _root: &Path| {
-                let index_internal = mock_index.clone();
-                let index_bytes = index_internal.encode().expect("encode index");
-                Ok((
-                    Target::PrivateRoute(RouteId::new([0u8; 32])),
-                    Header::from_index(
-                        &index_internal,
-                        index_bytes.as_slice(),
-                        &[0xde, 0xad, 0xbe, 0xef],
-                    ),
-                    index_internal,
-                ))
-            }));
-        node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedRecordKey, _values: ValueSubkeyRangeSet| Ok(()),
-        ));
-        node.cancel_watch_result = Arc::new(Mutex::new(move |_key: &TypedRecordKey| Ok(())));
+        let get_dht_calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let watch_calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let cancel_watch_calls = Arc::new(std::sync::Mutex::new(Vec::<TypedRecordKey>::new()));
+
+        let mut routing_context = StubRoutingContext::new(api);
+        {
+            let get_dht_calls = get_dht_calls.clone();
+            let dummy_public_key = dummy_public_key.clone();
+            routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
+                move |key: TypedRecordKey, subkey: u32, _force_refresh| {
+                    get_dht_calls.lock().unwrap().push((key, subkey));
+                    if subkey == 0 {
+                        // Return header data
+                        let index_internal = mock_index.clone();
+                        let index_bytes = index_internal.encode().expect("encode index");
+                        let header = Header::from_index(
+                            &index_internal,
+                            index_bytes.as_slice(),
+                            &[0xde, 0xad, 0xbe, 0xef],
+                        );
+                        let header_bytes = header.encode().expect("encode header");
+                        Ok(Some(
+                            veilid_core::ValueData::new(header_bytes, dummy_public_key).unwrap(),
+                        ))
+                    } else {
+                        // Return index data for subkey 1
+                        let index_internal = mock_index.clone();
+                        let index_bytes = index_internal.encode().expect("encode index");
+                        Ok(Some(
+                            veilid_core::ValueData::new(index_bytes, dummy_public_key).unwrap(),
+                        ))
+                    }
+                },
+            ));
+        }
+
+        {
+            let watch_calls = watch_calls.clone();
+            routing_context.watch_dht_values = Arc::new(tokio::sync::Mutex::new(
+                move |key: TypedRecordKey,
+                      _values: Option<ValueSubkeyRangeSet>,
+                      _expiration,
+                      _count| {
+                    watch_calls.lock().unwrap().push(key);
+                    Ok(true) // Return true instead of ()
+                },
+            ));
+        }
+
+        {
+            let cancel_watch_calls = cancel_watch_calls.clone();
+            routing_context.cancel_dht_watch = Arc::new(tokio::sync::Mutex::new(
+                move |key: TypedRecordKey, _values: Option<ValueSubkeyRangeSet>| {
+                    cancel_watch_calls.lock().unwrap().push(key);
+                    Ok(true) // Return true instead of ()
+                },
+            ));
+        }
+        let mut conn = StubConnection::new(routing_context.clone());
+        conn.require_attachment = Arc::new(tokio::sync::Mutex::new(|| Ok(())));
+        conn.add_update_handler = Arc::new(std::sync::Mutex::new(|_| ()));
+
+        let dht_rec = routing_context
+            .create_dht_record(
+                veilid_core::DHTSchema::DFLT(DHTSchemaDFLT::new(2).unwrap()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let fake_key = dht_rec.key().clone();
 
         let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot);
+        let retry = Retry::default();
+        let (resolver, resolver_task) =
+            ShareResolver::new_task(cancel.clone(), retry, conn, index.root());
 
-        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
-            .expect("key");
+        // Test adding a share - this should resolve to index
+        let share_info = resolver.add_share(&fake_key).await.expect("add share");
 
-        // Send a bad "want index digest"
-        let bad_digest: crate::proto::Digest = [0u8; 32];
-        let bad_index_resp = operator
-            .call(share_resolver::Request::Index {
-                response_tx: ResponseChannel::default(),
-                key: fake_key,
-                want_index_digest: Some(bad_digest),
-                root: index.root().to_path_buf(),
-            })
+        // Verify the resolved share info
+        assert_eq!(share_info.key, fake_key);
+        assert_eq!(share_info.index.root(), index.root());
+
+        // Verify the header was created correctly
+        let expected_index_bytes = index.encode().expect("encode index");
+        let expected_header = Header::from_index(
+            &index,
+            expected_index_bytes.as_slice(),
+            &[0xde, 0xad, 0xbe, 0xef],
+        );
+        assert_eq!(share_info.header.route_data(), expected_header.route_data());
+
+        // Verify DHT calls were made
+        let get_dht_calls = get_dht_calls.lock().unwrap();
+        assert_eq!(get_dht_calls.len(), 2); // Header (subkey 0) and index (subkey 1)
+        assert_eq!(get_dht_calls[0].0, fake_key);
+        assert_eq!(get_dht_calls[0].1, 0); // Header subkey
+        assert_eq!(get_dht_calls[1].0, fake_key);
+        assert_eq!(get_dht_calls[1].1, 1); // Index subkey
+
+        let watch_calls = watch_calls.lock().unwrap();
+        assert_eq!(watch_calls.len(), 1);
+        assert_eq!(watch_calls[0], fake_key);
+
+        // Test removing the share
+        resolver
+            .remove_share(&fake_key)
             .await
-            .expect("call request");
-        assert!(matches!(
-            bad_index_resp,
-            share_resolver::Response::BadIndex { key: _ }
-        ));
+            .expect("remove share");
 
-        // Send a "want index digest" that matches the mock resolved index
-        let digest_array: crate::proto::Digest = index_digest_bytes.into();
-        let good_index_resp = operator
-            .call(share_resolver::Request::Index {
-                response_tx: ResponseChannel::default(),
-                key: fake_key,
-                want_index_digest: Some(digest_array),
-                root: index.root().to_path_buf(),
-            })
-            .await
-            .expect("call request");
-        assert!(matches!(
-            good_index_resp,
-            share_resolver::Response::Index {
-                key: _,
-                header: _,
-                index: _,
-                target: _
-            }
-        ));
+        let cancel_watch_calls = cancel_watch_calls.lock().unwrap();
+        assert_eq!(cancel_watch_calls.len(), 1);
+        assert_eq!(cancel_watch_calls[0], fake_key);
 
-        // Initate a shutdown
+        // Initiate a shutdown
         cancel.cancel();
 
         // Service run terminates
-        operator.join().await.expect_err("cancelled");
+        resolver_task.await.unwrap().unwrap_err();
     }
 
     #[tokio::test]
@@ -472,8 +467,6 @@ mod tests {
             .await
             .expect("indexer");
         let index = indexer.index().await.expect("index");
-        let mut index_digest = Sha256::new();
-        index_digest.update(index.encode().expect("encode index"));
 
         let fake_peer_map_key =
             TypedRecordKey::from_str("VLD0:hIfQGdXUq-oO5wwzODJukR7zOGwpNznKYaFoh6uTp2A")
@@ -482,62 +475,131 @@ mod tests {
             TypedRecordKey::from_str("VLD0:rl3AyyZNFWP8GQGyY9xSnnIjCDagXzbCA47HFmsbLDU")
                 .expect("key");
 
-        let mut node = StubNode::new();
+        // Create a connection with mock behavior
+        let temp_dir = TempDir::new().unwrap();
+        let veilid_api = create_test_api(temp_dir.path()).await.unwrap();
+        let mut api = StubAPI::new(veilid_api);
+
+        // Mock route import
+        api.import_remote_private_route = Arc::new(std::sync::Mutex::new(|_route_data| {
+            Ok(RouteId::new([0u8; 32]))
+        }));
+
+        // Create a dummy public key for ValueData::new
+        let dummy_public_key = veilid_core::PublicKey::new([0u8; 32]);
+
         let mock_index = index.clone();
         let mock_peer_map_key = fake_peer_map_key.clone();
         let mock_have_map_key = fake_have_map_key.clone();
-        node.resolve_route_result = Arc::new(Mutex::new(
-            move |_key: &TypedRecordKey, _prior_route: Option<Target>| {
-                let index_internal = mock_index.clone();
-                let index_bytes = index_internal.encode().expect("encode index");
-                let header = Header::from_index(
-                    &index_internal,
-                    index_bytes.as_slice(),
-                    &[0xde, 0xad, 0xbe, 0xef],
-                )
-                .with_peer_map(PeerMapRef::new(mock_peer_map_key, 1u16))
-                .with_have_map(HaveMapRef::new(mock_have_map_key, 1u16));
-                Ok((Target::PrivateRoute(RouteId::new([0u8; 32])), header))
-            },
-        ));
-        node.watch_result = Arc::new(Mutex::new(
-            move |_key: TypedRecordKey, _values: ValueSubkeyRangeSet| Ok(()),
-        ));
+        let get_dht_calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let watch_calls = Arc::new(std::sync::Mutex::new(vec![]));
 
-        let cancel = CancellationToken::new();
-        let mut operator = Operator::new(cancel.clone(), ShareResolver::new(node), OneShot);
-
-        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
-            .expect("key");
-
-        // Send a "want index digest" that matches the mock resolved index
-        let header_resp = operator
-            .call(share_resolver::Request::Header {
-                response_tx: ResponseChannel::default(),
-                key: fake_key,
-                prior_target: None,
-            })
-            .await
-            .expect("call request");
-
-        match header_resp {
-            share_resolver::Response::Header {
-                key,
-                header,
-                target,
-            } => {
-                assert_eq!(key, fake_key);
-                assert_eq!(header.have_map().map(|m| m.key()), Some(&fake_have_map_key));
-                assert_eq!(header.peer_map().map(|m| m.key()), Some(&fake_peer_map_key));
-                assert_eq!(target, Target::PrivateRoute(RouteId::new([0u8; 32])),);
-            }
-            _ => panic!("unexpected response"),
+        let mut routing_context = StubRoutingContext::new(api);
+        {
+            let get_dht_calls = get_dht_calls.clone();
+            let dummy_public_key = dummy_public_key.clone();
+            routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
+                move |key: TypedRecordKey, subkey: u32, _force_refresh| {
+                    get_dht_calls.lock().unwrap().push((key, subkey));
+                    if subkey == 0 {
+                        // Return header data with peer_map and have_map
+                        let index_internal = mock_index.clone();
+                        let index_bytes = index_internal.encode().expect("encode index");
+                        let mut header = Header::from_index(
+                            &index_internal,
+                            index_bytes.as_slice(),
+                            &[0xde, 0xad, 0xbe, 0xef],
+                        );
+                        header.set_peer_map(PeerMapRef::new(mock_peer_map_key, 1u16));
+                        header.set_have_map(HaveMapRef::new(mock_have_map_key, 1u16));
+                        let header_bytes = header.encode().expect("encode header");
+                        Ok(Some(
+                            veilid_core::ValueData::new(header_bytes, dummy_public_key).unwrap(),
+                        ))
+                    } else {
+                        // Return index data for subkey 1
+                        let index_internal = mock_index.clone();
+                        let index_bytes = index_internal.encode().expect("encode index");
+                        Ok(Some(
+                            veilid_core::ValueData::new(index_bytes, dummy_public_key).unwrap(),
+                        ))
+                    }
+                },
+            ));
         }
 
-        // Initate a shutdown
+        {
+            let watch_calls = watch_calls.clone();
+            routing_context.watch_dht_values = Arc::new(tokio::sync::Mutex::new(
+                move |key: TypedRecordKey,
+                      _values: Option<ValueSubkeyRangeSet>,
+                      _expiration,
+                      _count| {
+                    watch_calls.lock().unwrap().push(key);
+                    Ok(true) // Return true instead of ()
+                },
+            ));
+        }
+        let mut conn = StubConnection::new(routing_context.clone());
+        conn.require_attachment = Arc::new(tokio::sync::Mutex::new(|| Ok(())));
+        conn.add_update_handler = Arc::new(std::sync::Mutex::new(|_| ()));
+
+        let cancel = CancellationToken::new();
+        let retry = Retry::default();
+        let (resolver, resolver_task) =
+            ShareResolver::new_task(cancel.clone(), retry, conn, index.root());
+
+        let dht_rec = routing_context
+            .create_dht_record(
+                veilid_core::DHTSchema::DFLT(DHTSchemaDFLT::new(2).unwrap()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let fake_key = dht_rec.key().clone();
+
+        // Test adding a share - this should resolve to header with peer_map and have_map
+        let share_info = resolver.add_share(&fake_key).await.expect("add share");
+
+        // Verify the resolved share info
+        assert_eq!(share_info.key, fake_key);
+        assert_eq!(share_info.index.root(), index.root());
+
+        // Verify the header was created correctly with peer_map and have_map
+        assert_eq!(
+            share_info.header.have_map().map(|m| m.key()),
+            Some(&fake_have_map_key)
+        );
+        assert_eq!(
+            share_info.header.peer_map().map(|m| m.key()),
+            Some(&fake_peer_map_key)
+        );
+        assert_eq!(
+            share_info.header.have_map().map(|m| m.subkeys()),
+            Some(1u16)
+        );
+        assert_eq!(
+            share_info.header.peer_map().map(|m| m.subkeys()),
+            Some(1u16)
+        );
+
+        // Verify DHT calls were made
+        let get_dht_calls = get_dht_calls.lock().unwrap();
+        assert_eq!(get_dht_calls.len(), 2); // Header (subkey 0) and index (subkey 1)
+        assert_eq!(get_dht_calls[0].0, fake_key);
+        assert_eq!(get_dht_calls[0].1, 0); // Header subkey
+        assert_eq!(get_dht_calls[1].0, fake_key);
+        assert_eq!(get_dht_calls[1].1, 1); // Index subkey
+
+        let watch_calls = watch_calls.lock().unwrap();
+        assert_eq!(watch_calls.len(), 1);
+        assert_eq!(watch_calls[0], fake_key);
+
+        // Initiate a shutdown
         cancel.cancel();
 
-        // Service run terminates
-        operator.join().await.expect_err("cancelled");
+        // Service run terminates with either cancelled or receive error
+        resolver_task.await.unwrap().unwrap_err();
     }
 }

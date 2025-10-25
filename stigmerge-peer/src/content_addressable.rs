@@ -13,7 +13,7 @@ impl ContentAddressable for Index {
         self.canonicalize();
         let mut digest = Sha256::new();
         digest.update(self.encode()?);
-        Ok(digest.finalize().try_into()?)
+        Ok(digest.finalize().into())
     }
 }
 

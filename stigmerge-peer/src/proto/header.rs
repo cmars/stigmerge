@@ -127,7 +127,7 @@ impl Decoder for Header {
                     key[8..16].clone_from_slice(&key_reader.get_p1().to_be_bytes()[..]);
                     key[16..24].clone_from_slice(&key_reader.get_p2().to_be_bytes()[..]);
                     key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
-                    header = header.with_have_map(HaveMapRef {
+                    header.set_have_map(HaveMapRef {
                         key: TypedRecordKey::new(kind, RecordKey::new(key)),
                         subkeys: have_map_ref_reader.get_subkeys(),
                     });
@@ -146,7 +146,7 @@ impl Decoder for Header {
                     key[8..16].clone_from_slice(&key_reader.get_p1().to_be_bytes()[..]);
                     key[16..24].clone_from_slice(&key_reader.get_p2().to_be_bytes()[..]);
                     key[24..32].clone_from_slice(&key_reader.get_p3().to_be_bytes()[..]);
-                    header = header.with_peer_map(PeerMapRef {
+                    header.set_peer_map(PeerMapRef {
                         key: TypedRecordKey::new(
                             typed_key_reader.get_kind().into(),
                             RecordKey::new(key),
@@ -225,7 +225,7 @@ impl Header {
             index.payload().digest().try_into().unwrap(),
             index.payload().length(),
             ((index_bytes.len() / ValueData::MAX_LEN)
-                + if (index_bytes.len() % ValueData::MAX_LEN) > 0 {
+                + if !index_bytes.len().is_multiple_of(ValueData::MAX_LEN) {
                     1
                 } else {
                     0
@@ -239,7 +239,7 @@ impl Header {
     }
 
     pub fn payload_digest(&self) -> Digest {
-        self.payload_digest.clone()
+        self.payload_digest
     }
 
     pub fn payload_length(&self) -> usize {
@@ -251,32 +251,23 @@ impl Header {
     }
 
     pub fn route_data(&self) -> &[u8] {
-        &self.route_data.as_slice()
+        self.route_data.as_slice()
     }
 
-    pub fn with_route_data(&self, route_data: Vec<u8>) -> Header {
-        Header {
-            payload_digest: self.payload_digest,
-            payload_length: self.payload_length,
-            subkeys: self.subkeys,
-            route_data,
-            have_map_ref: self.have_map_ref.clone(),
-            peer_map_ref: self.peer_map_ref.clone(),
-        }
+    pub fn set_route_data(&mut self, route_data: Vec<u8>) {
+        self.route_data = route_data;
     }
 
-    pub fn with_have_map(mut self, have_map_ref: HaveMapRef) -> Self {
+    pub fn set_have_map(&mut self, have_map_ref: HaveMapRef) {
         self.have_map_ref = Some(have_map_ref);
-        self
     }
 
     pub fn have_map(&self) -> Option<&HaveMapRef> {
         self.have_map_ref.as_ref()
     }
 
-    pub fn with_peer_map(mut self, peer_map_ref: PeerMapRef) -> Self {
+    pub fn set_peer_map(&mut self, peer_map_ref: PeerMapRef) {
         self.peer_map_ref = Some(peer_map_ref);
-        self
     }
 
     pub fn peer_map(&self) -> Option<&PeerMapRef> {

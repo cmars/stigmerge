@@ -17,18 +17,20 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = { workspace = true }
 backoff = { workspace = true }
-capnp = "0.20"
-flume = { version = "0.11", features = ["async"] }
-hex = "0.4"
-path-absolutize = "3.1"
-rand = "0.8"
+capnp = { workspace = true }
+flume = { workspace = true }
+hex = { workspace = true }
+path-absolutize = { workspace = true }
 stigmerge_fileindex = { version = "0", path = "../stigmerge-fileindex" }
-thiserror = "2.0"
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-tokio-utils = { version = "0.1" }
 tracing = { workspace = true }
 veilid-core = { workspace = true }
+veilnet = { workspace = true }
+
+[features]
+refactor = []
 
 [target.'cfg(unix)'.dependencies]
 sha2 = { workspace = true }
@@ -37,8 +39,8 @@ sha2 = { workspace = true }
 sha2 = "0.10"
 
 [build-dependencies]
-capnpc = "0.20"
-hex = "0.4"
+capnpc = { workspace = true }
+hex = { workspace = true }
 
 [target.'cfg(unix)'.build-dependencies]
 sha2 = { workspace = true }
@@ -47,9 +49,10 @@ sha2 = { workspace = true }
 sha2 = "0.10"
 
 [dev-dependencies]
-tempfile = "3.13"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-clap = { version = "4.5", features = ["derive", "env"] }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+veilnet = { workspace = true, features = ["testing"] }
 
 [package.metadata.docs.rs]
 rustc-args = [ "--cfg" , "doc"]

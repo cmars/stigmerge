@@ -3,8 +3,9 @@
 use indicatif::MultiProgress;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-pub mod app;
-pub mod cli;
+mod app;
+mod cli;
+mod info;
 pub mod share;
 
 pub use app::App;
@@ -41,7 +42,9 @@ fn env_filter() -> EnvFilter {
     if std::env::var("RUST_LOG").is_ok() {
         EnvFilter::builder().from_env_lossy()
     } else {
-        "stigmerge=debug,stigmerge_peer=debug".parse().unwrap()
+        "stigmerge=debug,stigmerge_peer=debug,veilnet=debug"
+            .parse()
+            .unwrap()
     }
 }
 

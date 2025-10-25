@@ -1,19 +1,19 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Error, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use stigmerge_peer::{
-    actor::ConnectionState,
     fetcher::{self},
-    is_lagged, new_routing_context,
-    node::{Node, Veilid},
-    CancelError,
+    is_cancelled, is_lagged, new_connection, CancelError,
 };
 use tokio::{fs::File, io::AsyncWriteExt, select, spawn, sync::broadcast, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
+use veilnet::{connection::StateAttachmentWatcher, Connection};
 
 use crate::{
+    cli::Commands,
+    info::share_info,
     initialize_stdout_logging, initialize_ui_logging,
     share::{Event, Share},
     Cli,
@@ -51,99 +51,115 @@ impl App {
             initialize_ui_logging(self.multi_progress.clone());
         }
 
-        // Set up Veilid node
+        // Set up Veilid connection
         let state_dir = self.cli.state_dir()?;
         debug!(state_dir);
-        let (routing_context, update_rx) = new_routing_context(&state_dir, None).await?;
-        let node = Veilid::new(routing_context, update_rx).await?;
+        let conn = new_connection(state_dir.to_string().as_str(), None).await?;
 
         // Set up cancellation token
         let cancel = CancellationToken::new();
 
         // Set up ctrl-c handler
-        let ctrl_c_cancel = cancel.clone();
-        let ctrl_c_node = node.clone();
-        spawn(async move {
-            select! {
-                _ = ctrl_c_cancel.cancelled() => {}
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received ctrl-c, shutting down...");
+        let ctrl_c_handler = {
+            let cancel = cancel.clone();
+            let conn = conn.clone();
+            spawn(async move {
+                select! {
+                    _ = cancel.cancelled() => {}
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Received ctrl-c, shutting down...");
+                    }
                 }
-            }
-            ctrl_c_cancel.cancel();
-            ctrl_c_node.shutdown().await?;
-            trace!("Ctrl-C handler completed");
-            Ok::<(), Error>(())
-        });
+                cancel.cancel();
 
-        let res = self.run_with_node(cancel, node.clone()).await;
-        trace!("run_with_node completed");
-        if let Err(e) = node.shutdown().await {
-            warn!(err = ?e);
+                conn.close().await?;
+                trace!("Ctrl-C handler completed");
+                Ok::<(), Error>(())
+            })
+        };
+
+        if let Commands::Info { share_key, path } = &self.cli.commands {
+            share_info(cancel, conn, share_key, path).await?;
+            return Ok(());
         }
-        if let Err(e) = res {
-            error!(err = ?e);
-            return Err(e);
+
+        let res = self.run_with_connection(cancel, conn.clone()).await;
+        trace!(?res, "run_with_connection completed");
+        if let Err(err) = ctrl_c_handler.await {
+            warn!(?err);
+        }
+        if let Err(err) = res {
+            if !is_cancelled(&err) {
+                // This will log a full stack trace
+                error!(?err);
+            } else {
+                error!(%err);
+            }
+            return Err(err);
         }
         Ok(())
     }
 
-    async fn run_with_node<T: Node + Sync + Send + 'static>(
+    async fn run_with_connection<C: veilnet::Connection + Clone + Send + Sync + 'static>(
         &self,
         cancel: CancellationToken,
-        node: T,
+        conn: C,
     ) -> Result<()> {
-        let mut tasks = JoinSet::new();
-
-        // Set up connection state
-        let conn_state_inner = ConnectionState::new();
-        let mut conn_state_rx = conn_state_inner.subscribe();
-        let conn_state = Arc::new(tokio::sync::Mutex::new(conn_state_inner));
-
         // Set up connection status progress bar
         let conn_progress_bar = self.multi_progress.add(ProgressBar::new_spinner());
-        conn_progress_bar.set_message("Connecting to Veilid network");
+        conn_progress_bar.set_message("Connected to Veilid network");
         conn_progress_bar.set_prefix("📶");
-        conn_progress_bar.enable_steady_tick(Duration::from_millis(100));
+        conn_progress_bar.disable_steady_tick();
+        conn_progress_bar.set_style(ProgressStyle::with_template("{prefix} {msg}")?);
 
-        // Monitor connection state
-        let conn_cancel = cancel.clone();
-        tasks.spawn(async move {
-            loop {
-                select! {
-                    _ = conn_cancel.cancelled() => {
-                        return Err(CancelError.into());
-                    }
-                    res = conn_state_rx.changed() => {
-                        res?;
-                        if *conn_state_rx.borrow_and_update() {
-                            conn_progress_bar.disable_steady_tick();
-                            conn_progress_bar.set_style(ProgressStyle::with_template("{prefix} {msg}")?);
-                            conn_progress_bar.set_message("Connected to Veilid network");
-                        } else {
-                            conn_progress_bar.enable_steady_tick(Duration::from_millis(100));
-                            conn_progress_bar.set_style(ProgressStyle::with_template("{spinner} {msg}")?);
-                            conn_progress_bar.set_message("Disconnected from Veilid network");
+        let (attachment_watcher, mut attachment_rx) = StateAttachmentWatcher::new();
+        conn.add_update_handler(Box::new(attachment_watcher));
+
+        let share_mode = self.cli.commands.share_args()?;
+        let mut share = Share::new(conn, share_mode)?;
+
+        {
+            let cancel = cancel.clone();
+            share.tasks.spawn(async move {
+                loop {
+                    select! {
+                        _ = cancel.cancelled() => {
+                            return Err(CancelError.into());
+                        }
+                        res = attachment_rx.changed() => {
+                            res?;
+                            let state = attachment_rx.borrow_and_update();
+                            if state.public_internet_ready {
+                                conn_progress_bar.disable_steady_tick();
+                                conn_progress_bar.set_style(ProgressStyle::with_template("{prefix} {msg}")?);
+                                conn_progress_bar.set_message("Connected to Veilid network");
+                            } else {
+                                conn_progress_bar.enable_steady_tick(Duration::from_millis(100));
+                                conn_progress_bar.set_style(ProgressStyle::with_template("{spinner} {msg}")?);
+                                conn_progress_bar.set_message("Disconnected from Veilid network");
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
+        }
 
-        let (share_mode, share_config) = self.cli.commands.share_args()?;
-        let mut share = Share::new(node, conn_state, share_mode, share_config)?;
-
-        self.add_state_file_handler(&cancel, &mut tasks, share.subscribe_events())?;
-        self.add_fetch_progress(&cancel, &mut tasks, share.subscribe_events())?;
-        self.add_seed_indexer_progress(&cancel, &mut tasks, share.subscribe_events())?;
+        {
+            let events_rx = share.subscribe_events();
+            self.add_state_file_handler(&cancel, &mut share.tasks, events_rx)?;
+        }
+        {
+            let events_rx = share.subscribe_events();
+            self.add_fetch_progress(&cancel, &mut share.tasks, events_rx)?;
+        }
+        {
+            let events_rx = share.subscribe_events();
+            self.add_seed_indexer_progress(&cancel, &mut share.tasks, events_rx)?;
+        }
 
         share.start(cancel.clone()).await?;
-        tasks.spawn(share.join());
-        tasks
-            .join_all()
-            .await
-            .into_iter()
-            .collect::<Result<(), _>>()
+        share.join().await?;
+        Ok(())
     }
 
     fn add_fetch_progress(
@@ -290,7 +306,7 @@ impl App {
                         // Write state files to state_dir, especially useful for
                         // providing share info to other processes.
                         Self::write_state_file(&state_dir, "index_digest",
-                            hex::encode(&share_info.want_index_digest)).await?;
+                            hex::encode(share_info.want_index_digest)).await?;
                         Self::write_state_file(&state_dir, "share_key",
                             share_info.key.to_string()).await?;
 
@@ -305,7 +321,7 @@ impl App {
                                 .map(|f| f.path().to_string_lossy())
                                 .unwrap(),
                             if share_info.want_index.files().len() > 1 { "..." } else { "" },
-                            share_info.key.to_string()
+                            share_info.key
                         ));
                     }
                 }

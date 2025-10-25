@@ -2,19 +2,17 @@
 #![recursion_limit = "256"]
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ConnectionState, Operator, ResponseChannel, WithVeilidConnection};
-use stigmerge_peer::new_routing_context;
-use stigmerge_peer::node::Veilid;
-use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
+use stigmerge_peer::new_connection;
+use stigmerge_peer::share_announcer::ShareAnnouncer;
 use stigmerge_peer::Error;
-use tokio::select;
-use tokio::sync::Mutex;
+use stigmerge_peer::Retry;
+use tokio::{select, spawn};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use veilnet::Connection;
 
 /// Share announce CLI arguments
 #[derive(Parser, Debug)]
@@ -31,53 +29,36 @@ async fn main() -> std::result::Result<(), Error> {
 
     let args = Args::parse();
     let file = args.file;
-    //let root = file
-    //    .parent()
-    //    .unwrap_or_else(|| std::path::Path::new("."))
-    //    .to_path_buf();
 
     // Index the file
     let indexer = Indexer::from_file(file.as_path()).await?;
     let index = indexer.index().await?;
 
-    let state_dir = tempfile::tempdir()?;
-
     // Set up Veilid peer
-    let (routing_context, update_rx) =
-        new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let node = Veilid::new(routing_context, update_rx).await?;
-
+    let state_dir = tempfile::tempdir()?;
+    let conn = new_connection(state_dir.path().to_str().unwrap(), None).await?;
     let cancel = CancellationToken::new();
-    let conn_state = Arc::new(Mutex::new(ConnectionState::new()));
+    let retry = Retry::default();
 
-    // Announce the share
-    let mut announce_op = Operator::new(
-        cancel.clone(),
-        ShareAnnouncer::new(node.clone(), index.clone()),
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-    );
+    let share_announcer = ShareAnnouncer::new(cancel.clone(), retry, conn.clone(), index).await?;
+    let share_info = share_announcer.share_info().await;
+    let announcer_task = spawn(share_announcer.run());
 
-    let (key, target, _header) = match announce_op
-        .call(share_announcer::Request::Announce {
-            response_tx: ResponseChannel::default(),
-        })
-        .await?
-    {
-        share_announcer::Response::Announce {
-            key,
-            target,
-            header,
-        } => (key, target, header),
-        _ => anyhow::bail!("Announce failed"),
-    };
-    info!("announced: key={key}, target={target:?}");
+    info!(key = ?share_info.key, "announced share");
 
-    select! {
-        _ = tokio::signal::ctrl_c() => {
-            cancel.cancel();
+    spawn(async move {
+        select! {
+            _ = tokio::signal::ctrl_c() => {
+                conn.close().await?;
+                cancel.cancel();
+            }
         }
-    }
+        Ok::<(), veilnet::connection::Error>(())
+    });
 
-    announce_op.join().await.expect("announce task");
+    announcer_task
+        .await
+        .expect("announce task")
+        .expect("announce run");
     Ok(())
 }

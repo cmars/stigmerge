@@ -22,7 +22,7 @@ pub struct Cli {
 
 impl Cli {
     pub fn no_ui(&self) -> bool {
-        return self.no_ui || !std::io::stdout().is_terminal();
+        self.no_ui || !std::io::stdout().is_terminal()
     }
 
     pub fn state_dir(&self) -> Result<String> {
@@ -36,7 +36,7 @@ impl Cli {
                 ref output_path,
                 ..
             } => {
-                if share_keys.len() == 0 {
+                if share_keys.is_empty() {
                     return Err(Error::msg("at least one share key must be provided"));
                 }
                 let key_match = match index_digest {
@@ -52,13 +52,16 @@ impl Cli {
             Commands::Seed { ref path } => {
                 self.state_dir_for(format!("seed:{}", path.to_string_lossy()))
             }
+            Commands::Info { ref path, .. } => {
+                self.state_dir_for(format!("info:{}", path.to_string_lossy()))
+            }
             _ => Err(Error::msg("invalid command")),
         }
     }
 
     pub fn state_dir_for(&self, key: String) -> Result<String> {
         let mut key_digest = Sha256::new();
-        key_digest.update(&key.as_bytes());
+        key_digest.update(key.as_bytes());
         let key_digest_bytes: [u8; 32] = key_digest.finalize().into();
         let dir_name = hex::encode(key_digest_bytes);
         let data_dir = dirs::state_dir()
@@ -77,7 +80,7 @@ impl Cli {
         if let Commands::Version = self.commands {
             return true;
         }
-        return false;
+        false
     }
 }
 
@@ -91,24 +94,26 @@ pub enum Commands {
 
         #[arg(long = "output-path", short = 'o', default_value = ".")]
         output_path: PathBuf,
-
-        #[arg(long = "fetchers", short = 'n', default_value = "50")]
-        fetchers: usize,
     },
     Seed {
+        path: PathBuf,
+    },
+    Info {
+        share_key: String,
+
+        #[arg(default_value = ".")]
         path: PathBuf,
     },
     Version,
 }
 
 impl Commands {
-    pub fn share_args(&self) -> Result<(share::Mode, share::Config)> {
+    pub fn share_args(&self) -> Result<share::Mode> {
         Ok(match self {
             Commands::Fetch {
                 share_keys: share_key_strings,
                 index_digest,
                 output_path,
-                fetchers,
             } => {
                 let want_index_digest = match index_digest {
                     Some(digest_string) => {
@@ -125,24 +130,16 @@ impl Commands {
                 for share_key_string in share_key_strings {
                     share_keys.push(share_key_string.parse()?);
                 }
-                (
-                    share::Mode::Fetch {
-                        root: output_path.into(),
-                        want_index_digest,
-                        share_keys,
-                    },
-                    share::Config {
-                        n_fetchers: TryInto::<u8>::try_into(*fetchers)?,
-                    },
-                )
+                share::Mode::Fetch {
+                    root: output_path.into(),
+                    want_index_digest,
+                    share_keys,
+                }
             }
-            Commands::Seed { path } => (
-                share::Mode::Seed {
-                    path: path.to_owned(),
-                },
-                share::Config::default(),
-            ),
-            Commands::Version => return Err(Error::msg("invalid command")),
+            Commands::Seed { path } => share::Mode::Seed {
+                path: path.to_owned(),
+            },
+            _ => return Err(Error::msg("invalid command")),
         })
     }
 }

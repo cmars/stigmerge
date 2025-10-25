@@ -52,17 +52,17 @@ impl Index {
 
     /// Get the root path that the index represents.
     pub fn root(&self) -> &Path {
-        return self.root.as_ref();
+        self.root.as_ref()
     }
 
     /// Get the content layout that the index represents.
     pub fn payload(&self) -> &PayloadSpec {
-        return &self.payload;
+        &self.payload
     }
 
     /// Get the file layout that the index represents.
     pub fn files(&self) -> &Vec<FileSpec> {
-        return &self.files;
+        &self.files
     }
 
     /// Create a new empty index with the same root path.
@@ -99,7 +99,7 @@ impl Index {
             have.files.iter().map(|f| (f.path(), f)).collect();
 
         for (want_file_index, want_file) in self.files.iter().enumerate() {
-            if let Some(_) = have_files_map.get(want_file.path()) {
+            if have_files_map.contains_key(want_file.path()) {
                 // Compare pieces considering the PayloadSlice
                 let want_pieces = self.payload.pieces();
                 let have_pieces = have.payload.pieces();
@@ -208,19 +208,10 @@ pub struct FileBlockRef {
 }
 
 /// Progress of an indexing process.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Progress {
     pub length: u64,
     pub position: u64,
-}
-
-impl Default for Progress {
-    fn default() -> Self {
-        Progress {
-            length: 0u64,
-            position: 0u64,
-        }
-    }
 }
 
 /// Indexer represents a process which indexes filesystem contents.
@@ -284,7 +275,7 @@ impl Indexer {
 
         let file_path = want.root.join(want.files[0].path());
         let file_len = TryInto::<u64>::try_into(want.files[0].contents().length()).unwrap();
-        if let Ok(_) = async {
+        if async {
             // Truncate an existing file to the wanted file length
             let fh = OpenOptions::new()
                 .write(true)
@@ -297,6 +288,7 @@ impl Indexer {
             Ok::<(), Error>(())
         }
         .await
+        .is_ok()
         {
             Indexer::from_file(&file_path).await
         } else {
@@ -337,7 +329,7 @@ impl Indexer {
 
         // files is the file given
         Ok(Index {
-            root: self.root_dir.to_owned().into(),
+            root: self.root_dir.to_owned(),
             payload,
             files: vec![FileSpec {
                 path: resolved_file.strip_prefix(&self.root_dir)?.to_owned(),
@@ -362,7 +354,7 @@ impl Indexer {
 
         let file_len = TryInto::<usize>::try_into(file_meta.len()).unwrap();
         let n_tasks = file_len / INDEX_BUFFER_SIZE
-            + if file_len % INDEX_BUFFER_SIZE > 0 {
+            + if !file_len.is_multiple_of(INDEX_BUFFER_SIZE) {
                 1
             } else {
                 0
@@ -431,7 +423,7 @@ impl Indexer {
                             }
                         }
                         Some(Err(e)) => return Err(e.into()),
-                        Some(Ok(Err(e))) => return Err(e.into()),
+                        Some(Ok(Err(e))) => return Err(e),
                         _ => continue,
                     }
                 }
@@ -445,7 +437,7 @@ impl Indexer {
 
         scan_results.sort_by_key(|r| r.piece_index);
         payload.pieces = scan_results.drain(..).map(|r| r.piece).collect();
-        if payload.pieces.len() > 0 {
+        if !payload.pieces.is_empty() {
             payload.length = (payload.pieces.len() - 1) * PIECE_SIZE_BYTES;
             payload.length += payload.pieces[payload.pieces.len() - 1].length;
         }
@@ -527,7 +519,7 @@ impl FileSpec {
     }
 
     pub fn path(&self) -> &Path {
-        return self.path.as_ref();
+        self.path.as_ref()
     }
 
     pub fn contents(&self) -> PayloadSlice {
@@ -535,7 +527,7 @@ impl FileSpec {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct PayloadSlice {
     /// Starting piece where the slice begins.
     starting_piece: usize,
@@ -557,30 +549,20 @@ impl PayloadSlice {
     }
 
     pub fn starting_piece(&self) -> usize {
-        return self.starting_piece;
+        self.starting_piece
     }
 
     pub fn piece_offset(&self) -> usize {
-        return self.piece_offset;
+        self.piece_offset
     }
 
     pub fn length(&self) -> usize {
-        return self.length;
-    }
-}
-
-impl Clone for PayloadSlice {
-    fn clone(&self) -> Self {
-        PayloadSlice {
-            starting_piece: self.starting_piece,
-            piece_offset: self.piece_offset,
-            length: self.length,
-        }
+        self.length
     }
 }
 
 /// Repreent the layout of the indexed content payload.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Default)]
 pub struct PayloadSpec {
     /// SHA256 digest of the complete payload.
     digest: [u8; 32],
@@ -626,16 +608,6 @@ struct ScanResult {
     piece: PayloadPiece,
 }
 
-impl Default for PayloadSpec {
-    fn default() -> PayloadSpec {
-        PayloadSpec {
-            digest: [0u8; 32],
-            length: 0,
-            pieces: vec![],
-        }
-    }
-}
-
 /// A piece of the content payload which is verifiable with a content digest.
 #[derive(Debug, PartialEq, Clone)]
 pub struct PayloadPiece {
@@ -653,16 +625,16 @@ impl PayloadPiece {
     }
 
     pub fn digest(&self) -> &[u8] {
-        return &self.digest[..];
+        &self.digest[..]
     }
 
     pub fn length(&self) -> usize {
-        return self.length;
+        self.length
     }
 
     pub fn block_count(&self) -> usize {
         self.length / BLOCK_SIZE_BYTES
-            + if self.length % BLOCK_SIZE_BYTES > 0 {
+            + if !self.length.is_multiple_of(BLOCK_SIZE_BYTES) {
                 1
             } else {
                 0
