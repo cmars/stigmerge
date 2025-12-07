@@ -1,0 +1,473 @@
+use std::cmp::min;
+use std::collections::hash_map::Iter;
+use std::collections::HashMap;
+use std::path::Path;
+
+use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
+use tracing::{debug, instrument, Level};
+use veilid_core::{
+    CryptoTyped, DHTRecordDescriptor, DHTSchema, KeyPair, RecordKey, SetDHTValueOptions, Timestamp,
+    TypedKeyPair, TypedRecordKey, ValueData, ValueSubkeyRangeSet, CRYPTO_KIND_VLD0,
+};
+use veilnet::connection::{RoutingContext, API};
+use veilnet::Connection;
+
+use crate::error::Result;
+use crate::piece_map::PieceMap;
+use crate::proto::{Decoder, Encoder, Header, PeerInfo};
+use crate::Error;
+
+pub struct StablePublicRecord {
+    dht_rec: DHTRecordDescriptor,
+    owner_keypair: Option<TypedKeyPair>,
+}
+
+impl std::fmt::Debug for StablePublicRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StablePublicRecord")
+            .field("dht_rec", &self.dht_rec.key())
+            .field("owner_keypair", &self.owner_keypair.map(|kp| kp.value.key))
+            .finish()
+    }
+}
+
+impl StablePublicRecord {
+    #[instrument(skip_all, fields(table_name, db_key_id = hex::encode(db_key_id), subkeys), ret(level = Level::TRACE))]
+    async fn new_local<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        table_name: &str,
+        db_key_id: &[u8],
+        subkeys: u16,
+    ) -> Result<Self> {
+        {
+            conn.require_attachment().await?;
+        }
+
+        let routing_context = conn.routing_context();
+        let api = routing_context.api();
+        let table_store = api.table_store()?;
+        let db = table_store.open(table_name, 2).await?;
+
+        let existing_dht_key = db.load_json(0, db_key_id).await?;
+        let existing_owner_keypair: Option<TypedKeyPair> = db.load_json(1, db_key_id).await?;
+
+        let dht_rec = match (existing_dht_key, existing_owner_keypair) {
+            (Some(dht_key), Some(owner_keypair)) => {
+                return Ok(Self {
+                    dht_rec: routing_context
+                        .open_dht_record(dht_key, Some(owner_keypair.value))
+                        .await?,
+                    owner_keypair: Some(owner_keypair),
+                });
+            }
+            _ => {
+                routing_context
+                    .create_dht_record(DHTSchema::dflt(subkeys)?, None, None)
+                    .await?
+            }
+        };
+        let dht_owner = KeyPair::new(
+            dht_rec.owner().to_owned(),
+            dht_rec
+                .owner_secret()
+                .ok_or(Error::msg("expected dht owner secret"))?
+                .to_owned(),
+        );
+        db.store_json(0, db_key_id, dht_rec.key()).await?;
+        db.store_json(1, db_key_id, &dht_owner).await?;
+        Ok(Self {
+            dht_rec,
+            owner_keypair: Some(TypedKeyPair::new(CRYPTO_KIND_VLD0, dht_owner)),
+        })
+    }
+
+    #[instrument(skip(conn), ret(level = Level::TRACE))]
+    async fn new_remote<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+    ) -> Result<Self> {
+        {
+            conn.require_attachment().await?;
+        }
+        let routing_context = conn.routing_context();
+        let dht_rec = routing_context.open_dht_record(*key, None).await?;
+        Ok(Self {
+            dht_rec,
+            owner_keypair: None,
+        })
+    }
+
+    pub fn key(&self) -> &CryptoTyped<RecordKey> {
+        self.dht_rec.key()
+    }
+
+    pub async fn read<C: Connection + Send + Sync + 'static>(
+        &self,
+        conn: &mut C,
+        range: ValueSubkeyRangeSet,
+    ) -> Result<Vec<u8>> {
+        Ok(Self::read_keys(conn, self.key(), range).await?.concat())
+    }
+
+    #[instrument(skip(conn))]
+    pub async fn read_keys<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+        range: ValueSubkeyRangeSet,
+    ) -> Result<Vec<Vec<u8>>> {
+        {
+            conn.require_attachment().await?;
+        }
+        let routing_context = conn.routing_context();
+        let mut result = vec![];
+        for subkey in range.iter() {
+            match routing_context
+                .get_dht_value(key.to_owned(), subkey, true)
+                .await?
+            {
+                Some(data) => result.push(data.data().to_vec()),
+                None => break,
+            }
+        }
+        Ok(result)
+    }
+
+    #[instrument(skip(conn, data))]
+    pub async fn write_keys<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+        range: ValueSubkeyRangeSet,
+        data: Vec<Vec<u8>>,
+    ) -> Result<()> {
+        {
+            conn.require_attachment().await?;
+        }
+        let routing_context = conn.routing_context();
+        for subkey in range.iter() {
+            let i: usize = subkey.try_into()?;
+            let key_data = if subkey < data.len().try_into()? {
+                data[i].as_slice()
+            } else {
+                &[]
+            };
+            routing_context
+                .set_dht_value(key.to_owned(), subkey, key_data.to_vec(), None)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[instrument(skip(conn, data))]
+    pub async fn write<C: Connection + Send + Sync + 'static>(
+        &self,
+        conn: &mut C,
+        range: ValueSubkeyRangeSet,
+        data: &[u8],
+    ) -> Result<()> {
+        Self::write_key(
+            conn,
+            self.key(),
+            &self.owner_keypair.ok_or(Error::msg("not record owner"))?,
+            range,
+            data,
+        )
+        .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn write_key<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+        owner_keypair: &TypedKeyPair,
+        range: ValueSubkeyRangeSet,
+        data: &[u8],
+    ) -> Result<()> {
+        {
+            conn.require_attachment().await?;
+        }
+        let routing_context = conn.routing_context();
+        let mut offset = 0;
+        for subkey in range.iter() {
+            if offset > data.len() {
+                routing_context
+                    .set_dht_value(key.to_owned(), subkey, vec![], None)
+                    .await?;
+                continue;
+            }
+            let count = min(ValueData::MAX_LEN, data.len() - offset);
+            routing_context
+                .set_dht_value(
+                    key.to_owned(),
+                    subkey,
+                    data[offset..offset + count].to_vec(),
+                    Some(SetDHTValueOptions {
+                        writer: Some(owner_keypair.value.to_owned()),
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+            offset += ValueData::MAX_LEN;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct StableShareRecord {
+    record: StablePublicRecord,
+}
+
+impl StableShareRecord {
+    #[instrument(skip_all, fields(table_name, db_key_id = hex::encode(index.payload().digest()), subkeys), ret(level = Level::TRACE))]
+    pub async fn new_local<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        index: &Index,
+    ) -> Result<Self> {
+        let db_key_id = index.payload().digest();
+        let subkeys = PieceMap::subkeys(index.payload().pieces().len());
+        Ok(Self {
+            record: StablePublicRecord::new_local(
+                conn,
+                "stigmerge_share_dht",
+                db_key_id,
+                subkeys + 1,
+            )
+            .await?,
+        })
+    }
+
+    #[instrument(skip(conn), ret(level = Level::TRACE))]
+    pub async fn new_remote<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+    ) -> Result<(Self, Header)> {
+        let record = StablePublicRecord::new_remote(conn, key).await?;
+        let header = Self::read_header(conn, key).await?;
+        Ok((Self { record }, header))
+    }
+
+    pub fn share_key(&self) -> &TypedRecordKey {
+        self.record.key()
+    }
+
+    #[instrument(skip(conn))]
+    pub async fn read_header<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+    ) -> Result<Header> {
+        let header_bytes =
+            StablePublicRecord::read_keys(conn, key, ValueSubkeyRangeSet::single(0)).await?;
+        Ok(Header::decode(header_bytes.concat().as_slice())?)
+    }
+
+    #[instrument(skip(conn, header))]
+    pub async fn read_index<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+        header: &Header,
+        root: &Path,
+    ) -> Result<Index> {
+        let index_bytes = StablePublicRecord::read_keys(
+            conn,
+            key,
+            ValueSubkeyRangeSet::single_range(1, header.subkeys() as u32),
+        )
+        .await?;
+        debug!(index_bytes_len = index_bytes.len());
+        let (payload_pieces, payload_files) =
+            <(Vec<PayloadPiece>, Vec<FileSpec>)>::decode(index_bytes.concat().as_slice())?;
+        Ok(Index::new(
+            root.to_path_buf(),
+            PayloadSpec::new(
+                header.payload_digest(),
+                header.payload_length(),
+                payload_pieces,
+            ),
+            payload_files,
+        ))
+    }
+
+    #[instrument(skip_all)]
+    pub async fn write_header<C: Connection + Send + Sync + 'static>(
+        &mut self,
+        conn: &mut C,
+        header: &Header,
+    ) -> Result<()> {
+        let header_bytes = header.encode()?;
+        self.record
+            .write(
+                conn,
+                ValueSubkeyRangeSet::single(0),
+                header_bytes.as_slice(),
+            )
+            .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn write_index<C: Connection + Send + Sync + 'static>(
+        &mut self,
+        conn: &mut C,
+        index: &Index,
+    ) -> Result<()> {
+        let index_bytes = index.encode()?;
+        let range = ValueSubkeyRangeSet::single_range(1, self.record.dht_rec.schema().max_subkey());
+        self.record.write(conn, range, index_bytes.as_slice()).await
+    }
+}
+
+pub struct StablePeersRecord {
+    record: StablePublicRecord,
+    peers: HashMap<TypedRecordKey, (usize, PeerInfo)>,
+}
+
+impl std::fmt::Debug for StablePeersRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StablePeersRecord")
+            .field("record", &self.record)
+            .field("n_peers", &self.peers.len())
+            .finish()
+    }
+}
+
+impl StablePeersRecord {
+    pub const MAX_PEERS: u16 = 512;
+
+    #[instrument(skip_all, fields(table_name, db_key_id = hex::encode(index.payload().digest()), subkeys), ret(level = Level::TRACE))]
+    pub async fn new_local<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        index: &Index,
+    ) -> Result<Self> {
+        let db_key_id = index.payload().digest();
+        Ok(Self {
+            record: StablePublicRecord::new_local(
+                conn,
+                "stigmerge_peers_dht",
+                db_key_id,
+                Self::MAX_PEERS,
+            )
+            .await?,
+            peers: HashMap::new(),
+        })
+    }
+
+    #[instrument(skip(conn), ret(level = Level::TRACE))]
+    pub async fn new_remote<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+    ) -> Result<Self> {
+        let record = StablePublicRecord::new_remote(conn, key).await?;
+        Ok(Self {
+            record,
+            peers: HashMap::new(),
+        })
+    }
+
+    pub fn key(&self) -> &TypedRecordKey {
+        self.record.dht_rec.key()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
+
+    #[instrument(skip_all, ret(level = Level::TRACE))]
+    pub async fn load_peers<C: Connection + Send + Sync + 'static>(
+        &mut self,
+        conn: &mut C,
+    ) -> Result<()> {
+        self.peers = StablePublicRecord::read_keys(
+            conn,
+            self.record.key(),
+            ValueSubkeyRangeSet::single_range(0, Self::MAX_PEERS.into()),
+        )
+        .await?
+        .iter()
+        // Skip empty records (were erased)
+        .filter(|buf| !buf.is_empty())
+        // Parse the rest
+        .map(|buf| PeerInfo::decode(buf))
+        // Drop the ones that failed
+        .filter(|res| res.is_ok())
+        // Safe to unwrap the rest
+        .enumerate()
+        .map(|(subkey, res)| {
+            let peer_info = res.unwrap();
+            (*peer_info.key(), (subkey, peer_info))
+        })
+        .collect();
+        Ok(())
+    }
+
+    pub fn get_peer_info(&self, key: &TypedRecordKey) -> Option<PeerInfo> {
+        self.peers.get(key).map(|item| item.1.clone())
+    }
+
+    pub fn has_peer(&self, key: &TypedRecordKey) -> bool {
+        self.peers.contains_key(key)
+    }
+
+    pub fn known_peers(&self) -> Iter<'_, TypedRecordKey, (usize, PeerInfo)> {
+        self.peers.iter()
+    }
+
+    #[instrument(skip(self, conn), ret(level = Level::TRACE))]
+    pub async fn update_peer<C: Connection + Send + Sync + 'static>(
+        &mut self,
+        conn: &mut C,
+        key: &TypedRecordKey,
+    ) -> Result<usize> {
+        let (subkey, data) = match self.peers.get_mut(key) {
+            Some((subkey, peer_info)) => {
+                peer_info.updated_at = Timestamp::now();
+                (*subkey, peer_info.encode()?)
+            }
+            None => {
+                let subkey = self.peers.len();
+                let peer_info = PeerInfo::new(*key);
+                let data = peer_info.encode()?;
+                self.peers.insert(*key, (subkey, peer_info));
+                (subkey, data)
+            }
+        };
+        self.record
+            .write(
+                conn,
+                ValueSubkeyRangeSet::single(subkey.try_into()?),
+                data.as_slice(),
+            )
+            .await?;
+        Ok(subkey)
+    }
+
+    #[instrument(skip(self, conn), ret(level = Level::TRACE))]
+    pub async fn remove_peer<C: Connection + Send + Sync + 'static>(
+        &mut self,
+        conn: &mut C,
+        key: &TypedRecordKey,
+    ) -> Result<()> {
+        if let Some((subkey, _)) = self.peers.remove(key) {
+            self.record
+                .write(conn, ValueSubkeyRangeSet::single(subkey.try_into()?), &[])
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[instrument(skip_all, ret(level = Level::TRACE))]
+    pub async fn save_peers<C: Connection + Send + Sync + 'static>(
+        &mut self,
+        conn: &mut C,
+    ) -> Result<()> {
+        StablePublicRecord::write_keys(
+            conn,
+            self.record.key(),
+            ValueSubkeyRangeSet::single_range(0, Self::MAX_PEERS.into()),
+            self.peers
+                .values()
+                .map(|(_, peer_info)| peer_info.encode().unwrap_or(vec![]))
+                .collect(),
+        )
+        .await?;
+        Ok(())
+    }
+}

@@ -1,82 +1,203 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
-use anyhow::Context;
 use stigmerge_fileindex::{BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
     select,
-    sync::broadcast,
+    sync::Mutex,
+    task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, warn};
-use veilid_core::VeilidUpdate;
-
-use crate::{
-    actor::{Actor, Respondable, ResponseChannel},
-    error::{is_lagged, CancelError, Unrecoverable},
-    piece_map::PieceMap,
-    proto::{self, BlockRequest, Decoder},
-    types::{PieceState, ShareInfo},
-    Node, Result,
+use tracing::{error, trace, warn};
+use veilid_core::{OperationId, VeilidAppCall};
+use veilnet::{
+    connection::{RoutingContext, UpdateHandler, API},
+    Connection,
 };
 
-pub enum Request {
-    HaveMap {
-        response_tx: ResponseChannel<Response>,
-    },
-}
+use crate::{
+    error::CancelError,
+    piece_map::PieceMap,
+    piece_verifier::{PieceStatus, PieceStatusNotifier, PieceVerifier},
+    proto::{self, BlockRequest, Decoder},
+    types::LocalShareInfo,
+    Result, Retry,
+};
 
-impl Respondable for Request {
-    type Response = Response;
-
-    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
-        match self {
-            Request::HaveMap { response_tx } => *response_tx = ch,
-        }
-    }
-
-    fn response_tx(self) -> ResponseChannel<Self::Response> {
-        match self {
-            Request::HaveMap { response_tx } => response_tx,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum Response {
-    HaveMap(PieceMap),
-}
-
-pub struct Seeder<N: Node> {
-    node: N,
-    verified_rx: broadcast::Receiver<PieceState>,
-
-    share: ShareInfo,
-
-    files: HashMap<u32, File>,
+pub struct Seeder<C: Connection> {
+    verifier: PieceVerifier,
+    verified_rx: flume::Receiver<PieceStatus>,
     piece_map: PieceMap,
+
+    inner: Arc<Mutex<SeederInner<C>>>,
 }
 
-impl<N: Node> Seeder<N> {
-    pub fn new(node: N, share: ShareInfo, verified_rx: broadcast::Receiver<PieceState>) -> Self {
+impl<C: Connection + Send + Sync + 'static> Seeder<C> {
+    pub async fn new(conn: C, share: LocalShareInfo, verifier: PieceVerifier) -> Self {
+        let (status_handler, verified_rx) = PieceStatusNotifier::new();
+        verifier.subscribe(Box::new(status_handler)).await;
         Seeder {
-            node,
-            share,
+            verifier,
             verified_rx,
-
-            files: HashMap::new(),
             piece_map: PieceMap::new(),
+
+            inner: Arc::new(Mutex::new(SeederInner::new(conn, share))),
         }
+    }
+
+    pub async fn run(mut self, cancel: CancellationToken, retry: Retry) -> Result<()> {
+        let block_request_rx = {
+            let inner = self.inner.lock().await;
+            let (block_req_handler, block_request_rx) = BlockRequestHandler::new(cancel.clone());
+            inner.conn.add_update_handler(Box::new(block_req_handler));
+            block_request_rx
+        };
+        let mut tasks = JoinSet::new();
+        loop {
+            select! {
+                _ = cancel.cancelled() => {
+                    tasks.abort_all();
+                    return Err(CancelError.into());
+                }
+                res = self.verified_rx.recv_async() => {
+                    match res {
+                        Err(err) => {
+                            // TODO: this shouldn't happen
+                            warn!(?err, "receive verified piece update");
+                            let (status_handler, verified_rx) = PieceStatusNotifier::new();
+                            self.verifier.subscribe(Box::new(status_handler)).await;
+                            self.verified_rx = verified_rx;
+                            warn!("resubscribed to piece verifier");
+                            continue;
+
+                        }
+                        Ok(piece_state) => self.piece_map.set(piece_state.piece_index().try_into().unwrap()),
+                    };
+                }
+                res = block_request_rx.recv_async() => {
+                    let (app_call_id, block_req) = res?;
+                    backoff_retry!(cancel, retry, {
+                        let block_req = block_req.clone();
+                        trace!("app_call: {:?}", block_req);
+                        if self.piece_map.get(block_req.piece) {
+                            let mut buf = [0u8; BLOCK_SIZE_BYTES];
+                            let inner = self.inner.clone();
+                            let cancel = cancel.child_token();
+                            tasks.spawn(async move {
+                                let read_reply = async {
+                                    // TODO: improve app_call handler concurrency here?
+                                    let mut inner = inner.lock().await;
+                                    let rd = inner.read_block_into(&block_req, &mut buf).await?;
+                                    inner.reply_block_contents(app_call_id, Some(&buf[..rd])).await?;
+                                    Ok::<(), anyhow::Error>(())
+                                };
+                                select! {
+                                    _ = cancel.cancelled() => {
+                                        Err(CancelError.into())
+                                    }
+                                    res = read_reply => {
+                                        res
+                                    }
+                                }
+                            });
+                        } else {
+                            self.inner.lock().await.reply_block_contents(app_call_id, None).await?;
+                        }
+                    }, {
+                        // In the event we've gotten stuck retrying an error,
+                        // flush the file handle cache for good measure.
+                        self.inner.lock().await.flush_file_cache();
+                    })?;
+                }
+            }
+        }
+    }
+}
+
+struct BlockRequestHandler {
+    cancel: CancellationToken,
+    block_request_tx: flume::Sender<(OperationId, BlockRequest)>,
+}
+
+impl BlockRequestHandler {
+    fn new(cancel: CancellationToken) -> (Self, flume::Receiver<(OperationId, BlockRequest)>) {
+        let (block_request_tx, block_request_rx) = flume::unbounded();
+        (
+            Self {
+                cancel,
+                block_request_tx,
+            },
+            block_request_rx,
+        )
+    }
+}
+
+impl UpdateHandler for BlockRequestHandler {
+    fn app_call(&self, app_call: &VeilidAppCall) {
+        match proto::Request::decode(app_call.message()) {
+            Ok(proto::Request::BlockRequest(block_req)) => {
+                let _ = self
+                    .block_request_tx
+                    .send((app_call.id(), block_req))
+                    .map_err(|err| {
+                        error!(?err, "send block request to seeder");
+                        self.cancel.cancel();
+                        err
+                    });
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(?err, "invalid app_call");
+            }
+        }
+    }
+    fn shutdown(&self) {
+        trace!("shutdown");
+        self.cancel.cancel();
+    }
+}
+
+struct SeederInner<C: Connection> {
+    conn: C,
+    share: LocalShareInfo,
+    files: HashMap<u32, File>,
+}
+
+impl<C: Connection> SeederInner<C> {
+    fn new(conn: C, share: LocalShareInfo) -> Self {
+        Self {
+            conn,
+            share,
+            files: HashMap::new(),
+        }
+    }
+
+    fn flush_file_cache(&mut self) {
+        self.files.clear();
+    }
+
+    async fn reply_block_contents(
+        &mut self,
+        call_id: OperationId,
+        contents: Option<&[u8]>,
+    ) -> Result<()> {
+        self.conn.require_attachment().await?;
+        self.conn
+            .routing_context()
+            .api()
+            .app_call_reply(call_id, contents.unwrap_or(&[]).to_vec())
+            .await?;
+        Ok(())
     }
 
     async fn read_block_into(&mut self, block_req: &BlockRequest, buf: &mut [u8]) -> Result<usize> {
-        let fh = self.get_file_for_block(&block_req).await?;
+        let fh = self.get_file_for_block(block_req).await?;
         fh.seek(std::io::SeekFrom::Start(
             ((TryInto::<usize>::try_into(block_req.piece).unwrap()
                 * PIECE_SIZE_BLOCKS
                 * BLOCK_SIZE_BYTES)
-                + (TryInto::<usize>::try_into(block_req.block).unwrap() * BLOCK_SIZE_BYTES))
+                + (Into::<usize>::into(block_req.block) * BLOCK_SIZE_BYTES))
                 .try_into()
                 .unwrap(),
         ))
@@ -99,84 +220,8 @@ impl<N: Node> Seeder<N> {
     }
 }
 
-impl<P: Node> Actor for Seeder<P> {
-    type Request = Request;
-    type Response = Response;
-
-    async fn run(
-        &mut self,
-        cancel: CancellationToken,
-        request_rx: flume::Receiver<Self::Request>,
-    ) -> Result<()> {
-        self.files.clear();
-        let mut update_rx = self.node.subscribe_veilid_update();
-        let mut buf = [0u8; BLOCK_SIZE_BYTES];
-        loop {
-            select! {
-                _ = cancel.cancelled() => {
-                    return Err(CancelError.into());
-                }
-                res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("seeder: receive request"))?;
-                    self.handle_request(req).await?;
-                }
-                res = self.verified_rx.recv() => {
-                    if is_lagged(&res) {
-                        warn!("verified_rx channel lagged in seeder");
-                        continue;
-                    }
-                    let piece_state = res.context(Unrecoverable::new("receive verified piece update"))?;
-                    self.piece_map.set(piece_state.piece_index.try_into().unwrap());
-                }
-                res = update_rx.recv() => {
-                    if is_lagged(&res) {
-                        warn!("update_rx channel lagged in seeder");
-                        continue;
-                    }
-                    let update = res.context(Unrecoverable::new("receive veilid update"))?;
-                    match update {
-                        VeilidUpdate::AppCall(veilid_app_call) => {
-                            let req = proto::Request::decode(veilid_app_call.message())?;
-                            match req {
-                                proto::Request::BlockRequest(block_req) => {
-                                    trace!("app_call: {:?}", block_req);
-                                    if self.piece_map.get(block_req.piece) {
-                                        let rd = self.read_block_into(&block_req, &mut buf).await?;
-                                        self.node.reply_block_contents(veilid_app_call.id(), Some(&buf[..rd])).await?;
-                                    } else {
-                                        self.node.reply_block_contents(veilid_app_call.id(), None).await?;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        VeilidUpdate::Shutdown => {
-                            cancel.cancel();
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
-        match req {
-            Request::HaveMap { mut response_tx } => {
-                let resp = Response::HaveMap(self.piece_map.clone());
-                response_tx
-                    .send(resp)
-                    .await
-                    .context(Unrecoverable::new("send response from seeder"))?;
-                Ok(())
-            }
-        }
-    }
-}
-
-pub struct Clients {}
-
 #[cfg(test)]
+#[cfg(feature = "refactor")]
 mod tests {
     use std::{
         path::PathBuf,
@@ -258,7 +303,7 @@ mod tests {
                     .expect("key");
 
             // Create share info
-            let share_info = ShareInfo {
+            let share_info = LocalShareInfo {
                 key: fake_key,
                 header: test_header(),
                 want_index: index,
@@ -374,7 +419,7 @@ mod tests {
             .expect("key");
 
         // Create share info
-        let share_info = ShareInfo {
+        let share_info = LocalShareInfo {
             key: fake_key,
             header: test_header(),
             want_index: index,

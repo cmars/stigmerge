@@ -12,33 +12,24 @@
 #![recursion_limit = "256"]
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
 use path_absolutize::Absolutize;
 use stigmerge_fileindex::Indexer;
-use stigmerge_peer::actor::{ResponseChannel, UntilCancelled};
 use stigmerge_peer::content_addressable::ContentAddressable;
+use stigmerge_peer::fetcher::Fetcher;
 use stigmerge_peer::peer_gossip::PeerGossip;
-use stigmerge_peer::share_announcer::{self, ShareAnnouncer};
+use stigmerge_peer::piece_verifier::PieceVerifier;
+use stigmerge_peer::seeder::Seeder;
+use stigmerge_peer::share_announcer::ShareAnnouncer;
+use stigmerge_peer::share_resolver::ShareResolver;
+use stigmerge_peer::{new_connection, Error, Retry};
 use tokio::select;
-use tokio::spawn;
-use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use veilid_core::TypedRecordKey;
-
-use stigmerge_peer::actor::{ConnectionState, Operator, WithVeilidConnection};
-use stigmerge_peer::block_fetcher::BlockFetcher;
-use stigmerge_peer::fetcher::{Clients as FetcherClients, Fetcher};
-use stigmerge_peer::have_announcer::HaveAnnouncer;
-use stigmerge_peer::new_routing_context;
-use stigmerge_peer::node::{Node, Veilid};
-use stigmerge_peer::piece_verifier::PieceVerifier;
-use stigmerge_peer::seeder::Seeder;
-use stigmerge_peer::share_resolver::{self, ShareResolver};
-use stigmerge_peer::types::ShareInfo;
-use stigmerge_peer::{Error, Result};
+use veilnet::Connection;
 
 /// Syncer CLI arguments
 #[derive(Parser, Debug)]
@@ -66,26 +57,9 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::result::Result<(), Error> {
     tracing_subscriber::fmt::init();
 
-    let state_dir = tempfile::tempdir()?;
-
-    // Set up Veilid node
-    let (routing_context, update_rx) =
-        new_routing_context(state_dir.path().to_str().unwrap(), None).await?;
-    let node = Veilid::new(routing_context, update_rx).await?;
-
-    let res = run(node.clone()).await;
-    let _ = node.shutdown().await;
-    if let Err(e) = res {
-        error!(err = ?e);
-        return Err(e);
-    }
-    Ok(())
-}
-
-async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
 
@@ -102,20 +76,24 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
         None => args.share_path,
     };
 
+    // Set up Veilid connection
+    let state_dir = tempfile::tempdir()?;
+    let conn = new_connection(state_dir.path().to_str().unwrap(), None).await?;
     let cancel = CancellationToken::new();
-    let conn_state = Arc::new(Mutex::new(ConnectionState::new()));
+    let retry = Retry::default();
 
-    // Set up share resolver
-    let share_resolver = ShareResolver::new(node.clone());
-    let share_target_rx = share_resolver.subscribe_target();
-    let mut share_resolver_op = Operator::new(
-        cancel.clone(),
-        share_resolver,
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-    );
+    let mut tasks = JoinSet::new();
+
+    // Set up share resolver for bootstrap
+    let (share_resolver, resolver_task) =
+        ShareResolver::new_task(cancel.clone(), retry.clone(), conn.clone(), &root);
+    tasks.spawn(async move {
+        resolver_task.await??;
+        Ok(())
+    });
 
     // Resolve bootstrap share keys and want_index_digest
-    let mut want_index = None;
+    let mut index = None;
     if let Some(ref want_index_digest) = args.want_index_digest {
         for share_key_str in args.share_keys.iter() {
             let share_key: TypedRecordKey = share_key_str.parse()?;
@@ -123,27 +101,21 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             let want_index_digest: [u8; 32] = want_index_digest
                 .try_into()
                 .map_err(|_| Error::msg("Invalid digest length"))?;
+
             // Resolve the index from the bootstrap peer
-            let index = match share_resolver_op
-                .call(share_resolver::Request::Index {
-                    response_tx: ResponseChannel::default(),
-                    key: share_key.clone(),
-                    want_index_digest: Some(want_index_digest),
-                    root: root.clone(),
-                })
-                .await?
-            {
-                share_resolver::Response::Index { index, .. } => index,
-                share_resolver::Response::BadIndex { .. } => anyhow::bail!("Bad index"),
-                share_resolver::Response::NotAvailable { err_msg, .. } => {
-                    anyhow::bail!(err_msg)
-                }
-                _ => anyhow::bail!("Unexpected response"),
-            };
-            want_index.get_or_insert(index);
+            let mut remote_share = share_resolver.add_share(&share_key).await?;
+            if remote_share.index.digest()? == want_index_digest {
+                index = Some(remote_share.index);
+                break;
+            } else {
+                return Err(Error::msg(
+                    "remote share does not match wanted index digest",
+                ));
+            }
         }
     }
-    let mut index = match want_index {
+
+    let mut index = match index {
         Some(index) => index,
         None => {
             // If an index wasn't resolved, and we didn't bail on an error,
@@ -162,95 +134,47 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
     info!(index_digest = hex::encode(index_digest));
 
     // Announce our own share of the index
-    let mut share_announce_op = Operator::new(
-        cancel.clone(),
-        ShareAnnouncer::new(node.clone(), index.clone()),
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-    );
-    let (share_key, share_header) = match share_announce_op
-        .call(share_announcer::Request::Announce {
-            response_tx: ResponseChannel::default(),
-        })
-        .await?
-    {
-        share_announcer::Response::Announce {
-            key,
-            target: _,
-            header,
-        } => (key, header),
-        share_announcer::Response::NotAvailable => anyhow::bail!("failed to announce share"),
-    };
+    let share_announcer =
+        ShareAnnouncer::new(cancel.clone(), retry.clone(), conn.clone(), index.clone()).await?;
+    let share_info = share_announcer.share_info().await;
+    tasks.spawn(share_announcer.run());
 
-    info!("announced share, key: {share_key}");
+    info!("announced share, key: {:?}", share_info.key);
 
-    // Set up fetcher dependencies
-    let block_fetcher = Operator::new_clone_pool(
-        cancel.clone(),
-        BlockFetcher::new(
-            node.clone(),
-            Arc::new(RwLock::new(index.clone())),
-            index.root().to_path_buf(),
-        ),
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-        args.fetchers,
-    );
-
-    let piece_verifier = PieceVerifier::new(Arc::new(RwLock::new(index.clone()))).await;
-    let verified_rx = piece_verifier.subscribe_verified();
-    let piece_verifier_op = Operator::new(cancel.clone(), piece_verifier, UntilCancelled);
-
-    // Announce our own have-map as we fetch, at our announced share's have-map key
-    let have_announcer = Operator::new(
-        cancel.clone(),
-        // TODO: should use the share key publicly; hide this from the actor / op interface
-        HaveAnnouncer::new(node.clone(), share_header.have_map().unwrap().key().clone()),
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-    );
-
-    let share = ShareInfo {
-        key: share_key,
-        want_index: index.clone(),
-        want_index_digest: index_digest,
-        root,
-        header: share_header.clone(),
-    };
-
-    let share_resolver_tx = share_resolver_op.request_tx.clone();
-
-    let fetcher_clients = FetcherClients {
-        block_fetcher,
-        piece_verifier: piece_verifier_op,
-        have_announcer,
-        share_resolver: share_resolver_op,
-        share_target_rx: share_target_rx.resubscribe(),
-    };
-
-    let gossip_op = Operator::new(
-        cancel.clone(),
-        PeerGossip::new(
-            node.clone(),
-            share.clone(),
-            share_resolver_tx,
-            share_target_rx,
-        ),
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-    );
+    // Set up piece verifier
+    let piece_verifier =
+        PieceVerifier::new(std::sync::Arc::new(tokio::sync::RwLock::new(index.clone()))).await;
 
     // Set up seeder
-    let seeder = Seeder::new(node.clone(), share.clone(), verified_rx);
-    let seeder_op = Operator::new(
-        cancel.clone(),
-        seeder,
-        WithVeilidConnection::new(node.clone(), conn_state.clone()),
-    );
+    let seeder = Seeder::new(conn.clone(), share_info.clone(), piece_verifier.clone()).await;
+    tasks.spawn(seeder.run(cancel.clone(), retry.clone()));
+
+    // Add bootstrap shares for fetching
+    for share_key_str in args.share_keys.iter() {
+        let share_key: TypedRecordKey = share_key_str.parse()?;
+        let _ = share_resolver.add_share(&share_key).await?;
+    }
+
+    let peer_gossip =
+        PeerGossip::new(conn.clone(), share_info.clone(), share_resolver.clone()).await?;
+    tasks.spawn(peer_gossip.run(cancel.clone(), retry.clone()));
 
     // Create and run fetcher
-    let fetcher = Fetcher::new(node.clone(), share.clone(), fetcher_clients);
+    let fetcher = Fetcher::new(
+        conn.clone(),
+        share_info.clone(),
+        piece_verifier.clone(),
+        share_resolver,
+    )
+    .await;
 
     info!("Starting fetch...");
 
     // Run the fetcher until completion
-    let fetcher_task = spawn(fetcher.run(cancel.clone(), conn_state));
+    let fetcher_future = async {
+        let retry = Retry::default();
+        fetcher.run(cancel.clone(), retry).await
+    };
 
     info!("Seeding until ctrl-c...");
 
@@ -260,17 +184,23 @@ async fn run<T: Node + Sync + Send + 'static>(node: T) -> Result<()> {
             info!("Received ctrl-c, shutting down...");
             cancel.cancel();
         }
-        join_res = fetcher_task => {
-            join_res.expect("fetcher task").expect("fetcher done");
-            info!("fetch complete, key={share_key}");
-        }
-        join_res = seeder_op.join() => {
-            join_res.expect("seeder task");
-        }
-        join_res = gossip_op.join() => {
-            join_res.expect("gossip task");
+        fetch_res = fetcher_future => {
+            match fetch_res {
+                Ok(()) => info!("fetch complete, key={:?}", share_info.key),
+                Err(e) => {
+                    error!("fetch failed: {:?}", e);
+                    cancel.cancel();
+                }
+            }
         }
     }
 
+    // Clean up
+    tasks.spawn(async move { conn.close().await.map_err(|e| e.into()) });
+    tasks
+        .join_all()
+        .await
+        .into_iter()
+        .collect::<anyhow::Result<()>>()?;
     Ok(())
 }

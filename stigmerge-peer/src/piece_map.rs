@@ -1,9 +1,13 @@
-use std::iter::repeat;
-
 use veilid_core::ValueData;
 
 #[derive(Clone, Debug)]
 pub struct PieceMap(Vec<u8>);
+
+impl Default for PieceMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PieceMap {
     pub fn new() -> PieceMap {
@@ -13,7 +17,7 @@ impl PieceMap {
     pub fn subkeys(n_pieces: usize) -> u16 {
         let cap = Self::capacity(n_pieces);
         TryInto::<u16>::try_into(cap / ValueData::MAX_LEN).unwrap()
-            + if cap % ValueData::MAX_LEN != 0 {
+            + if !cap.is_multiple_of(ValueData::MAX_LEN) {
                 1u16
             } else {
                 0u16
@@ -21,7 +25,7 @@ impl PieceMap {
     }
 
     pub fn capacity(n_pieces: usize) -> usize {
-        n_pieces / 8 + if n_pieces % 8 != 0 { 1 } else { 0 }
+        n_pieces / 8 + if !n_pieces.is_multiple_of(8) { 1 } else { 0 }
     }
 
     pub fn get(&self, bit_index: u32) -> bool {
@@ -43,7 +47,7 @@ impl PieceMap {
         let bit_offset_in_byte: usize = (bit_index % 8).try_into().unwrap();
         if self.0.len() <= byte_index {
             self.0
-                .extend(repeat(0u8).take(byte_index - self.0.len() + 1));
+                .extend(std::iter::repeat_n(0u8, byte_index - self.0.len() + 1));
         }
         self.0[byte_index] |= 1 << bit_offset_in_byte;
     }
@@ -64,7 +68,8 @@ impl PieceMap {
     pub fn write_bytes(&mut self, byte_offset: usize, bytes: &[u8]) {
         let required_len = byte_offset + bytes.len();
         if self.0.len() <= required_len {
-            self.0.extend(repeat(0u8).take(required_len - self.0.len()));
+            self.0
+                .extend(std::iter::repeat_n(0u8, required_len - self.0.len()));
         }
         for (i, b) in bytes.iter().enumerate() {
             self.0[byte_offset + i] = *b;

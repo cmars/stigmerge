@@ -21,6 +21,7 @@ shared-version = true
 tag-name = "v{{version}}"
 
 [workspace.dependencies]
+# Core dependencies
 anyhow = { version = "1.0", features = ["std", "backtrace"] }
 backoff = { version = "0.4", features = ["tokio"] }
 sha2 = { version = "0.10", features = ["asm"] }
@@ -28,7 +29,36 @@ tokio = { version = "1.40", features = ["full"] }
 tokio-util = { version = "0.7" }
 tracing = { version = "0.1", features = ["log", "attributes"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI and utilities
+clap = { version = "4.5", features = ["derive", "env"] }
+dirs = "6.0"
+hex = "0.4"
+indicatif = { version = "0.18", features = ["tokio", "futures"] }
+path-absolutize = "3.1"
+
+# Networking and P2P
 veilid-core = { version = "0.4.8" }
+veilnet = "0.3.9"
+
+# Platform-specific
+jni = { version = "0.21", features = ["invocation"] }
+
+# Concurrency and async
+flume = { version = "0.11", features = ["async"] }
+num_cpus = "1.16"
+
+# Serialization and protocols
+capnp = "0.21"
+capnpc = "0.21"
+
+# Utilities
+thiserror = "2.0"
+tokio-retry = "0.3.0"
+
+# Development dependencies
+hex-literal = "0.4"
+tempfile = "3.13"
 
 [profile.release]
 strip = true

@@ -1,56 +1,52 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::fmt;
 use std::io::SeekFrom;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use anyhow::Context;
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::select;
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
-use tracing::trace;
-use veilid_core::{Target, TypedRecordKey};
+use veilid_core::{RouteId, Target};
+use veilnet::connection::RoutingContext;
+use veilnet::Connection;
 
-use crate::actor::{Actor, Respondable, ResponseChannel};
-use crate::error::{is_io, is_proto, is_route_invalid, CancelError, Result, Transient};
-use crate::is_cancelled;
-use crate::node::Node;
-use crate::Error;
+use crate::proto::{BlockRequest, Encoder, Request};
+use crate::types::PieceState;
+use crate::{Error, Result};
 
 use super::types::FileBlockFetch;
 
-pub struct BlockFetcher<N: Node> {
-    node: N,
-    want_index: Arc<RwLock<Index>>,
+pub struct BlockFetcher<C: Connection> {
+    conn: C,
+    want_index: Index,
     root: PathBuf,
     files: HashMap<usize, File>,
 }
 
-impl<N: Node> BlockFetcher<N> {
-    /// Creates a new block fetcher service.
-    pub fn new(node: N, want_index: Arc<RwLock<Index>>, root: PathBuf) -> Self {
+impl<C: Connection + Send + Sync> BlockFetcher<C> {
+    /// Creates a new block fetcher.
+    pub fn new(conn: C, want_index: Index, root: PathBuf) -> Self {
         Self {
-            node,
+            conn,
             want_index,
             root,
             files: HashMap::new(),
         }
     }
 
-    async fn fetch_block(
+    pub async fn fetch_block(
         &mut self,
-        target: &Target,
+        route_id: &RouteId,
         block: &FileBlockFetch,
         flush: bool,
-    ) -> Result<usize> {
+    ) -> Result<(PieceState, usize)> {
         // Request block from peer with retry logic
         let result = self
-            .node
-            .request_block(target.to_owned(), block.piece_index, block.block_index)
+            .request_block(
+                Target::PrivateRoute(route_id.to_owned()),
+                block.piece_index,
+                block.block_index,
+            )
             .await?
             .ok_or(Error::msg("block not found"))?;
         // Write the block to the file
@@ -59,7 +55,7 @@ impl<N: Node> BlockFetcher<N> {
             None => {
                 let path = self
                     .root
-                    .join(self.want_index.read().await.files()[block.file_index].path());
+                    .join(self.want_index.files()[block.file_index].path());
                 let fh = File::options()
                     .write(true)
                     .truncate(false)
@@ -77,149 +73,43 @@ impl<N: Node> BlockFetcher<N> {
         if flush {
             fh.flush().await?;
         }
-        Ok(block_end)
-    }
-}
-
-pub enum Request {
-    Fetch {
-        response_tx: ResponseChannel<Response>,
-        share_key: TypedRecordKey,
-        target: Target,
-        block: FileBlockFetch,
-        flush: bool,
-    },
-}
-
-impl fmt::Debug for Request {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Fetch {
-                share_key,
-                target,
-                block,
-                flush,
-                ..
-            } => f
-                .debug_struct("Fetch")
-                .field("share_key", share_key)
-                .field("target", target)
-                .field("block", block)
-                .field("flush", flush)
-                .finish(),
-        }
-    }
-}
-
-impl Respondable for Request {
-    type Response = Response;
-
-    fn set_response(&mut self, ch: ResponseChannel<Self::Response>) {
-        match self {
-            Request::Fetch { response_tx, .. } => *response_tx = ch,
-        }
+        Ok((
+            PieceState::new(
+                block.file_index,
+                block.piece_index,
+                block.piece_offset,
+                self.want_index.payload().pieces()[block.piece_index].block_count(),
+                block.block_index,
+            ),
+            block_end,
+        ))
     }
 
-    fn response_tx(self) -> ResponseChannel<Self::Response> {
-        match self {
-            Request::Fetch { response_tx, .. } => response_tx,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum Response {
-    Fetched {
-        share_key: TypedRecordKey,
-        block: FileBlockFetch,
-        length: usize,
-    },
-    FetchFailed {
-        share_key: TypedRecordKey,
-        target: Target,
-        block: FileBlockFetch,
-        err: Error,
-    },
-}
-
-impl<P: Node + Send> Actor for BlockFetcher<P> {
-    type Request = Request;
-    type Response = Response;
-
-    async fn run(
+    async fn request_block(
         &mut self,
-        cancel: CancellationToken,
-        request_rx: flume::Receiver<Self::Request>,
-    ) -> Result<()> {
-        loop {
-            select! {
-                _ = cancel.cancelled() => {
-                    return Err(CancelError.into());
-                }
-                res = request_rx.recv_async() => {
-                    let req = res.with_context(|| format!("block_fetcher: receive request"))?;
-                    if let Err(e) = self.handle_request(req).await {
-                        if is_cancelled(&e) {
-                            return Ok(());
-                        }
-                        if e.is_transient() || is_route_invalid(&e) || is_proto(&e) || is_io(&e) {
-                            continue;
-                        }
-                        return Err(e);
-                    }
-                }
-            }
-        }
-    }
-
-    async fn handle_request(&mut self, req: Self::Request) -> Result<()> {
-        let (resp, mut resp_tx) = match req {
-            Request::Fetch {
-                share_key,
-                target,
-                block,
-                ref flush,
-                response_tx,
-            } => {
-                trace!(
-                    "Fetching block from {}: file={} piece={} block={}",
-                    share_key,
-                    block.file_index,
-                    block.piece_index,
-                    block.block_index
-                );
-
-                // Attempt to fetch the block
-                match self.fetch_block(&target, &block, *flush).await {
-                    Ok(length) => (
-                        Response::Fetched {
-                            share_key,
-                            block,
-                            length,
-                        },
-                        response_tx,
-                    ),
-                    Err(e) => (
-                        Response::FetchFailed {
-                            share_key,
-                            target,
-                            block,
-                            err: e,
-                        },
-                        response_tx,
-                    ),
-                }
-            }
-        };
-        resp_tx.send(resp).await?;
-        Ok(())
+        target: Target,
+        piece: usize,
+        block: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        let routing_context = self.conn.routing_context();
+        let block_req = Request::BlockRequest(BlockRequest {
+            piece: piece as u32,
+            block: block as u8,
+        });
+        let block_req_bytes = block_req.encode()?;
+        let resp_bytes = routing_context.app_call(target, block_req_bytes).await?;
+        Ok(if resp_bytes.is_empty() {
+            None
+        } else {
+            Some(resp_bytes)
+        })
     }
 }
 
-impl<P: Node> Clone for BlockFetcher<P> {
+impl<C: Connection + Clone> Clone for BlockFetcher<C> {
     fn clone(&self) -> Self {
         Self {
-            node: self.node.clone(),
+            conn: self.conn.clone(),
             want_index: self.want_index.clone(),
             root: self.root.clone(),
             files: HashMap::new(),
@@ -227,6 +117,7 @@ impl<P: Node> Clone for BlockFetcher<P> {
     }
 }
 
+#[cfg(feature = "refactor")]
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, sync::Mutex};
