@@ -302,6 +302,12 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                     // share, could exhaust compute & memory.
                     let mut remote_share = res?;
 
+                    // Shouldn't happen, but ignore self-resolves.
+                    if &self.share.key == &remote_share.key {
+                        trace!("ignoring self-resolved share");
+                        continue;
+                    }
+
                     // Ignore remote shares that have the wrong index.
                     let remote_index_digest = remote_share.index.digest()?;
                     if remote_index_digest != self.share.want_index_digest {
@@ -313,7 +319,6 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                         );
                         continue;
                     }
-
                     if !share_tasks.contains_key(&remote_share.key) {
                         let remote_share_key = remote_share.key;
                         let pool = FetchPool::new(
@@ -395,6 +400,16 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                                 self.pending_blocks_tx.send_async(block).await?;
                                 // TODO: punish peer for excessive bad blocks?
                             }
+                            self.status_tx.send_modify(|status| {
+                                if let Status::FetchProgress { fetch_position, .. } = status {
+                                    let piece_length = TryInto::<i64>::try_into(piece_length).unwrap();
+                                    if *fetch_position > piece_length {
+                                        *fetch_position -= piece_length;
+                                    } else {
+                                        *fetch_position = 0;
+                                    }
+                                }
+                            });
 
                         }
                         PieceStatus::IncompletePiece { .. } => {}

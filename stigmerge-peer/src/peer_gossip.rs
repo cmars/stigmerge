@@ -206,6 +206,9 @@ impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
     }
 
     async fn add_known_peer(&mut self, key: &TypedRecordKey) -> Result<()> {
+        if key == &self.share.key {
+            return Ok(());
+        }
         if !self.peers_record.has_peer(key) {
             let remote_share = self.share_resolver.add_share(key).await?;
             if remote_share.index_digest != self.share.want_index_digest {
@@ -224,6 +227,9 @@ impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
                 warn!(?err, remote_share_key = ?remote_share.key, "advertise self to remote peer");
             }
             for peer in self.resolve_peers(key).await?.iter() {
+                if peer.key() == &self.share.key {
+                    continue;
+                }
                 let remote_share_info = self.share_resolver.add_share(peer.key()).await?;
                 if remote_share_info.index_digest != self.share.want_index_digest {
                     self.share_resolver

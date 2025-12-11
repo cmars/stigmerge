@@ -273,7 +273,13 @@ impl StableShareRecord {
             ValueSubkeyRangeSet::single_range(1, header.subkeys() as u32),
         )
         .await?;
-        debug!(index_bytes_len = index_bytes.len());
+        debug!(
+            index_bytes_len = index_bytes
+                .iter()
+                .map(|sk_val| sk_val.len())
+                .reduce(|acc, v| acc + v)
+                .unwrap_or(0)
+        );
         let (payload_pieces, payload_files) =
             <(Vec<PayloadPiece>, Vec<FileSpec>)>::decode(index_bytes.concat().as_slice())?;
         Ok(Index::new(

@@ -7,6 +7,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
     sync::{Mutex, RwLock},
 };
+use tracing::warn;
 
 use crate::{error::Result, types::PieceState};
 
@@ -115,22 +116,31 @@ impl PieceVerifierInner {
 
         let status = if piece_state.is_complete() {
             // verify complete ones
-            if self
+            match self
                 .verify_piece(piece_state.file_index, piece_state.piece_index)
-                .await?
+                .await
             {
-                self.verified_pieces.insert(piece_state.key(), piece_state);
-                PieceStatus::ValidPiece {
-                    file_index: piece_state.file_index,
-                    piece_index: piece_state.piece_index,
-                    index_complete: self.verified_pieces.len() == self.n_pieces,
+                Ok(true) => {
+                    self.verified_pieces.insert(piece_state.key(), piece_state);
+                    PieceStatus::ValidPiece {
+                        file_index: piece_state.file_index,
+                        piece_index: piece_state.piece_index,
+                        index_complete: self.verified_pieces.len() == self.n_pieces,
+                    }
                 }
-            } else {
-                // invalid piece, still pending
-                self.pending_pieces.insert(piece_state.key(), piece_state);
-                PieceStatus::InvalidPiece {
-                    file_index: piece_state.file_index,
-                    piece_index: piece_state.piece_index,
+                Ok(false) => {
+                    // invalid piece, still pending
+                    self.pending_pieces.insert(piece_state.key(), piece_state);
+                    PieceStatus::InvalidPiece {
+                        file_index: piece_state.file_index,
+                        piece_index: piece_state.piece_index,
+                    }
+                }
+                Err(err) => {
+                    // error verifying piece in local file, back to pending
+                    self.pending_pieces.insert(piece_state.key(), piece_state);
+                    warn!(?err, "verifying piece");
+                    return Err(err);
                 }
             }
         } else {
