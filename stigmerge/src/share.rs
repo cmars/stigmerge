@@ -222,7 +222,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Share<C> {
 
         // All peers are seeders
         let seeder =
-            seeder::Seeder::new(self.conn.clone(), share.clone(), piece_verifier.clone()).await;
+            seeder::Seeder::new(self.conn.clone(), share.clone(), piece_verifier.clone()).await?;
         self.tasks
             .spawn(seeder.run(cancel.clone(), self.retry.clone()));
 

@@ -98,7 +98,7 @@ async fn main() -> std::result::Result<(), Error> {
     //    WithVeilidConnection::new(node.clone(), conn_state.clone()),
     //);
 
-    let seeder = Seeder::new(conn, share_info, verifier.clone()).await;
+    let seeder = Seeder::new(conn, share_info, verifier.clone()).await?;
     tasks.spawn(seeder.run(cancel.clone(), retry.clone()));
 
     // Verify the index, notifying seeder of verified pieces

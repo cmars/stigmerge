@@ -146,7 +146,7 @@ async fn main() -> std::result::Result<(), Error> {
         PieceVerifier::new(std::sync::Arc::new(tokio::sync::RwLock::new(index.clone()))).await;
 
     // Set up seeder
-    let seeder = Seeder::new(conn.clone(), share_info.clone(), piece_verifier.clone()).await;
+    let seeder = Seeder::new(conn.clone(), share_info.clone(), piece_verifier.clone()).await?;
     tasks.spawn(seeder.run(cancel.clone(), retry.clone()));
 
     // Add bootstrap shares for fetching

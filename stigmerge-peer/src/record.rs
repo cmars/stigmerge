@@ -477,3 +477,89 @@ impl StablePeersRecord {
         Ok(())
     }
 }
+
+#[derive(Debug)]
+pub struct StableHaveMap {
+    record: StablePublicRecord,
+    piece_map: PieceMap,
+    dirty: bool,
+    subkeys: u16,
+}
+
+impl StableHaveMap {
+    #[instrument(skip_all, fields(table_name, db_key_id = hex::encode(index.payload().digest()), subkeys), ret(level = Level::TRACE))]
+    pub async fn new_local<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        index: &Index,
+    ) -> Result<Self> {
+        let db_key_id = index.payload().digest();
+        let subkeys = PieceMap::subkeys(index.payload().pieces().len());
+        Ok(Self {
+            record: StablePublicRecord::new_local(
+                conn,
+                "stigmerge_have_map_dht",
+                db_key_id,
+                subkeys,
+            )
+            .await?,
+            piece_map: PieceMap::new(),
+            subkeys,
+            dirty: false,
+        })
+    }
+
+    #[instrument(skip(conn), ret(level = Level::TRACE))]
+    pub async fn read_remote<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+    ) -> Result<PieceMap> {
+        let record = StablePublicRecord::new_remote(conn, key).await?;
+        let piece_map_bytes = record.read(conn, ValueSubkeyRangeSet::full()).await?;
+        Ok(PieceMap::from(piece_map_bytes.as_slice()))
+    }
+
+    pub fn key(&self) -> &TypedRecordKey {
+        self.record.key()
+    }
+
+    pub fn subkeys(&self) -> u16 {
+        self.subkeys
+    }
+
+    pub fn piece_map(&self) -> &PieceMap {
+        &self.piece_map
+    }
+
+    pub fn has_piece(&self, piece_index: u32) -> bool {
+        self.piece_map.get(piece_index)
+    }
+
+    #[instrument(skip_all, ret(level = Level::TRACE))]
+    pub async fn update_piece(&mut self, piece_index: u32, have: bool) -> Result<()> {
+        if self.record.owner_keypair.is_none() {
+            return Err(Error::msg("dht record is not locally owned"));
+        }
+
+        if have {
+            self.piece_map.set(piece_index);
+        } else {
+            self.piece_map.clear(piece_index);
+        }
+
+        self.dirty = true;
+        Ok(())
+    }
+
+    #[instrument(skip_all, ret(level = Level::TRACE))]
+    pub async fn sync<C: Connection + Send + Sync + 'static>(
+        &mut self,
+        conn: &mut C,
+    ) -> Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        self.record
+            .write(conn, ValueSubkeyRangeSet::full(), self.piece_map.as_ref())
+            .await
+    }
+}
