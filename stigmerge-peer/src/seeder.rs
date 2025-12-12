@@ -10,7 +10,7 @@ use tokio::{
     time::interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, trace, warn};
+use tracing::{error, instrument, trace, warn};
 use veilid_core::{OperationId, VeilidAppCall};
 use veilnet::{
     connection::{RoutingContext, UpdateHandler, API},
@@ -49,6 +49,7 @@ impl<C: Connection + Send + Sync + 'static> Seeder<C> {
         })
     }
 
+    #[instrument(skip_all, err)]
     pub async fn run(mut self, cancel: CancellationToken, retry: Retry) -> Result<()> {
         let block_request_rx = {
             let inner = self.inner.lock().await;
@@ -79,6 +80,9 @@ impl<C: Connection + Send + Sync + 'static> Seeder<C> {
                         Ok(piece_state) => {
                             let piece_index = piece_state.piece_index().try_into().unwrap();
                             self.have_map.update_piece(piece_index, true).await?;
+                            if piece_state.index_complete() {
+                                self.have_map.sync(&mut self.inner.lock().await.conn).await?;
+                            }
                         }
                     };
                 }

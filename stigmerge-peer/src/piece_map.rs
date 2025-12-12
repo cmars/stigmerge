@@ -310,6 +310,12 @@ mod tests {
     }
 
     #[test]
+    fn iterator_pattern_ff() {
+        let have_map: PieceMap = [0xffu8; 4].as_slice().into(); // 10101010 pattern
+        assert_eq!(have_map.iter().count(), 32);
+    }
+
+    #[test]
     fn iterator_sparse_bits() {
         let mut have_map = PieceMap::new();
         let bits = vec![10, 50, 100, 200, 500];

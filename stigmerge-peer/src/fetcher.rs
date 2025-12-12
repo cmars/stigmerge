@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
@@ -15,7 +17,9 @@ use veilnet::Connection;
 use crate::block_fetcher::BlockFetcher;
 use crate::content_addressable::ContentAddressable;
 use crate::error::{CancelError, Unrecoverable};
+use crate::piece_map::PieceMap;
 use crate::piece_verifier::{PieceStatus, PieceStatusNotifier, PieceVerifier};
+use crate::record::StableHaveMap;
 use crate::share_resolver::{ShareNotifier, ShareResolver};
 use crate::types::{FileBlockFetch, LocalShareInfo, PieceState, RemoteShareInfo};
 use crate::{piece_verifier, Result, Retry};
@@ -458,10 +462,37 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
     }
 
     const MAX_REMOTE_TASKS: usize = 64;
+    const MISSING_PIECE_DELAY: Duration = Duration::from_secs(30);
 
     async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let (fetch_success_tx, fetch_success_rx) = flume::unbounded();
         let mut consecutive_good_fetches = 0;
+
+        let have_map = {
+            let have_map_key = match self.remote_share.header.have_map() {
+                Some(have_map_ref) => have_map_ref.key(),
+                None => {
+                    warn!(
+                        share_key = ?self.remote_share.key,
+                        delay = ?Self::MISSING_PIECE_DELAY,
+                        "missing have map, waiting for it to announce",
+                    );
+                    return select! {
+                        _ = cancel.cancelled() => {
+                            Err(CancelError.into())
+                        }
+                        _ = tokio::time::sleep(Self::MISSING_PIECE_DELAY) => {
+                            Ok(())
+                        }
+                    };
+                }
+            };
+            Arc::new(
+                StableHaveMap::read_remote(&mut self.conn, have_map_key, &self.remote_share.index)
+                    .await?,
+            )
+        };
+
         loop {
             if self.tasks.is_empty() {
                 let task = FetchTask::new(
@@ -473,6 +504,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
                     self.status_tx.clone(),
                     fetch_success_tx.clone(),
                     self.piece_verifier.clone(),
+                    have_map.clone(),
                 );
                 trace!(share_key = ?self.remote_share.key, "spawning fetch task");
                 self.tasks.spawn(task.run(cancel.child_token()));
@@ -519,6 +551,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
                                 self.status_tx.clone(),
                                 fetch_success_tx.clone(),
                                 self.piece_verifier.clone(),
+                                have_map.clone(),
                             );
                             trace!(share_key = ?self.remote_share.key, "spawning fetch task");
                             self.tasks.spawn(task.run(cancel.child_token()));
@@ -558,6 +591,7 @@ struct FetchTask<C: Connection> {
     status_tx: watch::Sender<Status>,
     fetch_success_tx: flume::Sender<bool>,
     piece_verifier: PieceVerifier,
+    have_map: Arc<PieceMap>,
 }
 
 impl<C: Connection + Clone + Send + Sync> FetchTask<C> {
@@ -570,6 +604,7 @@ impl<C: Connection + Clone + Send + Sync> FetchTask<C> {
         status_tx: watch::Sender<Status>,
         fetch_success_tx: flume::Sender<bool>,
         piece_verifier: PieceVerifier,
+        have_map: Arc<PieceMap>,
     ) -> Self {
         Self {
             conn: conn.clone(),
@@ -580,6 +615,7 @@ impl<C: Connection + Clone + Send + Sync> FetchTask<C> {
             status_tx,
             fetch_success_tx,
             piece_verifier,
+            have_map,
         }
     }
 
@@ -594,27 +630,36 @@ impl<C: Connection + Clone + Send + Sync> FetchTask<C> {
                 }
                 res = self.pending_blocks_rx.recv_async() => {
                     let block_fetch = res?;
-                    match block_fetcher.fetch_block(&self.remote_share.route_id, &block_fetch, true).await {
-                        Ok((piece_state, fetch_len)) => {
-                            self.status_tx.send_modify(|status| {
-                                if let Status::FetchProgress { fetch_position, .. } = status {
-                                    *fetch_position += TryInto::<i64>::try_into(fetch_len).unwrap();
-                                }
-                            });
-                            self.piece_verifier.update_piece(piece_state).await?;
-                            self.fetch_success_tx.send_async(true).await?;
-                            errors = 0;
-                        }
-                        Err(err) => {
-                            trace!(?err, "fetch block");
-                            // Nack the fetch, for pool task accounting.
-                            self.fetch_success_tx.send_async(false).await?;
-                            // Re-queue the block fetch.
-                            self.pending_blocks_tx.send_async(block_fetch).await?;
+                    if !self.have_map.get(TryInto::<u32>::try_into(block_fetch.piece_index).unwrap()) {
+                        // We don't have this piece, requeue it.
+                        // Nack the fetch, for pool task accounting. Remote lacks these blocks.
+                        self.fetch_success_tx.send_async(false).await?;
+                        // Re-queue the block fetch.
+                        self.pending_blocks_tx.send_async(block_fetch).await?;
+                        return Ok(());
+                    } else {
+                        match block_fetcher.fetch_block(&self.remote_share.route_id, &block_fetch, true).await {
+                            Ok((piece_state, fetch_len)) => {
+                                self.status_tx.send_modify(|status| {
+                                    if let Status::FetchProgress { fetch_position, .. } = status {
+                                        *fetch_position += TryInto::<i64>::try_into(fetch_len).unwrap();
+                                    }
+                                });
+                                self.piece_verifier.update_piece(piece_state).await?;
+                                self.fetch_success_tx.send_async(true).await?;
+                                errors = 0;
+                            }
+                            Err(err) => {
+                                trace!(?err, "fetch block");
+                                // Nack the fetch, for pool task accounting.
+                                self.fetch_success_tx.send_async(false).await?;
+                                // Re-queue the block fetch.
+                                self.pending_blocks_tx.send_async(block_fetch).await?;
 
-                            errors += 1;
-                            if errors > 10 {
-                                return Err(err);
+                                errors += 1;
+                                if errors > 10 {
+                                    return Err(err);
+                                }
                             }
                         }
                     }

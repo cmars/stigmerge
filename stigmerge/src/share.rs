@@ -187,7 +187,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Share<C> {
             )
             .await?;
             let share_info = share_announcer.share_info().await;
-            debug!(index_digest = hex::encode(share_info.want_index_digest));
+            debug!(key = ?share_info.key, index_digest = hex::encode(share_info.want_index_digest));
             {
                 let cancel = cancel.clone();
                 self.tasks.spawn(async move {

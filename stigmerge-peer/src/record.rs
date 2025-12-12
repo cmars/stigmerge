@@ -508,13 +508,20 @@ impl StableHaveMap {
         })
     }
 
-    #[instrument(skip(conn), ret(level = Level::TRACE))]
+    #[instrument(skip(conn, index), ret(level = Level::TRACE), err)]
     pub async fn read_remote<C: Connection + Send + Sync + 'static>(
         conn: &mut C,
         key: &TypedRecordKey,
+        index: &Index,
     ) -> Result<PieceMap> {
         let record = StablePublicRecord::new_remote(conn, key).await?;
-        let piece_map_bytes = record.read(conn, ValueSubkeyRangeSet::full()).await?;
+        let subkeys = PieceMap::subkeys(index.payload().pieces().len());
+        let piece_map_bytes = record
+            .read(
+                conn,
+                ValueSubkeyRangeSet::single_range(0, (subkeys - 1).into()),
+            )
+            .await?;
         Ok(PieceMap::from(piece_map_bytes.as_slice()))
     }
 
@@ -534,7 +541,7 @@ impl StableHaveMap {
         self.piece_map.get(piece_index)
     }
 
-    #[instrument(skip_all, ret(level = Level::TRACE))]
+    #[instrument(skip_all, ret(level = Level::TRACE), err)]
     pub async fn update_piece(&mut self, piece_index: u32, have: bool) -> Result<()> {
         if self.record.owner_keypair.is_none() {
             return Err(Error::msg("dht record is not locally owned"));
@@ -550,7 +557,7 @@ impl StableHaveMap {
         Ok(())
     }
 
-    #[instrument(skip_all, ret(level = Level::TRACE))]
+    #[instrument(skip_all, ret(level = Level::TRACE), err)]
     pub async fn sync<C: Connection + Send + Sync + 'static>(
         &mut self,
         conn: &mut C,
@@ -558,8 +565,22 @@ impl StableHaveMap {
         if !self.dirty {
             return Ok(());
         }
+        let piece_map_len = self.piece_map.as_ref().len();
+        let max_subkey = piece_map_len / ValueData::MAX_LEN
+            + if piece_map_len % ValueData::MAX_LEN > 0 {
+                1
+            } else {
+                0
+            };
         self.record
-            .write(conn, ValueSubkeyRangeSet::full(), self.piece_map.as_ref())
+            .write(
+                conn,
+                ValueSubkeyRangeSet::single_range(
+                    0,
+                    TryInto::<u32>::try_into(max_subkey - 1).unwrap(),
+                ),
+                self.piece_map.as_ref(),
+            )
             .await
     }
 }

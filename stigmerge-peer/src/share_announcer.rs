@@ -116,7 +116,7 @@ impl ShareAnnounce {
 
         // Establish and open peer & share records. These block on Veilid network attachment.
         let mut peers_record = StablePeersRecord::new_local(conn, &index).await?;
-        let mut have_record = StableHaveMap::new_local(conn, &index).await?;
+        let have_record = StableHaveMap::new_local(conn, &index).await?;
         let mut share_record = StableShareRecord::new_local(conn, &index).await?;
 
         let (mut header, route_id) = {

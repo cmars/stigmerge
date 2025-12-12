@@ -1,7 +1,11 @@
 use std::path::Path;
 
 use anyhow::Result;
-use stigmerge_peer::{record::StablePeersRecord, share_resolver::ShareResolver, Retry};
+use stigmerge_peer::{
+    record::{StableHaveMap, StablePeersRecord},
+    share_resolver::ShareResolver,
+    Retry,
+};
 use tokio_util::sync::CancellationToken;
 use veilnet::Connection;
 
@@ -29,6 +33,7 @@ pub(crate) async fn share_info<C: Connection + Clone + Send + Sync + 'static>(
         payload_length: usize,
         files: Vec<String>,
         peer_map_key: Option<String>,
+        have_map_key: Option<String>,
     }
 
     let info = Info {
@@ -47,17 +52,51 @@ pub(crate) async fn share_info<C: Connection + Clone + Send + Sync + 'static>(
             .header
             .peer_map()
             .map(|pm| pm.key().to_string()),
+        have_map_key: remote_share
+            .header
+            .have_map()
+            .map(|hm| hm.key().to_string()),
     };
     println!("{:#?}", info);
 
     if let Some(peer_map_ref) = remote_share.header.peer_map() {
-        let mut peers_record = StablePeersRecord::new_remote(&mut conn, peer_map_ref.key()).await?;
-        peers_record.load_peers(&mut conn).await?;
-        let peers = peers_record
-            .known_peers()
-            .map(|p| p.0.to_string())
-            .collect::<Vec<_>>();
-        println!("peers: {:#?}", peers);
+        match StablePeersRecord::new_remote(&mut conn, peer_map_ref.key()).await {
+            Ok(mut peers_record) => {
+                peers_record.load_peers(&mut conn).await?;
+                let peers = peers_record
+                    .known_peers()
+                    .map(|p| p.0.to_string())
+                    .collect::<Vec<_>>();
+                println!("peers: {:#?}", peers);
+            }
+            Err(err) => {
+                println!(
+                    "failed to load peers from {:?}: {:?}",
+                    peer_map_ref.key(),
+                    err
+                );
+            }
+        }
+    }
+
+    if let Some(have_map_ref) = remote_share.header.have_map() {
+        match StableHaveMap::read_remote(&mut conn, have_map_ref.key(), &remote_share.index).await {
+            Ok(piece_map) => {
+                let have_count = piece_map.iter().count();
+                println!(
+                    "have pieces: {} of {}",
+                    have_count,
+                    remote_share.index.payload().pieces().len()
+                );
+            }
+            Err(err) => {
+                println!(
+                    "failed to load have-map from {:?}: {:?}",
+                    have_map_ref.key(),
+                    err
+                );
+            }
+        }
     }
 
     cancel.cancel();
