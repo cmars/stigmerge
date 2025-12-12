@@ -75,6 +75,14 @@ impl PieceMap {
             self.0[byte_offset + i] = *b;
         }
     }
+
+    pub fn iter(&self) -> PieceMapIter<'_> {
+        PieceMapIter {
+            bitmap: &self.0,
+            byte_index: 0,
+            bit_offset: 0,
+        }
+    }
 }
 
 impl From<Vec<u8>> for PieceMap {
@@ -98,6 +106,47 @@ impl From<PieceMap> for Vec<u8> {
 impl AsRef<[u8]> for PieceMap {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
+    }
+}
+
+pub struct PieceMapIter<'a> {
+    bitmap: &'a Vec<u8>,
+    byte_index: usize,
+    bit_offset: usize,
+}
+
+impl<'a> Iterator for PieceMapIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Find the next set bit
+        while self.byte_index < self.bitmap.len() {
+            let current_byte = self.bitmap[self.byte_index];
+
+            // Skip bits that are already checked
+            let remaining_bits = current_byte >> self.bit_offset;
+
+            if remaining_bits != 0 {
+                // Find the position of the first set bit in the remaining bits
+                let bit_position = remaining_bits.trailing_zeros() as usize;
+                let bit_index = self.byte_index * 8 + self.bit_offset + bit_position;
+
+                // Update position for next iteration
+                self.bit_offset += bit_position + 1;
+                if self.bit_offset >= 8 {
+                    self.bit_offset = 0;
+                    self.byte_index += 1;
+                }
+
+                return Some(bit_index);
+            }
+
+            // Move to next byte
+            self.byte_index += 1;
+            self.bit_offset = 0;
+        }
+
+        None
     }
 }
 
@@ -188,5 +237,61 @@ mod tests {
         assert_eq!(have_map.as_ref().len(), 32);
         have_map.write_bytes(32, [0xaau8; 24].as_slice().into());
         assert_eq!(have_map.as_ref().len(), 56);
+    }
+
+    #[test]
+    fn iterator_empty() {
+        let have_map = PieceMap::new();
+        let collected: Vec<usize> = have_map.iter().collect();
+        assert_eq!(collected.len(), 0);
+    }
+
+    #[test]
+    fn iterator_single_bit() {
+        let mut have_map = PieceMap::new();
+        have_map.set(42);
+        let collected: Vec<usize> = have_map.iter().collect();
+        assert_eq!(collected, vec![42]);
+    }
+
+    #[test]
+    fn iterator_multiple_bits() {
+        let mut have_map = PieceMap::new();
+        have_map.set(0);
+        have_map.set(7);
+        have_map.set(8);
+        have_map.set(15);
+        have_map.set(100);
+
+        let collected: Vec<usize> = have_map.iter().collect();
+        assert_eq!(collected, vec![0, 7, 8, 15, 100]);
+    }
+
+    #[test]
+    fn iterator_pattern_55() {
+        let have_map: PieceMap = [0x55u8; 4].as_slice().into(); // 01010101 pattern
+        let collected: Vec<usize> = have_map.iter().collect();
+        let expected: Vec<usize> = (0..32).filter(|i| i % 2 == 0).collect();
+        assert_eq!(collected, expected);
+    }
+
+    #[test]
+    fn iterator_pattern_aa() {
+        let have_map: PieceMap = [0xaau8; 4].as_slice().into(); // 10101010 pattern
+        let collected: Vec<usize> = have_map.iter().collect();
+        let expected: Vec<usize> = (0..32).filter(|i| i % 2 == 1).collect();
+        assert_eq!(collected, expected);
+    }
+
+    #[test]
+    fn iterator_sparse_bits() {
+        let mut have_map = PieceMap::new();
+        let bits = vec![10, 50, 100, 200, 500];
+        for &bit in &bits {
+            have_map.set(bit as u32);
+        }
+
+        let collected: Vec<usize> = have_map.iter().collect();
+        assert_eq!(collected, bits);
     }
 }
