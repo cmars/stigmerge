@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use stigmerge_fileindex::{BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS};
 use tokio::{
@@ -7,9 +7,10 @@ use tokio::{
     select,
     sync::Mutex,
     task::JoinSet,
+    time::interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, trace, warn};
+use tracing::{error, instrument, trace, warn};
 use veilid_core::{OperationId, VeilidAppCall};
 use veilnet::{
     connection::{RoutingContext, UpdateHandler, API},
@@ -18,9 +19,9 @@ use veilnet::{
 
 use crate::{
     error::CancelError,
-    piece_map::PieceMap,
     piece_verifier::{PieceStatus, PieceStatusNotifier, PieceVerifier},
     proto::{self, BlockRequest, Decoder},
+    record::StableHaveMap,
     types::LocalShareInfo,
     Result, Retry,
 };
@@ -28,24 +29,27 @@ use crate::{
 pub struct Seeder<C: Connection> {
     verifier: PieceVerifier,
     verified_rx: flume::Receiver<PieceStatus>,
-    piece_map: PieceMap,
+    have_map: StableHaveMap,
 
     inner: Arc<Mutex<SeederInner<C>>>,
 }
 
 impl<C: Connection + Send + Sync + 'static> Seeder<C> {
-    pub async fn new(conn: C, share: LocalShareInfo, verifier: PieceVerifier) -> Self {
+    pub async fn new(mut conn: C, share: LocalShareInfo, verifier: PieceVerifier) -> Result<Self> {
         let (status_handler, verified_rx) = PieceStatusNotifier::new();
         verifier.subscribe(Box::new(status_handler)).await;
-        Seeder {
+
+        let have_map = StableHaveMap::new_local(&mut conn, &share.want_index).await?;
+
+        Ok(Seeder {
             verifier,
             verified_rx,
-            piece_map: PieceMap::new(),
-
+            have_map,
             inner: Arc::new(Mutex::new(SeederInner::new(conn, share))),
-        }
+        })
     }
 
+    #[instrument(skip_all, err)]
     pub async fn run(mut self, cancel: CancellationToken, retry: Retry) -> Result<()> {
         let block_request_rx = {
             let inner = self.inner.lock().await;
@@ -54,6 +58,7 @@ impl<C: Connection + Send + Sync + 'static> Seeder<C> {
             block_request_rx
         };
         let mut tasks = JoinSet::new();
+        let mut have_map_sync_interval = interval(Duration::from_secs(30));
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -72,7 +77,13 @@ impl<C: Connection + Send + Sync + 'static> Seeder<C> {
                             continue;
 
                         }
-                        Ok(piece_state) => self.piece_map.set(piece_state.piece_index().try_into().unwrap()),
+                        Ok(piece_state) => {
+                            let piece_index = piece_state.piece_index().try_into().unwrap();
+                            self.have_map.update_piece(piece_index, true).await?;
+                            if piece_state.index_complete() {
+                                self.have_map.sync(&mut self.inner.lock().await.conn).await?;
+                            }
+                        }
                     };
                 }
                 res = block_request_rx.recv_async() => {
@@ -80,7 +91,7 @@ impl<C: Connection + Send + Sync + 'static> Seeder<C> {
                     backoff_retry!(cancel, retry, {
                         let block_req = block_req.clone();
                         trace!("app_call: {:?}", block_req);
-                        if self.piece_map.get(block_req.piece) {
+                        if self.have_map.has_piece(block_req.piece) {
                             let mut buf = [0u8; BLOCK_SIZE_BYTES];
                             let inner = self.inner.clone();
                             let cancel = cancel.child_token();
@@ -109,6 +120,9 @@ impl<C: Connection + Send + Sync + 'static> Seeder<C> {
                         // flush the file handle cache for good measure.
                         self.inner.lock().await.flush_file_cache();
                     })?;
+                }
+                _ = have_map_sync_interval.tick() => {
+                    self.have_map.sync(&mut self.inner.lock().await.conn).await?;
                 }
             }
         }
@@ -309,6 +323,7 @@ mod tests {
                 want_index: index,
                 want_index_digest: [0u8; 32],
                 root: root_dir,
+                have_map: PieceMap::new(),
             };
 
             // Create cancellation token
@@ -362,7 +377,7 @@ mod tests {
                 "reply_block_contents should be called"
             );
 
-            // Verify the data returned matches what we expect
+            // Verify that the data returned matches what we expect
             let reply_data = reply_contents_data.lock().unwrap();
             assert_eq!(
                 reply_data.len(),
@@ -425,6 +440,7 @@ mod tests {
             want_index: index,
             want_index_digest: [0u8; 32],
             root: root_dir,
+            have_map: PieceMap::new(),
         };
 
         // Create clients

@@ -18,6 +18,7 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 backoff = { workspace = true }
 capnp = { workspace = true }
+dashmap = "6.1.0"
 flume = { workspace = true }
 hex = { workspace = true }
 path-absolutize = { workspace = true }

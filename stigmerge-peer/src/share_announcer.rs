@@ -16,8 +16,8 @@ use veilnet::{
 
 use crate::{
     content_addressable::ContentAddressable,
-    proto::{Encoder, Header, PeerMapRef},
-    record::{StablePeersRecord, StableShareRecord},
+    proto::{Encoder, HaveMapRef, Header, PeerMapRef},
+    record::{StableHaveMap, StablePeersRecord, StableShareRecord},
     retry::Retry,
     types::LocalShareInfo,
     CancelError, Result,
@@ -116,6 +116,7 @@ impl ShareAnnounce {
 
         // Establish and open peer & share records. These block on Veilid network attachment.
         let mut peers_record = StablePeersRecord::new_local(conn, &index).await?;
+        let have_record = StableHaveMap::new_local(conn, &index).await?;
         let mut share_record = StableShareRecord::new_local(conn, &index).await?;
 
         let (mut header, route_id) = {
@@ -143,6 +144,8 @@ impl ShareAnnounce {
         if let Err(err) = peers_record.load_peers(conn).await {
             warn!(?err, peers_key = ?peers_record.key(), "failed to load peers");
         }
+
+        header.set_have_map(HaveMapRef::new(*have_record.key(), have_record.subkeys()));
 
         share_record.write_header(conn, &header).await?;
         share_record.write_index(conn, &index).await?;

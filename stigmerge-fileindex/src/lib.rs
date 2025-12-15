@@ -70,6 +70,17 @@ impl Index {
         Index::empty_root(&self.root)
     }
 
+    pub fn file_index_for_piece(&self, piece_index: usize) -> usize {
+        let mut file_index = 0;
+        for (i, file) in self.files().iter().enumerate() {
+            if file.contents.starting_piece > piece_index {
+                break;
+            }
+            file_index = i;
+        }
+        file_index
+    }
+
     /// Create a new empty index at a given root path.
     pub fn empty_root(root: &Path) -> Index {
         Index {

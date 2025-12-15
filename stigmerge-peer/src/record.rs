@@ -273,7 +273,13 @@ impl StableShareRecord {
             ValueSubkeyRangeSet::single_range(1, header.subkeys() as u32),
         )
         .await?;
-        debug!(index_bytes_len = index_bytes.len());
+        debug!(
+            index_bytes_len = index_bytes
+                .iter()
+                .map(|sk_val| sk_val.len())
+                .reduce(|acc, v| acc + v)
+                .unwrap_or(0)
+        );
         let (payload_pieces, payload_files) =
             <(Vec<PayloadPiece>, Vec<FileSpec>)>::decode(index_bytes.concat().as_slice())?;
         Ok(Index::new(
@@ -469,5 +475,112 @@ impl StablePeersRecord {
         )
         .await?;
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct StableHaveMap {
+    record: StablePublicRecord,
+    piece_map: PieceMap,
+    dirty: bool,
+    subkeys: u16,
+}
+
+impl StableHaveMap {
+    #[instrument(skip_all, fields(table_name, db_key_id = hex::encode(index.payload().digest()), subkeys), ret(level = Level::TRACE))]
+    pub async fn new_local<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        index: &Index,
+    ) -> Result<Self> {
+        let db_key_id = index.payload().digest();
+        let subkeys = PieceMap::subkeys(index.payload().pieces().len());
+        Ok(Self {
+            record: StablePublicRecord::new_local(
+                conn,
+                "stigmerge_have_map_dht",
+                db_key_id,
+                subkeys,
+            )
+            .await?,
+            piece_map: PieceMap::new(),
+            subkeys,
+            dirty: false,
+        })
+    }
+
+    #[instrument(skip(conn, index), ret(level = Level::TRACE), err)]
+    pub async fn read_remote<C: Connection + Send + Sync + 'static>(
+        conn: &mut C,
+        key: &TypedRecordKey,
+        index: &Index,
+    ) -> Result<PieceMap> {
+        let record = StablePublicRecord::new_remote(conn, key).await?;
+        let subkeys = PieceMap::subkeys(index.payload().pieces().len());
+        let piece_map_bytes = record
+            .read(
+                conn,
+                ValueSubkeyRangeSet::single_range(0, (subkeys - 1).into()),
+            )
+            .await?;
+        Ok(PieceMap::from(piece_map_bytes.as_slice()))
+    }
+
+    pub fn key(&self) -> &TypedRecordKey {
+        self.record.key()
+    }
+
+    pub fn subkeys(&self) -> u16 {
+        self.subkeys
+    }
+
+    pub fn piece_map(&self) -> &PieceMap {
+        &self.piece_map
+    }
+
+    pub fn has_piece(&self, piece_index: u32) -> bool {
+        self.piece_map.get(piece_index)
+    }
+
+    #[instrument(skip_all, ret(level = Level::TRACE), err)]
+    pub async fn update_piece(&mut self, piece_index: u32, have: bool) -> Result<()> {
+        if self.record.owner_keypair.is_none() {
+            return Err(Error::msg("dht record is not locally owned"));
+        }
+
+        if have {
+            self.piece_map.set(piece_index);
+        } else {
+            self.piece_map.clear(piece_index);
+        }
+
+        self.dirty = true;
+        Ok(())
+    }
+
+    #[instrument(skip_all, ret(level = Level::TRACE), err)]
+    pub async fn sync<C: Connection + Send + Sync + 'static>(
+        &mut self,
+        conn: &mut C,
+    ) -> Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        let piece_map_len = self.piece_map.as_ref().len();
+        let max_subkey = piece_map_len / ValueData::MAX_LEN
+            + if piece_map_len % ValueData::MAX_LEN > 0 {
+                1
+            } else {
+                0
+            };
+        self.record
+            .write(
+                conn,
+                ValueSubkeyRangeSet::single_range(
+                    0,
+                    TryInto::<u32>::try_into(max_subkey - 1).unwrap(),
+                ),
+                self.piece_map.as_ref(),
+            )
+            .await
     }
 }
