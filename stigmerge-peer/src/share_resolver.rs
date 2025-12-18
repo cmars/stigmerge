@@ -6,7 +6,7 @@ use std::{
 
 use tokio::{select, spawn, sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, instrument, trace, warn};
+use tracing::{instrument, trace, warn};
 use veilid_core::{RecordKey, RouteId, ValueSubkeyRangeSet, VeilidRouteChange};
 use veilnet::{
     connection::{RoutingContext, UpdateHandler, API},
@@ -14,8 +14,11 @@ use veilnet::{
 };
 
 use crate::{
-    content_addressable::ContentAddressable, error::CancelError, record::StableShareRecord,
-    types::RemoteShareInfo, Error, Result, Retry,
+    content_addressable::ContentAddressable,
+    error::CancelError,
+    record::{StableHaveMap, StableShareRecord},
+    types::RemoteShareInfo,
+    Error, Result, Retry,
 };
 
 #[derive(Clone)]
@@ -131,7 +134,7 @@ impl<C: Connection + Send + Sync + 'static> ShareResolverInner<C> {
         }
         // Ensure record is open before reading
         let (_, header) = StableShareRecord::new_remote(&mut self.conn, key).await?;
-        debug!(
+        trace!(
             ?key,
             want_index_digest = hex::encode(header.payload_digest()),
             "read header"
@@ -140,13 +143,22 @@ impl<C: Connection + Send + Sync + 'static> ShareResolverInner<C> {
             StableShareRecord::read_index(&mut self.conn, key, &header, self.root.as_path())
                 .await?;
         let index_digest = index.digest()?;
-        debug!(?key, index_digest = hex::encode(index_digest), "read index");
+        trace!(?key, index_digest = hex::encode(index_digest), "read index");
+
+        let have_map = match header.have_map() {
+            Some(have_map_ref) => {
+                StableHaveMap::read_remote(&mut self.conn, have_map_ref.key(), &index).await?
+            }
+            None => {
+                return Err(Error::msg("missing have map"));
+            }
+        };
 
         let routing_context = self.conn.routing_context();
         let route_id = routing_context
             .api()
             .import_remote_private_route(header.route_data().to_vec())?;
-        debug!(?key, ?route_id, "private route to remote");
+        trace!(?key, ?route_id, "private route to remote");
 
         routing_context
             .watch_dht_values(
@@ -163,6 +175,7 @@ impl<C: Connection + Send + Sync + 'static> ShareResolverInner<C> {
             index,
             index_digest,
             route_id,
+            have_map,
         };
         self.remote_shares
             .insert(share.route_id.clone(), share.clone());

@@ -1,8 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context;
 use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
@@ -11,15 +10,13 @@ use tokio::sync::watch;
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, trace, warn};
-use veilid_core::RecordKey;
+use veilid_core::{RecordKey, Timestamp};
 use veilnet::Connection;
 
 use crate::block_fetcher::BlockFetcher;
 use crate::content_addressable::ContentAddressable;
 use crate::error::{CancelError, Unrecoverable};
-use crate::piece_map::PieceMap;
 use crate::piece_verifier::{PieceStatus, PieceStatusNotifier, PieceVerifier};
-use crate::record::StableHaveMap;
 use crate::share_resolver::{ShareNotifier, ShareResolver};
 use crate::types::{FileBlockFetch, LocalShareInfo, PieceState, RemoteShareInfo};
 use crate::{piece_verifier, Result, Retry};
@@ -283,143 +280,147 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
         let task_cancel = cancel.child_token();
         loop {
             select! {
-                _ = cancel.cancelled() => {
-                    for handle in share_tasks.values() {
-                        handle.abort();
-                    }
-                    tasks
-                        .join_all()
-                        .await
-                        .into_iter()
-                        .collect::<Result<()>>()?;
-                    if self.piece_verifier.is_complete().await && self.pending_blocks_rx.is_empty() {
-                        return Ok(State::Done);
-                    }
-                    return Err(CancelError.into());
-                }
-                res = self.remote_share_rx.recv_async() => {
-                    // TODO: This could be improved to self-moderate, limiting
-                    // the number of remote shares being fetched from, evicting
-                    // known unproductive fetchpools to try new ones. As it
-                    // stands now, we'd promiscuously fetch from every remote
-                    // peer we discover up to the max, which for a popular
-                    // share, could exhaust compute & memory.
-                    let mut remote_share = res?;
-
-                    // Shouldn't happen, but ignore self-resolves.
-                    if self.share.key == remote_share.key {
-                        trace!("ignoring self-resolved share");
-                        continue;
-                    }
-
-                    // Ignore remote shares that have the wrong index.
-                    let remote_index_digest = remote_share.index.digest()?;
-                    if remote_index_digest != self.share.want_index_digest {
-                        warn!(
-                            key = ?remote_share.key,
-                            remote_index_digest = hex::encode(remote_index_digest),
-                            want_index_digest = hex::encode(self.share.want_index_digest),
-                            "remote share does not match wanted index",
-                        );
-                        continue;
-                    }
-                    if !share_tasks.contains_key(&remote_share.key) {
-                        let remote_share_key = remote_share.key.clone();
-                        let pool = FetchPool::new(
-                            self.conn.clone(),
-                            self.share.clone(),
-                            remote_share.clone(),
-                            self.pending_blocks_tx.clone(),
-                            self.pending_blocks_rx.clone(),
-                            self.status_tx.clone(),
-                            self.piece_verifier.clone(),
-                            self.share_resolver.clone(),
-                        );
-                        {
-                            let task_cancel = task_cancel.child_token();
-                            let handle = tasks.spawn(pool.run(task_cancel));
-                            task_shares.insert(handle.id(), remote_share_key.clone());
-                            share_tasks.insert(remote_share_key, handle);
-                        }
-                    }
-                }
-                res = tasks.join_next_with_id() => {
-                    let (id, res) = match res {
-                        Some(res) => res?,
-                        None => continue,
-                    };
-                    trace!(?res, ?id, "pool exited");
-                    let remote_share_key = match task_shares.get(&id) {
-                        Some(key) => key.clone(),
-                        None => {
-                            trace!(?id, "no tasks scheduled");
-                            continue;
-                        }
-                    };
-                    share_tasks.remove(&remote_share_key);
-
-                    let remote_share = self.share_resolver.add_share(&remote_share_key).await?;
-                    let pool = FetchPool::new(
-                        self.conn.clone(),
-                        self.share.clone(),
-                        remote_share,
-                        self.pending_blocks_tx.clone(),
-                        self.pending_blocks_rx.clone(),
-                        self.status_tx.clone(),
-                        self.piece_verifier.clone(),
-                        self.share_resolver.clone(),
-                    );
-                    {
-                        let task_cancel = task_cancel.child_token();
-                        let handle = tasks.spawn(pool.run(task_cancel));
-                        task_shares.insert(handle.id(), remote_share_key.clone());
-                        share_tasks.insert(remote_share_key, handle);
-                    }
-                }
-                res = self.piece_verified_rx.recv_async() => {
-                    let piece_status = res?;
-                    match piece_status {
-                        PieceStatus::ValidPiece{ index_complete, .. } => {
-                            self.status_tx.send_modify(|status| {
-                                if let Status::FetchProgress { verify_position, .. } = status {
-                                    *verify_position += 1;
+                            _ = cancel.cancelled() => {
+                                for handle in share_tasks.values() {
+                                    handle.abort();
                                 }
-                            });
-                            if index_complete {
-                                task_cancel.cancel();
-                                return Ok(State::Done);
+                                tasks
+                                    .join_all()
+                                    .await
+                                    .into_iter()
+                                    .collect::<Result<()>>()?;
+                                if self.piece_verifier.is_complete().await && self.pending_blocks_rx.is_empty() {
+                                    return Ok(State::Done);
+                                }
+                                return Err(CancelError.into());
                             }
-                        }
-                        PieceStatus::InvalidPiece{ file_index, piece_index } => {
-                            // Re-queue all the blocks in the failed piece
-                            let piece_length = self.share.want_index.payload().pieces()[piece_index].length();
-                            let piece_blocks = piece_length / BLOCK_SIZE_BYTES + if !piece_length.is_multiple_of(BLOCK_SIZE_BYTES) { 1 } else { 0 };
-                            for block_index in 0..piece_blocks  {
-                                let block = FileBlockFetch {
-                                    file_index,
-                                    piece_index,
-                                    piece_offset: 0,
-                                    block_index
-                                };
-                                self.pending_blocks_tx.send_async(block).await?;
-                                // TODO: punish peer for excessive bad blocks?
-                            }
-                            self.status_tx.send_modify(|status| {
-                                if let Status::FetchProgress { fetch_position, .. } = status {
-                                    let piece_length = TryInto::<i64>::try_into(piece_length).unwrap();
-                                    if *fetch_position > piece_length {
-                                        *fetch_position -= piece_length;
-                                    } else {
-                                        *fetch_position = 0;
+                            res = self.remote_share_rx.recv_async() => {
+                                // TODO: This could be improved to self-moderate, limiting
+                                // the number of remote shares being fetched from, evicting
+                                // known unproductive fetchpools to try new ones. As it
+                                // stands now, we'd promiscuously fetch from every remote
+                                // peer we discover up to the max, which for a popular
+                                // share, could exhaust compute & memory.
+                                let mut remote_share = res?;
+
+                                // Shouldn't happen, but ignore self-resolves.
+                                if self.share.key == remote_share.key {
+                                    trace!("ignoring self-resolved share");
+                                    continue;
+                                }
+
+                                // Ignore remote shares that have the wrong index.
+                                let remote_index_digest = remote_share.index.digest()?;
+                                if remote_index_digest != self.share.want_index_digest {
+                                    warn!(
+                                        key = ?remote_share.key,
+                                        remote_index_digest = hex::encode(remote_index_digest),
+                                        want_index_digest = hex::encode(self.share.want_index_digest),
+                                        "remote share does not match wanted index",
+                                    );
+                                    continue;
+                                }
+                                if !share_tasks.contains_key(&remote_share.key) {
+                                    let remote_share_key = remote_share.key;
+                                    let pool = FetchPool::new(FetchPoolParams {
+                                        conn: self.conn.clone(),
+                                        local_share: self.share.clone(),
+                                        remote_share: Arc::new(remote_share),
+                                        block_channels: BlockChannels {
+                                            pending_blocks_tx: self.pending_blocks_tx.clone(),
+                                            pending_blocks_rx: self.pending_blocks_rx.clone(),
+                                        },
+                                        status_tx: self.status_tx.clone(),
+                                        piece_verifier: self.piece_verifier.clone(),
+                                        share_resolver: self.share_resolver.clone(),
+                                    });
+                                    {
+                                        let task_cancel = task_cancel.child_token();
+                                        let handle = tasks.spawn(pool.run(task_cancel));
+                                        task_shares.insert(handle.id(), remote_share_key.clone());
+                                        share_tasks.insert(remote_share_key, handle);
                                     }
                                 }
-                            });
+                            }
+                            res = tasks.join_next_with_id() => {
+                                let (id, res) = match res {
+                                    Some(res) => res?,
+                                    None => continue,
+                                };
+                                trace!(?res, ?id, "pool exited");
+                                let remote_share_key = match task_shares.get(&id) {
+                                    Some(key) => key.clone(),
+                                    None => {
+                                        trace!(?id, "no tasks scheduled");
+                                        continue;
+                                    }
+                                };
+                                share_tasks.remove(&remote_share_key);
 
+                                let remote_share = self.share_resolver.add_share(&remote_share_key).await?;
+                                let pool = FetchPool::new(FetchPoolParams {
+                                    conn: self.conn.clone(),
+                                    local_share: self.share.clone(),
+                                    remote_share: Arc::new(remote_share),
+                                    block_channels: BlockChannels {
+                                        pending_blocks_tx: self.pending_blocks_tx.clone(),
+                                        pending_blocks_rx: self.pending_blocks_rx.clone(),
+                                    },
+                                    status_tx: self.status_tx.clone(),
+                                    piece_verifier: self.piece_verifier.clone(),
+                                    share_resolver: self.share_resolver.clone(),
+                                });
+                                {
+                                    let task_cancel = task_cancel.child_token();
+                                    let handle = tasks.spawn(pool.run(task_cancel));
+                                    task_shares.insert(handle.id(), remote_share_key.clone());
+                                    share_tasks.insert(remote_share_key, handle);
+                                }
+                            }
+                            res = self.piece_verified_rx.recv_async() => {
+                                let piece_status = res?;
+                                match piece_status {
+                                    PieceStatus::ValidPiece{ index_complete, .. } => {
+                                        self.status_tx.send_modify(|status| {
+                                            if let Status::FetchProgress { verify_position, .. } = status {
+                                                *verify_position += 1;
+                                            }
+                                        });
+                                        if index_complete {
+                                            task_cancel.cancel();
+                                            return Ok(State::Done);
+                                        }
+                                    }
+                                    PieceStatus::InvalidPiece{ file_index, piece_index } => {
+                                        // Re-queue all the blocks in the failed piece
+                                        let piece_length = self.share.want_index.payload().pieces()[piece_index].length();
+                                        let piece_blocks = piece_length / BLOCK_SIZE_BYTES + if !piece_length.is_multiple_of(BLOCK_SIZE_BYTES) { 1 } else { 0 };
+                                        for block_index in 0..piece_blocks  {
+                                            let block = FileBlockFetch {
+                                                file_index,
+                                                piece_index,
+                                                piece_offset: 0,
+                                                block_index
+                                            };
+                                            self.pending_blocks_tx.send_async(block).await?;
+                                            // TODO: punish peer for excessive bad blocks?
+                                        }
+                                        self.status_tx.send_modify(|status| {
+                                            if let Status::FetchProgress { fetch_position, .. } = status {
+                                                let piece_length = TryInto::<i64>::try_into(piece_length).unwrap();
+                                                if *fetch_position > piece_length {
+                                                    *fetch_position -= piece_length;
+                                                } else {
+                                                    *fetch_position = 0;
+                                                }
+                                            }
+                                        });
+
+                                    }
+                                    PieceStatus::IncompletePiece { .. } => {}
+                                }
+                            }
                         }
-                        PieceStatus::IncompletePiece { .. } => {}
-                    }
-                }
-            }
         }
     }
 }
@@ -427,7 +428,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
 struct FetchPool<C: Connection + Clone> {
     conn: C,
     local_share: LocalShareInfo,
-    remote_share: RemoteShareInfo,
+    remote_share: Arc<RemoteShareInfo>,
     tasks: JoinSet<Result<()>>,
 
     pending_blocks_tx: flume::Sender<FileBlockFetch>,
@@ -437,75 +438,58 @@ struct FetchPool<C: Connection + Clone> {
     share_resolver: ShareResolver<C>,
 }
 
+/// Parameters for creating a FetchPool
+struct FetchPoolParams<C: Connection + Clone> {
+    conn: C,
+    local_share: LocalShareInfo,
+    remote_share: Arc<RemoteShareInfo>,
+    block_channels: BlockChannels,
+    status_tx: watch::Sender<Status>,
+    piece_verifier: PieceVerifier,
+    share_resolver: ShareResolver<C>,
+}
+
+/// Channel pair for block communication
+struct BlockChannels {
+    pending_blocks_tx: flume::Sender<FileBlockFetch>,
+    pending_blocks_rx: flume::Receiver<FileBlockFetch>,
+}
+
 impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
-    fn new(
-        conn: C,
-        local_share: LocalShareInfo,
-        remote_share: RemoteShareInfo,
-        pending_blocks_tx: flume::Sender<FileBlockFetch>,
-        pending_blocks_rx: flume::Receiver<FileBlockFetch>,
-        status_tx: watch::Sender<Status>,
-        piece_verifier: PieceVerifier,
-        share_resolver: ShareResolver<C>,
-    ) -> Self {
+    fn new(params: FetchPoolParams<C>) -> Self {
         Self {
-            conn,
-            local_share,
-            remote_share,
+            conn: params.conn,
+            local_share: params.local_share,
+            remote_share: params.remote_share,
             tasks: JoinSet::new(),
-            pending_blocks_tx,
-            pending_blocks_rx,
-            status_tx,
-            piece_verifier,
-            share_resolver,
+            pending_blocks_tx: params.block_channels.pending_blocks_tx,
+            pending_blocks_rx: params.block_channels.pending_blocks_rx,
+            status_tx: params.status_tx,
+            piece_verifier: params.piece_verifier,
+            share_resolver: params.share_resolver,
         }
     }
 
     const MAX_REMOTE_TASKS: usize = 64;
-    const MISSING_PIECE_DELAY: Duration = Duration::from_secs(30);
 
     async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         let (fetch_success_tx, fetch_success_rx) = flume::unbounded();
         let mut consecutive_good_fetches = 0;
 
-        let have_map = {
-            let have_map_key = match self.remote_share.header.have_map() {
-                Some(have_map_ref) => have_map_ref.key(),
-                None => {
-                    warn!(
-                        share_key = ?self.remote_share.key,
-                        delay = ?Self::MISSING_PIECE_DELAY,
-                        "missing have map, waiting for it to announce",
-                    );
-                    return select! {
-                        _ = cancel.cancelled() => {
-                            Err(CancelError.into())
-                        }
-                        _ = tokio::time::sleep(Self::MISSING_PIECE_DELAY) => {
-                            Ok(())
-                        }
-                    };
-                }
-            };
-            Arc::new(
-                StableHaveMap::read_remote(&mut self.conn, have_map_key, &self.remote_share.index)
-                    .await?,
-            )
-        };
-
         loop {
             if self.tasks.is_empty() {
-                let task = FetchTask::new(
-                    self.conn.clone(),
-                    self.local_share.root.to_path_buf(),
-                    self.remote_share.clone(),
-                    self.pending_blocks_tx.clone(),
-                    self.pending_blocks_rx.clone(),
-                    self.status_tx.clone(),
-                    fetch_success_tx.clone(),
-                    self.piece_verifier.clone(),
-                    have_map.clone(),
-                );
+                let task = FetchTask::new(FetchTaskParams {
+                    conn: self.conn.clone(),
+                    local_root: self.local_share.root.to_path_buf(),
+                    remote_share: self.remote_share.clone(),
+                    block_channels: BlockChannels {
+                        pending_blocks_tx: self.pending_blocks_tx.clone(),
+                        pending_blocks_rx: self.pending_blocks_rx.clone(),
+                    },
+                    status_tx: self.status_tx.clone(),
+                    fetch_success_tx: fetch_success_tx.clone(),
+                    piece_verifier: self.piece_verifier.clone(),
+                });
                 trace!(share_key = ?self.remote_share.key, "spawning fetch task");
                 self.tasks.spawn(task.run(cancel.child_token()));
             }
@@ -542,17 +526,18 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
                     }
                     if consecutive_good_fetches >= self.tasks.len() * 2 {
                         for _ in 0..self.tasks.len() {
-                            let task = FetchTask::new(
-                                self.conn.clone(),
-                                self.local_share.root.to_path_buf(),
-                                self.remote_share.clone(),
-                                self.pending_blocks_tx.clone(),
-                                self.pending_blocks_rx.clone(),
-                                self.status_tx.clone(),
-                                fetch_success_tx.clone(),
-                                self.piece_verifier.clone(),
-                                have_map.clone(),
-                            );
+                            let task = FetchTask::new(FetchTaskParams {
+                                conn: self.conn.clone(),
+                                local_root: self.local_share.root.to_path_buf(),
+                                remote_share: self.remote_share.clone(),
+                                block_channels: BlockChannels {
+                                    pending_blocks_tx: self.pending_blocks_tx.clone(),
+                                    pending_blocks_rx: self.pending_blocks_rx.clone(),
+                                },
+                                status_tx: self.status_tx.clone(),
+                                fetch_success_tx: fetch_success_tx.clone(),
+                                piece_verifier: self.piece_verifier.clone(),
+                            });
                             trace!(share_key = ?self.remote_share.key, "spawning fetch task");
                             self.tasks.spawn(task.run(cancel.child_token()));
                         }
@@ -585,43 +570,41 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
 struct FetchTask<C: Connection> {
     conn: C,
     local_root: PathBuf,
-    remote_share: RemoteShareInfo,
+    remote_share: Arc<RemoteShareInfo>,
     pending_blocks_tx: flume::Sender<FileBlockFetch>,
     pending_blocks_rx: flume::Receiver<FileBlockFetch>,
     status_tx: watch::Sender<Status>,
     fetch_success_tx: flume::Sender<bool>,
     piece_verifier: PieceVerifier,
-    have_map: Arc<PieceMap>,
+}
+
+/// Parameters for creating a FetchTask
+struct FetchTaskParams<C: Connection> {
+    conn: C,
+    local_root: PathBuf,
+    remote_share: Arc<RemoteShareInfo>,
+    block_channels: BlockChannels,
+    status_tx: watch::Sender<Status>,
+    fetch_success_tx: flume::Sender<bool>,
+    piece_verifier: PieceVerifier,
 }
 
 impl<C: Connection + Clone + Send + Sync> FetchTask<C> {
-    fn new(
-        conn: C,
-        local_root: PathBuf,
-        remote_share: RemoteShareInfo,
-        pending_blocks_tx: flume::Sender<FileBlockFetch>,
-        pending_blocks_rx: flume::Receiver<FileBlockFetch>,
-        status_tx: watch::Sender<Status>,
-        fetch_success_tx: flume::Sender<bool>,
-        piece_verifier: PieceVerifier,
-        have_map: Arc<PieceMap>,
-    ) -> Self {
+    fn new(params: FetchTaskParams<C>) -> Self {
         Self {
-            conn: conn.clone(),
-            local_root,
-            remote_share,
-            pending_blocks_tx,
-            pending_blocks_rx,
-            status_tx,
-            fetch_success_tx,
-            piece_verifier,
-            have_map,
+            conn: params.conn,
+            local_root: params.local_root,
+            remote_share: params.remote_share,
+            pending_blocks_tx: params.block_channels.pending_blocks_tx,
+            pending_blocks_rx: params.block_channels.pending_blocks_rx,
+            status_tx: params.status_tx,
+            fetch_success_tx: params.fetch_success_tx,
+            piece_verifier: params.piece_verifier,
         }
     }
 
     async fn run(self, cancel: CancellationToken) -> Result<()> {
-        let mut block_fetcher =
-            BlockFetcher::new(self.conn, self.remote_share.index, self.local_root.clone());
+        let mut block_fetcher = BlockFetcher::new(self.conn, self.local_root.clone());
         let mut errors = 0;
         loop {
             select! {
@@ -630,7 +613,7 @@ impl<C: Connection + Clone + Send + Sync> FetchTask<C> {
                 }
                 res = self.pending_blocks_rx.recv_async() => {
                     let block_fetch = res?;
-                    if !self.have_map.get(TryInto::<u32>::try_into(block_fetch.piece_index).unwrap()) {
+                    if !self.remote_share.have_map.get(TryInto::<u32>::try_into(block_fetch.piece_index).unwrap()) {
                         // We don't have this piece, requeue it.
                         // Nack the fetch, for pool task accounting. Remote lacks these blocks.
                         self.fetch_success_tx.send_async(false).await?;
@@ -638,7 +621,7 @@ impl<C: Connection + Clone + Send + Sync> FetchTask<C> {
                         self.pending_blocks_tx.send_async(block_fetch).await?;
                         return Ok(());
                     } else {
-                        match block_fetcher.fetch_block(&self.remote_share.route_id, &block_fetch, true).await {
+                        match block_fetcher.fetch_block(&self.remote_share.index, &self.remote_share.route_id, &block_fetch, true).await {
                             Ok((piece_state, fetch_len)) => {
                                 self.status_tx.send_modify(|status| {
                                     if let Status::FetchProgress { fetch_position, .. } = status {

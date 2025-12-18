@@ -18,17 +18,15 @@ use super::types::FileBlockFetch;
 
 pub struct BlockFetcher<C: Connection> {
     conn: C,
-    want_index: Index,
     root: PathBuf,
     files: HashMap<usize, File>,
 }
 
 impl<C: Connection + Send + Sync> BlockFetcher<C> {
     /// Creates a new block fetcher.
-    pub fn new(conn: C, want_index: Index, root: PathBuf) -> Self {
+    pub fn new(conn: C, root: PathBuf) -> Self {
         Self {
             conn,
-            want_index,
             root,
             files: HashMap::new(),
         }
@@ -36,6 +34,7 @@ impl<C: Connection + Send + Sync> BlockFetcher<C> {
 
     pub async fn fetch_block(
         &mut self,
+        want_index: &Index,
         route_id: &RouteId,
         block: &FileBlockFetch,
         flush: bool,
@@ -55,7 +54,7 @@ impl<C: Connection + Send + Sync> BlockFetcher<C> {
             None => {
                 let path = self
                     .root
-                    .join(self.want_index.files()[block.file_index].path());
+                    .join(want_index.files()[block.file_index].path());
                 let fh = File::options()
                     .write(true)
                     .truncate(false)
@@ -78,7 +77,7 @@ impl<C: Connection + Send + Sync> BlockFetcher<C> {
                 block.file_index,
                 block.piece_index,
                 block.piece_offset,
-                self.want_index.payload().pieces()[block.piece_index].block_count(),
+                want_index.payload().pieces()[block.piece_index].block_count(),
                 block.block_index,
             ),
             block_end,
@@ -110,7 +109,6 @@ impl<C: Connection + Clone> Clone for BlockFetcher<C> {
     fn clone(&self) -> Self {
         Self {
             conn: self.conn.clone(),
-            want_index: self.want_index.clone(),
             root: self.root.clone(),
             files: HashMap::new(),
         }

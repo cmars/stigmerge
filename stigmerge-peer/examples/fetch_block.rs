@@ -97,7 +97,6 @@ async fn main() -> std::result::Result<(), Error> {
     // Create the block fetcher
     let mut block_fetcher = BlockFetcher::new(
         conn.clone(),
-        remote_share.index.clone(),
         output_path.clone(),
     );
 
@@ -115,7 +114,7 @@ async fn main() -> std::result::Result<(), Error> {
     );
 
     let (_, length) = block_fetcher
-        .fetch_block(&remote_share.route_id, &block, true)
+        .fetch_block(&remote_share.index, &remote_share.route_id, &block, true)
         .await?;
     info!("Successfully fetched block of length: {} bytes", length);
 
