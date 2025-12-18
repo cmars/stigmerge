@@ -2,16 +2,17 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES};
+use stigmerge_fileindex::BLOCK_SIZE_BYTES;
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use veilid_core::{RouteId, Target};
+use veilid_core::Target;
 use veilnet::connection::RoutingContext;
 use veilnet::Connection;
 
 use crate::proto::{BlockRequest, Encoder, Request};
-use crate::types::PieceState;
+use crate::types::{PieceState, RemoteShareInfo};
 use crate::{Error, Result};
 
 use super::types::FileBlockFetch;
@@ -34,15 +35,14 @@ impl<C: Connection + Send + Sync> BlockFetcher<C> {
 
     pub async fn fetch_block(
         &mut self,
-        want_index: &Index,
-        route_id: &RouteId,
+        remote_share: Arc<RemoteShareInfo>,
         block: &FileBlockFetch,
         flush: bool,
     ) -> Result<(PieceState, usize)> {
         // Request block from peer with retry logic
         let result = self
             .request_block(
-                Target::RouteId(route_id.to_owned()),
+                Target::RouteId(remote_share.route_id.to_owned()),
                 block.piece_index,
                 block.block_index,
             )
@@ -52,9 +52,7 @@ impl<C: Connection + Send + Sync> BlockFetcher<C> {
         let fh = match self.files.get_mut(&block.file_index) {
             Some(fh) => fh,
             None => {
-                let path = self
-                    .root
-                    .join(want_index.files()[block.file_index].path());
+                let path = self.root.join(remote_share.index.files()[block.file_index].path());
                 let fh = File::options()
                     .write(true)
                     .truncate(false)
@@ -77,7 +75,7 @@ impl<C: Connection + Send + Sync> BlockFetcher<C> {
                 block.file_index,
                 block.piece_index,
                 block.piece_offset,
-                want_index.payload().pieces()[block.piece_index].block_count(),
+                remote_share.index.payload().pieces()[block.piece_index].block_count(),
                 block.block_index,
             ),
             block_end,
