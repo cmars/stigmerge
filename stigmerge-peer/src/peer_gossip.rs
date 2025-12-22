@@ -3,9 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{select, sync::Mutex, time::interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, instrument, trace, warn};
-use veilid_core::{
-    RouteId, Target, Timestamp, TimestampDuration, TypedRecordKey, VeilidAppMessage,
-};
+use veilid_core::{RecordKey, RouteId, Target, Timestamp, TimestampDuration, VeilidAppMessage};
 use veilnet::{
     connection::{RoutingContext, UpdateHandler},
     Connection,
@@ -49,7 +47,7 @@ impl<C: Connection + Send + Sync + 'static> PeerGossip<C> {
         self.inner.lock().await.advertise_self().await
     }
 
-    pub async fn advertise_peer(&self, key: &TypedRecordKey, route_id: &RouteId) -> Result<()> {
+    pub async fn advertise_peer(&self, key: &RecordKey, route_id: &RouteId) -> Result<()> {
         self.inner
             .lock()
             .await
@@ -104,7 +102,7 @@ struct PeerGossipInner<C: Connection> {
     share_resolver: ShareResolver<C>,
 
     peers_record: StablePeersRecord,
-    advertisements: HashMap<(TypedRecordKey, TypedRecordKey), Timestamp>,
+    advertisements: HashMap<(RecordKey, RecordKey), Timestamp>,
 }
 
 impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
@@ -125,7 +123,7 @@ impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
     }
 
     async fn advertise_self(&mut self) -> Result<()> {
-        let peers: Vec<TypedRecordKey> = self
+        let peers: Vec<RecordKey> = self
             .peers_record
             .known_peers()
             .map(|(k, _)| k)
@@ -133,7 +131,7 @@ impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
             .collect();
         for known_peer in peers.iter() {
             let remote_share = self.share_resolver.add_share(known_peer).await?;
-            let key = self.share.key;
+            let key = self.share.key.clone();
 
             // Don't advertise the same peer to the same target too often
             if let Some(last_adv_time) = self
@@ -141,7 +139,7 @@ impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
                 .get(&(known_peer.to_owned(), key.to_owned()))
             {
                 // TODO: make this configurable or adaptive or something?
-                if Timestamp::now().saturating_sub(*last_adv_time) < TimestampDuration::new_secs(30)
+                if Timestamp::now().duration_since(*last_adv_time) < TimestampDuration::new_secs(30)
                 {
                     trace!("advertised {known_peer} to {key} too recently");
                     continue;
@@ -163,13 +161,9 @@ impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
         Ok(())
     }
 
-    async fn advertise_remote_peer(
-        &mut self,
-        key: &TypedRecordKey,
-        route_id: &RouteId,
-    ) -> Result<()> {
+    async fn advertise_remote_peer(&mut self, key: &RecordKey, route_id: &RouteId) -> Result<()> {
         self.add_known_peer(key).await?;
-        let peers: Vec<TypedRecordKey> = self
+        let peers: Vec<RecordKey> = self
             .peers_record
             .known_peers()
             .map(|(k, _)| k)
@@ -186,7 +180,7 @@ impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
                 .get(&(known_peer.to_owned(), key.to_owned()))
             {
                 // TODO: make this configurable or adaptive or something?
-                if Timestamp::now().saturating_sub(*last_adv_time) < TimestampDuration::new_secs(30)
+                if Timestamp::now().duration_since(*last_adv_time) < TimestampDuration::new_secs(30)
                 {
                     trace!("advertised {known_peer} to {key} too recently");
                     continue;
@@ -205,7 +199,7 @@ impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
         Ok(())
     }
 
-    async fn add_known_peer(&mut self, key: &TypedRecordKey) -> Result<()> {
+    async fn add_known_peer(&mut self, key: &RecordKey) -> Result<()> {
         if key == &self.share.key {
             return Ok(());
         }
@@ -242,22 +236,18 @@ impl<C: Connection + Send + Sync + 'static> PeerGossipInner<C> {
         Ok(())
     }
 
-    async fn request_advertise_peer(
-        &mut self,
-        route_id: &RouteId,
-        key: &TypedRecordKey,
-    ) -> Result<()> {
+    async fn request_advertise_peer(&mut self, route_id: &RouteId, key: &RecordKey) -> Result<()> {
         let routing_context = self.conn.routing_context();
-        let req = Request::AdvertisePeer(AdvertisePeerRequest { key: *key });
+        let req = Request::AdvertisePeer(AdvertisePeerRequest { key: key.clone() });
         let req_bytes = req.encode()?;
         routing_context
-            .app_message(Target::PrivateRoute(*route_id), req_bytes)
+            .app_message(Target::RouteId(route_id.clone()), req_bytes)
             .await?;
         Ok(())
     }
 
     #[instrument(skip(self))]
-    async fn resolve_peers(&mut self, peer_key: &TypedRecordKey) -> Result<Vec<PeerInfo>> {
+    async fn resolve_peers(&mut self, peer_key: &RecordKey) -> Result<Vec<PeerInfo>> {
         let header = StableShareRecord::read_header(&mut self.conn, peer_key).await?;
         let mut remote_peers_rec = match header.peer_map() {
             Some(peer_map) => StablePeersRecord::new_remote(&mut self.conn, peer_map.key()).await?,

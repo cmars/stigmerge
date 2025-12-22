@@ -251,7 +251,7 @@ mod tests {
         time,
     };
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{OperationId, TypedRecordKey, VeilidAppCall};
+    use veilid_core::{OperationId, RecordKey, VeilidAppCall};
 
     use crate::{
         actor::{OneShot, Operator, ResponseChannel},
@@ -312,9 +312,8 @@ mod tests {
             ));
             node.known_peers_result = Arc::new(Mutex::new(move |_index_digest: &[u8]| Ok(vec![])));
 
-            let fake_key =
-                TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
-                    .expect("key");
+            let fake_key = RecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
+                .expect("key");
 
             // Create share info
             let share_info = LocalShareInfo {
@@ -430,8 +429,8 @@ mod tests {
         ));
         node.known_peers_result = Arc::new(Mutex::new(move |_index_digest: &[u8]| Ok(vec![])));
 
-        let fake_key = TypedRecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M")
-            .expect("key");
+        let fake_key =
+            RecordKey::from_str("VLD0:cCHB85pEaV4bvRfywxnd2fRNBScR64UaJC8hoKzyr3M").expect("key");
 
         // Create share info
         let share_info = LocalShareInfo {

@@ -43,7 +43,7 @@ impl<C: Connection + Send + Sync> BlockFetcher<C> {
         // Request block from peer with retry logic
         let result = self
             .request_block(
-                Target::PrivateRoute(route_id.to_owned()),
+                Target::RouteId(route_id.to_owned()),
                 block.piece_index,
                 block.block_index,
             )
@@ -187,7 +187,7 @@ mod tests {
         let req = Request::Fetch {
             response_tx: ResponseChannel::default(),
             share_key: CryptoTyped::new(CryptoKind::default(), RecordKey::new([0xbe; 32])),
-            target: Target::PrivateRoute(RouteId::new([0xbe; 32])),
+            target: Target::RouteId(RouteId::new([0xbe; 32])),
             block: block.clone(),
             flush: true,
         };
@@ -274,7 +274,7 @@ mod tests {
             .call(Request::Fetch {
                 response_tx: ResponseChannel::default(),
                 share_key: CryptoTyped::new(CryptoKind::default(), RecordKey::new([0xbe; 32])),
-                target: Target::PrivateRoute(RouteId::new([0xbe; 32])),
+                target: Target::RouteId(RouteId::new([0xbe; 32])),
                 block: block.clone(),
                 flush: true,
             })

@@ -28,7 +28,7 @@ use tokio::select;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-use veilid_core::TypedRecordKey;
+use veilid_core::RecordKey;
 use veilnet::Connection;
 
 /// Syncer CLI arguments
@@ -96,7 +96,7 @@ async fn main() -> std::result::Result<(), Error> {
     let mut index = None;
     if let Some(ref want_index_digest) = args.want_index_digest {
         for share_key_str in args.share_keys.iter() {
-            let share_key: TypedRecordKey = share_key_str.parse()?;
+            let share_key: RecordKey = share_key_str.parse()?;
             let want_index_digest = hex::decode(want_index_digest.clone())?;
             let want_index_digest: [u8; 32] = want_index_digest
                 .try_into()
@@ -151,7 +151,7 @@ async fn main() -> std::result::Result<(), Error> {
 
     // Add bootstrap shares for fetching
     for share_key_str in args.share_keys.iter() {
-        let share_key: TypedRecordKey = share_key_str.parse()?;
+        let share_key: RecordKey = share_key_str.parse()?;
         let _ = share_resolver.add_share(&share_key).await?;
     }
 
