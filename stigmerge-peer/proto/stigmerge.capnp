@@ -19,6 +19,7 @@ using CryptoKind = UInt32;
 struct TypedKey @0xbc2b1857f1395815 {
   kind @0 :CryptoKind;
   key @1 :PublicKey;
+  secret @2 :Data;
 }
 
 ###################################################################

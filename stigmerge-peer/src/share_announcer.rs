@@ -54,7 +54,7 @@ impl<C: Connection + Send + Sync + 'static> ShareAnnouncer<C> {
     pub async fn share_info(&self) -> LocalShareInfo {
         let share_announce = self.share_announce.lock().await;
         LocalShareInfo {
-            key: *share_announce.share_record.share_key(),
+            key: share_announce.share_record.share_key().clone(),
             header: share_announce.header.clone(),
             want_index_digest: share_announce.index_digest,
             root: share_announce.index.root().to_path_buf(),
@@ -121,7 +121,7 @@ impl ShareAnnounce {
 
         let (mut header, route_id) = {
             let routing_context = conn.routing_context();
-            let (route_id, route_data) = routing_context
+            let route_blob = routing_context
                 .api()
                 .new_custom_private_route(
                     &VALID_CRYPTO_KINDS,
@@ -129,23 +129,25 @@ impl ShareAnnounce {
                     Sequencing::NoPreference,
                 )
                 .await?;
-
             let index_bytes = index.encode()?;
             (
-                Header::from_index(&index, index_bytes.as_slice(), route_data.as_slice()),
-                route_id,
+                Header::from_index(&index, index_bytes.as_slice(), route_blob.blob.as_slice()),
+                route_blob.route_id,
             )
         };
 
         header.set_peer_map(PeerMapRef::new(
-            *peers_record.key(),
+            peers_record.key().clone(),
             StablePeersRecord::MAX_PEERS,
         ));
         if let Err(err) = peers_record.load_peers(conn).await {
             warn!(?err, peers_key = ?peers_record.key(), "failed to load peers");
         }
 
-        header.set_have_map(HaveMapRef::new(*have_record.key(), have_record.subkeys()));
+        header.set_have_map(HaveMapRef::new(
+            have_record.key().clone(),
+            have_record.subkeys(),
+        ));
 
         share_record.write_header(conn, &header).await?;
         share_record.write_index(conn, &index).await?;
@@ -173,12 +175,15 @@ impl ShareAnnounce {
             let routing_context = conn.routing_context();
 
             // Attempt to release a prior route
-            if let Err(err) = routing_context.api().release_private_route(self.route_id) {
+            if let Err(err) = routing_context
+                .api()
+                .release_private_route(self.route_id.clone())
+            {
                 debug!(?err, route_id = ?self.route_id, "release prior private route");
             }
 
             // Establish a new route
-            let (route_id, route_data) = routing_context
+            let route_blob = routing_context
                 .api()
                 .new_custom_private_route(
                     &VALID_CRYPTO_KINDS,
@@ -187,13 +192,13 @@ impl ShareAnnounce {
                 )
                 .await?;
             // Update header with new route data
-            self.header.set_route_data(route_data);
-            self.route_id = route_id;
-            route_id
+            self.header.set_route_data(route_blob.blob);
+            self.route_id = route_blob.route_id.clone();
+            route_blob.route_id
         };
 
         self.header.set_peer_map(PeerMapRef::new(
-            *self.peers_record.key(),
+            self.peers_record.key().clone(),
             StablePeersRecord::MAX_PEERS,
         ));
 
@@ -242,7 +247,7 @@ mod tests {
 
     use stigmerge_fileindex::{FileSpec, Indexer, PayloadPiece};
     use tempfile::TempDir;
-    use veilid_core::{RouteId, TypedRecordKey};
+    use veilid_core::{BareRouteId, RecordKey, RouteBlob, RouteId, CRYPTO_KIND_VLD0};
     use veilnet::connection::testing::{
         create_test_api, StubAPI, StubConnection, StubRoutingContext,
     };
@@ -267,7 +272,10 @@ mod tests {
         let veilid_api = create_test_api(temp_dir.path()).await.unwrap();
         let mut api = StubAPI::new(veilid_api);
         api.new_custom_private_route = Arc::new(tokio::sync::Mutex::new(|_, _, _| {
-            Ok((RouteId::new([0xa5u8; 32]), b"route data".to_vec()))
+            Ok(RouteBlob {
+                route_id: RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0xa5u8; 32])),
+                blob: b"route data".to_vec(),
+            })
         }));
 
         let mut routing_context = StubRoutingContext::new(api);
@@ -275,7 +283,7 @@ mod tests {
         {
             let set_dht_key_calls = set_dht_key_calls.clone();
             routing_context.set_dht_value = Arc::new(tokio::sync::Mutex::new(
-                move |key: TypedRecordKey, subkey, data, _| {
+                move |key: RecordKey, subkey, data, _| {
                     set_dht_key_calls.lock().unwrap().push((key, subkey, data));
                     Ok(None)
                 },
@@ -283,13 +291,13 @@ mod tests {
         }
         // Stub get_dht_value to return None (no existing peers)
         routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
-            move |_key: TypedRecordKey, _subkey, _force_refresh| Ok(None),
+            move |_key: RecordKey, _subkey, _force_refresh| Ok(None),
         ));
 
         let mut conn = StubConnection::new(routing_context);
         conn.require_attachment = Arc::new(tokio::sync::Mutex::new(|| Ok(())));
 
-        let fake_route_id = RouteId::new([0xa5u8; 32]);
+        let fake_route_id = RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0xa5u8; 32]));
 
         let announce = ShareAnnounce::new(&mut conn, index.clone())
             .await
@@ -332,16 +340,19 @@ mod tests {
         api.new_custom_private_route = Arc::new(tokio::sync::Mutex::new(move |_, _, _| {
             let count = route_counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let route_id = if count == 0 {
-                RouteId::new([0xa5u8; 32]) // Initial route
+                RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0xa5u8; 32])) // Initial route
             } else {
-                RouteId::new([0x5au8; 32]) // Reannounce route
+                RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0x5au8; 32])) // Reannounce route
             };
             let route_data = if count == 0 {
                 b"initial route data".to_vec()
             } else {
                 b"updated route data".to_vec()
             };
-            Ok((route_id, route_data))
+            Ok(RouteBlob {
+                route_id,
+                blob: route_data,
+            })
         }));
 
         let release_private_route_calls = Arc::new(std::sync::Mutex::new(vec![]));
@@ -358,7 +369,7 @@ mod tests {
         {
             let set_dht_key_calls = set_dht_key_calls.clone();
             routing_context.set_dht_value = Arc::new(tokio::sync::Mutex::new(
-                move |key: TypedRecordKey, subkey, data, _| {
+                move |key: RecordKey, subkey, data, _| {
                     set_dht_key_calls.lock().unwrap().push((key, subkey, data));
                     Ok(None)
                 },
@@ -366,7 +377,7 @@ mod tests {
         }
         // Stub get_dht_value to return None (no existing peers)
         routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
-            move |_key: TypedRecordKey, _subkey, _force_refresh| Ok(None),
+            move |_key: RecordKey, _subkey, _force_refresh| Ok(None),
         ));
 
         let mut conn = StubConnection::new(routing_context);
@@ -387,10 +398,16 @@ mod tests {
         // Verify the old route was released
         let release_calls = release_private_route_calls.lock().unwrap();
         assert_eq!(release_calls.len(), 1);
-        assert_eq!(release_calls[0], RouteId::new([0xa5u8; 32])); // Initial route
+        assert_eq!(
+            release_calls[0],
+            RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0xa5u8; 32]))
+        ); // Initial route
 
         // Verify the new route ID
-        assert_eq!(new_route_id, RouteId::new([0x5au8; 32])); // Updated route
+        assert_eq!(
+            new_route_id,
+            RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0x5au8; 32]))
+        ); // Updated route
 
         // Verify the header was updated with new route data
         let set_dht_calls = set_dht_key_calls.lock().unwrap();

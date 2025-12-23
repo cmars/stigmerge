@@ -15,7 +15,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
-use veilid_core::TypedRecordKey;
+use veilid_core::RecordKey;
 use veilnet::Connection;
 
 #[derive(Debug)]
@@ -37,12 +37,12 @@ pub enum Mode {
 
         /// Share key(s) used to bootstrap into the swarm of peers sharing this
         /// content. At least one is required.
-        share_keys: Vec<TypedRecordKey>,
+        share_keys: Vec<RecordKey>,
     },
 }
 
 impl Mode {
-    pub fn share_keys(&self) -> &[TypedRecordKey] {
+    pub fn share_keys(&self) -> &[RecordKey] {
         match self {
             Mode::Seed { .. } => &[],
             Mode::Fetch { share_keys, .. } => share_keys,

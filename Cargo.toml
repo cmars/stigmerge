@@ -38,8 +38,8 @@ indicatif = { version = "0.18", features = ["tokio", "futures"] }
 path-absolutize = "3.1"
 
 # Networking and P2P
-veilid-core = { version = "0.4.8" }
-veilnet = "0.3.9"
+veilid-core = { version = "0.5.0" }
+veilnet = "0.4.1"
 
 # Platform-specific
 jni = { version = "0.21", features = ["invocation"] }

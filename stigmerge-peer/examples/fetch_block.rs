@@ -8,7 +8,7 @@ use stigmerge_peer::new_connection;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use veilid_core::TypedRecordKey;
+use veilid_core::RecordKey;
 
 use stigmerge_peer::block_fetcher::BlockFetcher;
 use stigmerge_peer::share_resolver::ShareResolver;
@@ -87,7 +87,7 @@ async fn main() -> std::result::Result<(), Error> {
     });
 
     // Parse share key
-    let key: TypedRecordKey = share_key.parse()?;
+    let key: RecordKey = share_key.parse()?;
 
     // Resolve the header and index
     let remote_share = share_resolver.add_share(&key).await?;

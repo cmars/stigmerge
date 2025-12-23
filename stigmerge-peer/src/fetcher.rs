@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, trace, warn};
-use veilid_core::TypedRecordKey;
+use veilid_core::RecordKey;
 use veilnet::Connection;
 
 use crate::block_fetcher::BlockFetcher;
@@ -279,7 +279,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
     async fn fetch(&mut self, cancel: CancellationToken) -> Result<State> {
         let mut tasks = JoinSet::new();
         let mut task_shares = HashMap::new();
-        let mut share_tasks: HashMap<TypedRecordKey, AbortHandle> = HashMap::new();
+        let mut share_tasks: HashMap<RecordKey, AbortHandle> = HashMap::new();
         let task_cancel = cancel.child_token();
         loop {
             select! {
@@ -307,7 +307,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                     let mut remote_share = res?;
 
                     // Shouldn't happen, but ignore self-resolves.
-                    if &self.share.key == &remote_share.key {
+                    if self.share.key == remote_share.key {
                         trace!("ignoring self-resolved share");
                         continue;
                     }
@@ -324,7 +324,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                         continue;
                     }
                     if !share_tasks.contains_key(&remote_share.key) {
-                        let remote_share_key = remote_share.key;
+                        let remote_share_key = remote_share.key.clone();
                         let pool = FetchPool::new(
                             self.conn.clone(),
                             self.share.clone(),
@@ -338,7 +338,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                         {
                             let task_cancel = task_cancel.child_token();
                             let handle = tasks.spawn(pool.run(task_cancel));
-                            task_shares.insert(handle.id(), remote_share_key);
+                            task_shares.insert(handle.id(), remote_share_key.clone());
                             share_tasks.insert(remote_share_key, handle);
                         }
                     }
@@ -350,7 +350,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                     };
                     trace!(?res, ?id, "pool exited");
                     let remote_share_key = match task_shares.get(&id) {
-                        Some(key) => *key,
+                        Some(key) => key.clone(),
                         None => {
                             trace!(?id, "no tasks scheduled");
                             continue;
@@ -372,7 +372,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                     {
                         let task_cancel = task_cancel.child_token();
                         let handle = tasks.spawn(pool.run(task_cancel));
-                        task_shares.insert(handle.id(), remote_share_key);
+                        task_shares.insert(handle.id(), remote_share_key.clone());
                         share_tasks.insert(remote_share_key, handle);
                     }
                 }

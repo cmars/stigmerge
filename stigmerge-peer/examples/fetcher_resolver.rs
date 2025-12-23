@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
-use veilid_core::TypedRecordKey;
+use veilid_core::RecordKey;
 use veilnet::Connection;
 
 /// Fetcher resolver CLI arguments
@@ -73,7 +73,7 @@ async fn main() -> std::result::Result<(), Error> {
     });
 
     // Parse share key and want_index_digest
-    let key: TypedRecordKey = share_key.parse()?;
+    let key: RecordKey = share_key.parse()?;
     let want_index_digest = hex::decode(want_index_digest)?;
     let want_index_digest: [u8; 32] = want_index_digest
         .try_into()

@@ -7,7 +7,7 @@ use std::{
 use tokio::{select, spawn, sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, trace, warn};
-use veilid_core::{RouteId, TypedRecordKey, ValueSubkeyRangeSet, VeilidRouteChange};
+use veilid_core::{RecordKey, RouteId, ValueSubkeyRangeSet, VeilidRouteChange};
 use veilnet::{
     connection::{RoutingContext, UpdateHandler, API},
     Connection,
@@ -55,7 +55,8 @@ impl<C: Connection + Send + Sync + 'static> ShareResolver<C> {
         self.inner.lock().await.add_share_handler(handler).await
     }
 
-    pub async fn add_share(&self, key: &TypedRecordKey) -> Result<RemoteShareInfo> {
+    #[instrument(skip(self), err)]
+    pub async fn add_share(&self, key: &RecordKey) -> Result<RemoteShareInfo> {
         let share_info = self.inner.lock().await.resolve_and_watch(key).await?;
         Ok(share_info)
     }
@@ -73,7 +74,7 @@ impl<C: Connection + Send + Sync + 'static> ShareResolver<C> {
         Ok(())
     }
 
-    pub async fn remove_share(&self, key: &TypedRecordKey) -> Result<()> {
+    pub async fn remove_share(&self, key: &RecordKey) -> Result<()> {
         self.inner.lock().await.remove(key).await?;
         Ok(())
     }
@@ -124,7 +125,7 @@ impl<C: Connection + Send + Sync + 'static> ShareResolverInner<C> {
     }
 
     #[instrument(skip(self), err)]
-    async fn resolve_and_watch(&mut self, key: &TypedRecordKey) -> Result<RemoteShareInfo> {
+    async fn resolve_and_watch(&mut self, key: &RecordKey) -> Result<RemoteShareInfo> {
         {
             self.conn.require_attachment().await?;
         }
@@ -148,17 +149,23 @@ impl<C: Connection + Send + Sync + 'static> ShareResolverInner<C> {
         debug!(?key, ?route_id, "private route to remote");
 
         routing_context
-            .watch_dht_values(*key, Some(ValueSubkeyRangeSet::single(0)), None, None)
+            .watch_dht_values(
+                key.clone(),
+                Some(ValueSubkeyRangeSet::single(0)),
+                None,
+                None,
+            )
             .await?;
 
         let share = RemoteShareInfo {
-            key: *key,
+            key: key.clone(),
             header: header.clone(),
             index,
             index_digest,
             route_id,
         };
-        self.remote_shares.insert(share.route_id, share.clone());
+        self.remote_shares
+            .insert(share.route_id.clone(), share.clone());
         self.handlers.share_changed(&share)?;
         Ok(share)
     }
@@ -179,18 +186,19 @@ impl<C: Connection + Send + Sync + 'static> ShareResolverInner<C> {
         let prior_route_id = share.route_id;
         share.route_id = route_id;
         if let Err(err) = routing_context.api().release_private_route(prior_route_id) {
-            warn!(?err, ?route_id, "release prior route");
+            warn!(?err, route_id = ?share.route_id, "release prior route");
         }
 
-        self.remote_shares.insert(share.route_id, share.clone());
+        self.remote_shares
+            .insert(share.route_id.clone(), share.clone());
         self.handlers.share_changed(&share)?;
         Ok(())
     }
 
-    async fn remove(&mut self, key: &TypedRecordKey) -> Result<()> {
+    async fn remove(&mut self, key: &RecordKey) -> Result<()> {
         let routing_context = self.conn.routing_context();
         if let Err(err) = routing_context
-            .cancel_dht_watch(*key, Some(ValueSubkeyRangeSet::single(0)))
+            .cancel_dht_watch(key.clone(), Some(ValueSubkeyRangeSet::single(0)))
             .await
         {
             warn!(?err, ?key, "cancel share watch");
@@ -301,7 +309,10 @@ mod tests {
     use stigmerge_fileindex::Indexer;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
-    use veilid_core::{DHTSchemaDFLT, RouteId, TypedRecordKey, ValueSubkeyRangeSet};
+    use veilid_core::{
+        BarePublicKey, BareRouteId, DHTSchemaDFLT, RecordKey, RouteId, ValueSubkeyRangeSet,
+        CRYPTO_KIND_VLD0,
+    };
     use veilnet::connection::{
         testing::{create_test_api, StubAPI, StubConnection, StubRoutingContext},
         RoutingContext,
@@ -331,23 +342,24 @@ mod tests {
 
         // Mock route import
         api.import_remote_private_route = Arc::new(std::sync::Mutex::new(|_route_data| {
-            Ok(RouteId::new([0u8; 32]))
+            Ok(RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0u8; 32])))
         }));
 
         // Create a dummy public key for ValueData::new
-        let dummy_public_key = veilid_core::PublicKey::new([0u8; 32]);
+        let dummy_public_key =
+            veilid_core::PublicKey::new(CRYPTO_KIND_VLD0, BarePublicKey::new(&[0u8; 32]));
 
         let mock_index = index.clone();
         let get_dht_calls = Arc::new(std::sync::Mutex::new(vec![]));
         let watch_calls = Arc::new(std::sync::Mutex::new(vec![]));
-        let cancel_watch_calls = Arc::new(std::sync::Mutex::new(Vec::<TypedRecordKey>::new()));
+        let cancel_watch_calls = Arc::new(std::sync::Mutex::new(Vec::<RecordKey>::new()));
 
         let mut routing_context = StubRoutingContext::new(api);
         {
             let get_dht_calls = get_dht_calls.clone();
             let dummy_public_key = dummy_public_key.clone();
             routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
-                move |key: TypedRecordKey, subkey: u32, _force_refresh| {
+                move |key: RecordKey, subkey: u32, _force_refresh| {
                     get_dht_calls.lock().unwrap().push((key, subkey));
                     if subkey == 0 {
                         // Return header data
@@ -360,14 +372,16 @@ mod tests {
                         );
                         let header_bytes = header.encode().expect("encode header");
                         Ok(Some(
-                            veilid_core::ValueData::new(header_bytes, dummy_public_key).unwrap(),
+                            veilid_core::ValueData::new(header_bytes, dummy_public_key.clone())
+                                .unwrap(),
                         ))
                     } else {
                         // Return index data for subkey 1
                         let index_internal = mock_index.clone();
                         let index_bytes = index_internal.encode().expect("encode index");
                         Ok(Some(
-                            veilid_core::ValueData::new(index_bytes, dummy_public_key).unwrap(),
+                            veilid_core::ValueData::new(index_bytes, dummy_public_key.clone())
+                                .unwrap(),
                         ))
                     }
                 },
@@ -377,10 +391,7 @@ mod tests {
         {
             let watch_calls = watch_calls.clone();
             routing_context.watch_dht_values = Arc::new(tokio::sync::Mutex::new(
-                move |key: TypedRecordKey,
-                      _values: Option<ValueSubkeyRangeSet>,
-                      _expiration,
-                      _count| {
+                move |key: RecordKey, _values: Option<ValueSubkeyRangeSet>, _expiration, _count| {
                     watch_calls.lock().unwrap().push(key);
                     Ok(true) // Return true instead of ()
                 },
@@ -390,7 +401,7 @@ mod tests {
         {
             let cancel_watch_calls = cancel_watch_calls.clone();
             routing_context.cancel_dht_watch = Arc::new(tokio::sync::Mutex::new(
-                move |key: TypedRecordKey, _values: Option<ValueSubkeyRangeSet>| {
+                move |key: RecordKey, _values: Option<ValueSubkeyRangeSet>| {
                     cancel_watch_calls.lock().unwrap().push(key);
                     Ok(true) // Return true instead of ()
                 },
@@ -402,8 +413,8 @@ mod tests {
 
         let dht_rec = routing_context
             .create_dht_record(
+                CRYPTO_KIND_VLD0,
                 veilid_core::DHTSchema::DFLT(DHTSchemaDFLT::new(2).unwrap()),
-                None,
                 None,
             )
             .await
@@ -469,11 +480,9 @@ mod tests {
         let index = indexer.index().await.expect("index");
 
         let fake_peer_map_key =
-            TypedRecordKey::from_str("VLD0:hIfQGdXUq-oO5wwzODJukR7zOGwpNznKYaFoh6uTp2A")
-                .expect("key");
+            RecordKey::from_str("VLD0:hIfQGdXUq-oO5wwzODJukR7zOGwpNznKYaFoh6uTp2A").expect("key");
         let fake_have_map_key =
-            TypedRecordKey::from_str("VLD0:rl3AyyZNFWP8GQGyY9xSnnIjCDagXzbCA47HFmsbLDU")
-                .expect("key");
+            RecordKey::from_str("VLD0:rl3AyyZNFWP8GQGyY9xSnnIjCDagXzbCA47HFmsbLDU").expect("key");
 
         // Create a connection with mock behavior
         let temp_dir = TempDir::new().unwrap();
@@ -482,11 +491,12 @@ mod tests {
 
         // Mock route import
         api.import_remote_private_route = Arc::new(std::sync::Mutex::new(|_route_data| {
-            Ok(RouteId::new([0u8; 32]))
+            Ok(RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0u8; 32])))
         }));
 
         // Create a dummy public key for ValueData::new
-        let dummy_public_key = veilid_core::PublicKey::new([0u8; 32]);
+        let dummy_public_key =
+            veilid_core::PublicKey::new(CRYPTO_KIND_VLD0, BarePublicKey::new(&[0u8; 32]));
 
         let mock_index = index.clone();
         let mock_peer_map_key = fake_peer_map_key.clone();
@@ -499,7 +509,7 @@ mod tests {
             let get_dht_calls = get_dht_calls.clone();
             let dummy_public_key = dummy_public_key.clone();
             routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
-                move |key: TypedRecordKey, subkey: u32, _force_refresh| {
+                move |key: RecordKey, subkey: u32, _force_refresh| {
                     get_dht_calls.lock().unwrap().push((key, subkey));
                     if subkey == 0 {
                         // Return header data with peer_map and have_map
@@ -510,18 +520,20 @@ mod tests {
                             index_bytes.as_slice(),
                             &[0xde, 0xad, 0xbe, 0xef],
                         );
-                        header.set_peer_map(PeerMapRef::new(mock_peer_map_key, 1u16));
-                        header.set_have_map(HaveMapRef::new(mock_have_map_key, 1u16));
+                        header.set_peer_map(PeerMapRef::new(mock_peer_map_key.clone(), 1u16));
+                        header.set_have_map(HaveMapRef::new(mock_have_map_key.clone(), 1u16));
                         let header_bytes = header.encode().expect("encode header");
                         Ok(Some(
-                            veilid_core::ValueData::new(header_bytes, dummy_public_key).unwrap(),
+                            veilid_core::ValueData::new(header_bytes, dummy_public_key.clone())
+                                .unwrap(),
                         ))
                     } else {
                         // Return index data for subkey 1
                         let index_internal = mock_index.clone();
                         let index_bytes = index_internal.encode().expect("encode index");
                         Ok(Some(
-                            veilid_core::ValueData::new(index_bytes, dummy_public_key).unwrap(),
+                            veilid_core::ValueData::new(index_bytes, dummy_public_key.clone())
+                                .unwrap(),
                         ))
                     }
                 },
@@ -531,10 +543,7 @@ mod tests {
         {
             let watch_calls = watch_calls.clone();
             routing_context.watch_dht_values = Arc::new(tokio::sync::Mutex::new(
-                move |key: TypedRecordKey,
-                      _values: Option<ValueSubkeyRangeSet>,
-                      _expiration,
-                      _count| {
+                move |key: RecordKey, _values: Option<ValueSubkeyRangeSet>, _expiration, _count| {
                     watch_calls.lock().unwrap().push(key);
                     Ok(true) // Return true instead of ()
                 },
@@ -551,8 +560,8 @@ mod tests {
 
         let dht_rec = routing_context
             .create_dht_record(
+                CRYPTO_KIND_VLD0,
                 veilid_core::DHTSchema::DFLT(DHTSchemaDFLT::new(2).unwrap()),
-                None,
                 None,
             )
             .await

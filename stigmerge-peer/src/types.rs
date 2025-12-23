@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use stigmerge_fileindex::{Index, BLOCK_SIZE_BYTES, PIECE_SIZE_BLOCKS, PIECE_SIZE_BYTES};
-use veilid_core::{RouteId, TypedRecordKey};
+use veilid_core::{RecordKey, RouteId};
 
 use crate::proto::Header;
 
 #[derive(Debug, Clone)]
 pub struct LocalShareInfo {
-    pub key: TypedRecordKey,
+    pub key: RecordKey,
     pub header: Header,
     pub want_index: Index,
     pub want_index_digest: [u8; 32],
@@ -16,7 +16,7 @@ pub struct LocalShareInfo {
 
 #[derive(Debug, Clone)]
 pub struct RemoteShareInfo {
-    pub key: TypedRecordKey,
+    pub key: RecordKey,
     pub header: Header,
     pub index: Index,
     pub index_digest: [u8; 32],
