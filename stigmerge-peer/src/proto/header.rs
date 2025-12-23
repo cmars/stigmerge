@@ -43,18 +43,16 @@ impl Encoder for Header {
             typed_key_builder.set_kind(have_map_ref.key.kind().into());
 
             let mut key_builder = typed_key_builder.reborrow().init_key();
-            key_builder.set_p0(u64::from_be_bytes(
-                have_map_ref.key.value().key()[0..8].try_into()?,
-            ));
-            key_builder.set_p1(u64::from_be_bytes(
-                have_map_ref.key.value().key()[8..16].try_into()?,
-            ));
-            key_builder.set_p2(u64::from_be_bytes(
-                have_map_ref.key.value().key()[16..24].try_into()?,
-            ));
-            key_builder.set_p3(u64::from_be_bytes(
-                have_map_ref.key.value().key()[24..32].try_into()?,
-            ));
+            let key_bytes = have_map_ref.key.ref_value().ref_key();
+            key_builder.set_p0(u64::from_be_bytes(key_bytes[0..8].try_into()?));
+            key_builder.set_p1(u64::from_be_bytes(key_bytes[8..16].try_into()?));
+            key_builder.set_p2(u64::from_be_bytes(key_bytes[16..24].try_into()?));
+            key_builder.set_p3(u64::from_be_bytes(key_bytes[24..32].try_into()?));
+
+            if let Some(secret) = have_map_ref.key.ref_value().ref_encryption_key() {
+                let secret_builder = typed_key_builder.reborrow().init_secret(secret.len().try_into().unwrap());
+                secret_builder.copy_from_slice(secret);
+            }
 
             have_map_builder.set_subkeys(have_map_ref.subkeys);
         }
@@ -67,18 +65,16 @@ impl Encoder for Header {
             typed_key_builder.set_kind(peer_map_ref.key.kind().into());
 
             let mut key_builder = typed_key_builder.reborrow().init_key();
-            key_builder.set_p0(u64::from_be_bytes(
-                peer_map_ref.key.value().key()[0..8].try_into()?,
-            ));
-            key_builder.set_p1(u64::from_be_bytes(
-                peer_map_ref.key.value().key()[8..16].try_into()?,
-            ));
-            key_builder.set_p2(u64::from_be_bytes(
-                peer_map_ref.key.value().key()[16..24].try_into()?,
-            ));
-            key_builder.set_p3(u64::from_be_bytes(
-                peer_map_ref.key.value().key()[24..32].try_into()?,
-            ));
+            let key_bytes = peer_map_ref.key.ref_value().ref_key();
+            key_builder.set_p0(u64::from_be_bytes(key_bytes[0..8].try_into()?));
+            key_builder.set_p1(u64::from_be_bytes(key_bytes[8..16].try_into()?));
+            key_builder.set_p2(u64::from_be_bytes(key_bytes[16..24].try_into()?));
+            key_builder.set_p3(u64::from_be_bytes(key_bytes[24..32].try_into()?));
+
+            if let Some(secret) = peer_map_ref.key.ref_value().ref_encryption_key() {
+                let secret_builder = typed_key_builder.reborrow().init_secret(secret.len().try_into().unwrap());
+                secret_builder.copy_from_slice(secret);
+            }
 
             peer_map_builder.set_subkeys(peer_map_ref.subkeys);
         }
@@ -294,7 +290,7 @@ mod tests {
     use std::path::PathBuf;
 
     use stigmerge_fileindex::{Index, PayloadSpec};
-    use veilid_core::{BareOpaqueRecordKey, BareRecordKey, CryptoKind, RecordKey};
+    use veilid_core::{BareOpaqueRecordKey, BareRecordKey, BareSharedSecret, CryptoKind, RecordKey};
 
     use crate::proto::{Decoder, Encoder, HaveMapRef, Header, PeerMapRef};
 
@@ -323,11 +319,11 @@ mod tests {
         // Create TypedKeys for peer map and have map
         let peer_key = RecordKey::new(
             CryptoKind::default(),
-            BareRecordKey::new(BareOpaqueRecordKey::new(&[0xaa; 32]), None),
+            BareRecordKey::new(BareOpaqueRecordKey::new(&[0xaa; 32]), Some(BareSharedSecret::new(&[0x55, 32]))),
         );
         let have_key = RecordKey::new(
             CryptoKind::default(),
-            BareRecordKey::new(BareOpaqueRecordKey::new(&[0xbb; 32]), None),
+            BareRecordKey::new(BareOpaqueRecordKey::new(&[0xbb; 32]), Some(BareSharedSecret::new(&[0x66, 32]))),
         );
 
         // Create the peer map ref and have map ref

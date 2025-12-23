@@ -19,6 +19,7 @@ use crate::Error;
 
 pub struct StablePublicRecord {
     dht_rec: DHTRecordDescriptor,
+    key: RecordKey,
     owner_keypair: Option<KeyPair>,
 }
 
@@ -51,15 +52,16 @@ impl StablePublicRecord {
         let table_store = api.table_store()?;
         let db = table_store.open(table_name, 2).await?;
 
-        let existing_dht_key = db.load_json(0, db_key_id).await?;
+        let existing_dht_key: Option<RecordKey> = db.load_json(0, db_key_id).await?;
         let existing_owner_keypair: Option<KeyPair> = db.load_json(1, db_key_id).await?;
 
         let dht_rec = match (existing_dht_key, existing_owner_keypair) {
             (Some(dht_key), Some(owner_keypair)) => {
                 return Ok(Self {
                     dht_rec: routing_context
-                        .open_dht_record(dht_key, Some(owner_keypair.clone()))
+                        .open_dht_record(dht_key.clone(), Some(owner_keypair.clone()))
                         .await?,
+                    key: dht_key,
                     owner_keypair: Some(owner_keypair),
                 });
             }
@@ -82,6 +84,7 @@ impl StablePublicRecord {
         db.store_json(0, db_key_id, &dht_rec.key()).await?;
         db.store_json(1, db_key_id, &dht_owner).await?;
         Ok(Self {
+            key: dht_rec.key(),
             dht_rec,
             owner_keypair: Some(dht_owner),
         })
@@ -99,12 +102,13 @@ impl StablePublicRecord {
         let dht_rec = routing_context.open_dht_record(key.clone(), None).await?;
         Ok(Self {
             dht_rec,
+            key: key.clone(),
             owner_keypair: None,
         })
     }
 
     pub fn key(&self) -> &RecordKey {
-        self.dht_rec.ref_key()
+        &self.key
     }
 
     pub async fn read<C: Connection + Send + Sync + 'static>(

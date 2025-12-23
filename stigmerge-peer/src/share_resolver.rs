@@ -55,6 +55,7 @@ impl<C: Connection + Send + Sync + 'static> ShareResolver<C> {
         self.inner.lock().await.add_share_handler(handler).await
     }
 
+    #[instrument(skip(self), err)]
     pub async fn add_share(&self, key: &RecordKey) -> Result<RemoteShareInfo> {
         let share_info = self.inner.lock().await.resolve_and_watch(key).await?;
         Ok(share_info)
