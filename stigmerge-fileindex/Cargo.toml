@@ -5,7 +5,7 @@ edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.5.8"
+version = "0.6.0"
 description = "stigmerge file indexing"
 documentation = "https://docs.rs/stigmerge_fileindex"
 
