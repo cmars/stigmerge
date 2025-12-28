@@ -55,6 +55,7 @@ impl<C: Connection + Send + Sync + 'static> PeerGossip<C> {
             .await
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn run(self, cancel: CancellationToken, retry: Retry) -> Result<()> {
         let mut peer_reannounce_interval = interval(Duration::from_secs(300));
         loop {

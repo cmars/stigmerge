@@ -135,11 +135,12 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
         self.status_rx.clone()
     }
 
-    #[instrument(skip_all)]
+    #[instrument(skip_all, err)]
     pub async fn run(mut self, cancel: CancellationToken, retry: Retry) -> Result<()> {
         loop {
             info!(state = %self.state);
             if matches!(self.state, State::Done) {
+                cancel.cancelled().await;
                 return Ok(());
             }
             backoff_retry!(
