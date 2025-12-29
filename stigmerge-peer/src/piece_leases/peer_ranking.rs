@@ -29,23 +29,23 @@ impl PeerRanking {
         }
     }
 
-    pub fn record_success(&mut self, config: &LeaseManagerConfig) {
+    pub fn record_success(&mut self, config: &LeaseManagerConfig) -> f64 {
         self.successful_pieces += 1;
-        self.update_score(config);
+        self.update_score(config)
     }
 
-    pub fn record_failure(&mut self, config: &LeaseManagerConfig) {
+    pub fn record_failure(&mut self, config: &LeaseManagerConfig) -> f64 {
         self.failed_pieces += 1;
-        self.update_score(config);
+        self.update_score(config)
     }
 
-    pub fn record_expiry(&mut self, config: &LeaseManagerConfig) {
+    pub fn record_expiry(&mut self, config: &LeaseManagerConfig) -> f64 {
         // Treat expiry as a failure but less severe
         self.failed_pieces += 1;
-        self.update_score(config);
+        self.update_score(config)
     }
 
-    fn update_score(&mut self, config: &LeaseManagerConfig) {
+    fn update_score(&mut self, config: &LeaseManagerConfig) -> f64 {
         let success_rate = if self.successful_pieces + self.failed_pieces > 0 {
             self.successful_pieces as f64 / (self.successful_pieces + self.failed_pieces) as f64
         } else {
@@ -53,9 +53,9 @@ impl PeerRanking {
         };
 
         // Apply exponential decay to old scores
-        let time_factor = config.peer_ranking_decay.powf(
-            self.last_updated.elapsed().as_secs_f64() / 60.0,
-        );
+        let time_factor = config
+            .peer_ranking_decay
+            .powf(self.last_updated.elapsed().as_secs_f64() / 60.0);
 
         self.score = self.score * time_factor
             + (success_rate * config.success_bonus - (1.0 - success_rate) * config.failure_penalty);
@@ -68,6 +68,7 @@ impl PeerRanking {
             "Updated peer score for {:?}: {} (success_rate: {})",
             self.key, self.score, success_rate
         );
+        self.score
     }
 }
 

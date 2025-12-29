@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context;
 use backoff::{backoff::Backoff, ExponentialBackoff};
@@ -18,7 +18,8 @@ use crate::block_fetcher::BlockFetcher;
 use crate::content_addressable::ContentAddressable;
 use crate::error::{CancelError, Unrecoverable};
 use crate::piece_leases::{
-    self, CompletionResult, FailureReason, LeaseManagerConfig, LeaseRequest, PieceLease, PieceLeaseManager, RejectedReason
+    self, CompletionResult, FailureReason, LeaseManagerConfig, PieceLease, PieceLeaseManager,
+    RejectedReason,
 };
 use crate::piece_map::PieceMap;
 use crate::piece_verifier::{PieceStatus, PieceStatusNotifier, PieceVerifier};
@@ -244,9 +245,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
             wanted_pieces.set(TryInto::<u32>::try_into(want_block.piece_index).unwrap());
             want_length += want_block.block_length;
         }
-        self.piece_lease_manager
-            .set_wanted_pieces(wanted_pieces)
-            .await;
+        self.piece_lease_manager.set_wanted_pieces(&wanted_pieces).await;
         let mut have_length = 0;
         for have_block in diff.have {
             self.piece_verifier
@@ -296,7 +295,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                         .await
                         .into_iter()
                         .collect::<Result<()>>()?;
-                    if self.piece_verifier.is_complete().await && self.piece_lease_manager.wanted_pieces_count().await == 0 {
+                    if self.piece_verifier.is_complete().await && self.piece_lease_manager.is_empty().await {
                         return Ok(State::Done);
                     }
                     return Err(CancelError.into());
@@ -327,6 +326,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                         );
                         continue;
                     }
+                    self.piece_lease_manager.add_peer(&remote_share.key, &remote_share.have_map).await;
                     if !share_tasks.contains_key(&remote_share.key) {
                         let remote_share_key = remote_share.key.clone();
                         let pool = FetchPool::new(FetchPoolParams {
@@ -444,8 +444,6 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
         }
     }
 
-    const MAX_REMOTE_TASKS: u32 = 64;
-
     #[tracing::instrument(skip_all, err)]
     async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         debug!(share_key = ?self.remote_share.key, "starting fetch pool");
@@ -476,21 +474,17 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
                 }
                 res = async {
                     trace!("requesting lease");
-                    self.piece_lease_manager.request_lease(
-                        &LeaseRequest {
-                            remote_key: self.remote_share.key.clone(),
-                            have_map: &self.remote_share.have_map,
-                            max_leases: Self::MAX_REMOTE_TASKS,
-                            requested_at: Instant::now(),
-                        },
-                    ).await
+                    self.piece_lease_manager.acquire_lease(&self.remote_share.key).await
                 } => {
                     trace!(is_ok = res.is_ok(), "response from lease manager");
-                    match res {
-                        Ok(resp) => {
-                            debug!(share_key = ?self.remote_share.key, leases = resp.granted_leases.len(), "got leases");
-                            for lease in resp.granted_leases {
-                                self.fetch_lease(lease, cancel.clone()).await?;
+                    let err = match res {
+                        Ok(lease) => {
+                            if let Err(err) = self.fetch_lease(&lease, cancel.clone()).await {
+                                self.piece_lease_manager.release_piece(lease.piece_index(), CompletionResult::Failure(FailureReason::NetworkError)).await?;
+                                err
+                            } else {
+                                backoff.reset();
+                                continue;
                             }
                         }
                         Err(err) => {
@@ -498,25 +492,22 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
                                 piece_leases::Error::LeaseRejected(RejectedReason::PeerAtCapacity) => backoff.reset(),
                                 _ => {}
                             };
-                            warn!(?err);
-                            let delay = backoff
-                                .next_backoff()
-                                .ok_or(Error::msg("max attempts reached"))?;
-                            tokio::time::sleep(delay).await;
-                            debug!(?delay, "resuming");
+                            err.into()
                         }
-                    }
+                    };
+                    warn!(?err, share_key = ?self.remote_share.key);
+                    let delay = backoff
+                        .next_backoff()
+                        .ok_or(Error::msg("max attempts reached"))?;
+                    tokio::time::sleep(delay).await;
+                    debug!(?delay, "resuming");
                 }
             }
         }
     }
 
     /// Fetch a leased piece
-    async fn fetch_lease(
-        &mut self,
-        lease: PieceLease,
-        cancel: CancellationToken,
-    ) -> Result<()> {
+    async fn fetch_lease(&mut self, lease: &PieceLease, cancel: CancellationToken) -> Result<()> {
         let task_cancel = cancel.child_token();
 
         // Generate blocks for the leased piece
@@ -546,7 +537,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
             let local_root = self.local_share.root.clone();
             let remote_share = self.remote_share.clone();
             let piece_verifier = self.piece_verifier.clone();
-            let handle = tasks.spawn(async move {
+            tasks.spawn(async move {
                 let mut block_fetcher = BlockFetcher::new(conn, local_root);
                 loop {
                     select! {
@@ -571,7 +562,6 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
                 }
 
             });
-            self.piece_lease_manager.register_tasks(lease.piece_index(), &[handle]).await?;
         }
 
         let res = tasks

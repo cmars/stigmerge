@@ -107,7 +107,12 @@ pub struct LeaseResponse {
 /// Reasons why a lease request was rejected
 #[derive(Debug, Clone, PartialEq)]
 pub enum RejectedReason {
+    /// No leases are available to give out to the peer
     NoAvailablePieces,
+
+    /// The peer doesn't have any pieces that are wanted
+    NoMatchingPieces,
+
     PeerAtCapacity,
     PeerRankingTooLow,
     InvalidRequest,
