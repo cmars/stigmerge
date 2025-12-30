@@ -75,19 +75,19 @@ impl Inner {
 
         let score = match &result {
             CompletionResult::Success => {
-                let score = ranking.record_success(&config);
+                let score = ranking.record_success(config);
                 // Remove from wanted pieces on success
                 self.wanted.remove(&piece_index);
                 score
             }
             CompletionResult::Failure(_) => {
-                let score = ranking.record_failure(&config);
+                let score = ranking.record_failure(config);
                 // Return to wanted pieces on failure
                 self.wanted.insert(piece_index);
                 score
             }
             CompletionResult::Expired => {
-                let score = ranking.record_expiry(&config);
+                let score = ranking.record_expiry(config);
                 // Return to wanted pieces on expiry
                 self.wanted.insert(piece_index);
                 score
@@ -101,15 +101,14 @@ impl Inner {
         let piece = {
             self.wanted
                 .iter()
-                .filter(|piece_index| {
+                .find(|piece_index| {
                     self.peer_has
                         .get(peer_key)
-                        .and_then(|have_map| {
-                            Some(have_map.get(TryInto::<u32>::try_into(**piece_index).unwrap()))
+                        .map(|have_map| {
+                            have_map.get(TryInto::<u32>::try_into(**piece_index).unwrap())
                         })
                         .unwrap_or(false)
                 })
-                .next()
                 .cloned()
         };
         match piece {

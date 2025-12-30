@@ -1,9 +1,7 @@
 //! Integration tests for the Piece Lease Manager
 
 use tokio::time::Duration;
-use veilid_core::{
-    BareOpaqueRecordKey, BareRecordKey, BareSharedSecret, CryptoKind, RecordKey,
-};
+use veilid_core::{BareOpaqueRecordKey, BareRecordKey, BareSharedSecret, CryptoKind, RecordKey};
 
 use crate::piece_leases::*;
 use crate::piece_map::PieceMap;
@@ -139,7 +137,13 @@ async fn test_lease_expiry() {
     // Get lease
     let lease = manager.acquire_lease(&peer_key).await.unwrap();
 
-    manager.release_piece(lease.piece_index, CompletionResult::Failure(FailureReason::Timeout)).await.unwrap();
+    manager
+        .release_piece(
+            lease.piece_index,
+            CompletionResult::Failure(FailureReason::Timeout),
+        )
+        .await
+        .unwrap();
 
     // Check that lease was cleaned up and piece is back in wanted set
     assert_eq!(manager.active_leases_count().await, 0);

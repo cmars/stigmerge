@@ -93,7 +93,7 @@ impl<'a> LeaseRequest<'a> {
         &self,
         wanted_pieces: &crate::piece_map::PieceMap,
     ) -> crate::piece_map::PieceMap {
-        wanted_pieces.intersection(&self.have_map)
+        wanted_pieces.intersection(self.have_map)
     }
 }
 

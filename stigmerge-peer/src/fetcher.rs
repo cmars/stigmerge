@@ -246,7 +246,9 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
             wanted_pieces.set(TryInto::<u32>::try_into(want_block.piece_index).unwrap());
             want_length += want_block.block_length;
         }
-        self.piece_lease_manager.set_wanted_pieces(&wanted_pieces).await;
+        self.piece_lease_manager
+            .set_wanted_pieces(&wanted_pieces)
+            .await;
         let mut have_length = 0;
         for have_block in diff.have {
             self.piece_verifier
@@ -448,8 +450,10 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
     #[tracing::instrument(skip_all, err)]
     async fn run(mut self, cancel: CancellationToken) -> Result<()> {
         debug!(share_key = ?self.remote_share.key, "starting fetch pool");
-        let mut backoff = ExponentialBackoff::default();
-        backoff.initial_interval = Duration::from_millis(50);
+        let mut backoff = ExponentialBackoff {
+            initial_interval: Duration::from_millis(50),
+            ..Default::default()
+        };
 
         loop {
             select! {
@@ -489,10 +493,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
                             }
                         }
                         Err(err) => {
-                            match err {
-                                piece_leases::Error::LeaseRejected(RejectedReason::PeerAtCapacity) => backoff.reset(),
-                                _ => {}
-                            };
+                            if let piece_leases::Error::LeaseRejected(RejectedReason::PeerAtCapacity) = err { backoff.reset() };
                             err.into()
                         }
                     };
@@ -565,12 +566,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
             });
         }
 
-        let res = tasks
-            .join_all()
-            .await
-            .into_iter()
-            .filter(|res| res.is_err())
-            .next();
+        let res = tasks.join_all().await.into_iter().find(|res| res.is_err());
         res.unwrap_or(Ok(()))
     }
 }

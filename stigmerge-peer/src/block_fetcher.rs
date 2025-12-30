@@ -52,7 +52,9 @@ impl<C: Connection + Send + Sync> BlockFetcher<C> {
         let fh = match self.files.get_mut(&block.file_index) {
             Some(fh) => fh,
             None => {
-                let path = self.root.join(remote_share.index.files()[block.file_index].path());
+                let path = self
+                    .root
+                    .join(remote_share.index.files()[block.file_index].path());
                 let fh = File::options()
                     .write(true)
                     .truncate(false)
