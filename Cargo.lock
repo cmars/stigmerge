@@ -3787,7 +3787,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stigmerge"
-version = "0.5.13"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "backoff",
@@ -3810,7 +3810,7 @@ dependencies = [
 
 [[package]]
 name = "stigmerge_fileindex"
-version = "0.5.8"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "flume",
@@ -3823,7 +3823,7 @@ dependencies = [
 
 [[package]]
 name = "stigmerge_peer"
-version = "0.5.14"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "backoff",
