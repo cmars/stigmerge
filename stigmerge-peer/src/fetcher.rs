@@ -420,7 +420,6 @@ struct FetchPool<C: Connection + Clone> {
     conn: C,
     local_share: LocalShareInfo,
     remote_share: Arc<RemoteShareInfo>,
-    tasks: JoinSet<Result<()>>,
 
     piece_verifier: PieceVerifier,
     piece_lease_manager: PieceLeaseManager,
@@ -441,7 +440,6 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
             conn: params.conn,
             local_share: params.local_share,
             remote_share: params.remote_share,
-            tasks: JoinSet::new(),
             piece_verifier: params.piece_verifier,
             piece_lease_manager: params.piece_lease_manager,
         }
@@ -452,6 +450,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
         debug!(share_key = ?self.remote_share.key, "starting fetch pool");
         let mut backoff = ExponentialBackoff {
             initial_interval: Duration::from_millis(50),
+            max_interval: Duration::from_secs(30),
             ..Default::default()
         };
 
@@ -459,23 +458,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
             select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    // Cancel all active lease tasks
-                    self.tasks.abort_all();
                     return Err(CancelError.into());
-                }
-                res = self.tasks.join_next(), if !self.tasks.is_empty() => {
-                    let res = if let Some(res) = res { res } else { continue };
-                    match res {
-                        Ok(Ok(())) => {
-                            trace!(share_key = ?self.remote_share.key, "lease task completed successfully");
-                        }
-                        Ok(Err(e)) => {
-                            trace!(share_key = ?self.remote_share.key, ?e, "lease task failed");
-                        }
-                        Err(e) => {
-                            trace!(share_key = ?self.remote_share.key, ?e, "lease task panicked");
-                        }
-                    };
                 }
                 res = async {
                     trace!("requesting lease");
@@ -566,7 +549,11 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
             });
         }
 
-        let res = tasks.join_all().await.into_iter().find(|res| res.is_err());
-        res.unwrap_or(Ok(()))
+        tasks
+            .join_all()
+            .await
+            .into_iter()
+            .find(|res| res.is_err())
+            .unwrap_or(Ok(()))
     }
 }
