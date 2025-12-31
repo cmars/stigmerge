@@ -264,7 +264,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
         }
         self.status_tx.send_modify(|status| {
             *status = Status::FetchProgress {
-                fetch_position: have_length.try_into().unwrap(),
+                fetch_position: 0,
                 fetch_length: total_length.try_into().unwrap(),
                 verify_position: 0,
                 verify_length: TryInto::<u64>::try_into(
