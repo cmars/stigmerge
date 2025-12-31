@@ -38,7 +38,7 @@ impl PieceMap {
         }
     }
 
-    pub fn intersection(&self, other: PieceMap) -> PieceMap {
+    pub fn intersection(&self, other: &PieceMap) -> PieceMap {
         self.0
             .iter()
             .zip(other.0.iter())
@@ -331,7 +331,7 @@ mod tests {
     fn intersection_empty_maps() {
         let map1 = PieceMap::new();
         let map2 = PieceMap::new();
-        let result = map1.intersection(map2);
+        let result = map1.intersection(&map2);
         assert!(result.iter().count() == 0);
     }
 
@@ -341,7 +341,7 @@ mod tests {
         map1.set(10);
         map1.set(20);
         let map2 = PieceMap::new();
-        let result = map1.intersection(map2);
+        let result = map1.intersection(&map2);
         assert!(result.iter().count() == 0);
     }
 
@@ -353,7 +353,7 @@ mod tests {
         let mut map2 = PieceMap::new();
         map2.set(30);
         map2.set(40);
-        let result = map1.intersection(map2);
+        let result = map1.intersection(&map2);
         assert!(result.iter().count() == 0);
     }
 
@@ -367,7 +367,7 @@ mod tests {
         map2.set(20);
         map2.set(30);
         map2.set(40);
-        let result = map1.intersection(map2);
+        let result = map1.intersection(&map2);
         let bits: Vec<usize> = result.iter().collect();
         assert_eq!(bits, vec![20, 30]);
     }
@@ -380,7 +380,7 @@ mod tests {
         let mut map2 = PieceMap::new();
         map2.set(10);
         map2.set(20);
-        let result = map1.intersection(map2);
+        let result = map1.intersection(&map2);
         let bits: Vec<usize> = result.iter().collect();
         assert_eq!(bits, vec![10, 20]);
     }
@@ -391,7 +391,7 @@ mod tests {
         map1.set(5);
         map1.set(15);
         map1.set(25);
-        let result = map1.intersection(map1.clone());
+        let result = map1.intersection(&map1);
         let bits: Vec<usize> = result.iter().collect();
         assert_eq!(bits, vec![5, 15, 25]);
     }
@@ -404,7 +404,7 @@ mod tests {
         let mut map2 = PieceMap::new();
         map2.set(5);
         map2.set(6);
-        let result = map1.intersection(map2);
+        let result = map1.intersection(&map2);
         let bits: Vec<usize> = result.iter().collect();
         assert_eq!(bits, vec![5]);
     }
@@ -414,14 +414,14 @@ mod tests {
         // Test with specific byte patterns to verify bitwise AND operation
         let map1: PieceMap = [0b10101010u8, 0b11110000u8].as_slice().into(); // Bits: 1,3,5,7, 8-11
         let map2: PieceMap = [0b01010101u8, 0b00001111u8].as_slice().into(); // Bits: 0,2,4,6, 12-15
-        let result = map1.intersection(map2);
+        let result = map1.intersection(&map2);
         let bits: Vec<usize> = result.iter().collect();
         assert_eq!(bits, Vec::<usize>::new()); // No overlapping bits
 
         // Test with some overlapping bits
         let map3: PieceMap = [0b11110000u8, 0b10101010u8].as_slice().into(); // Bits: 4-7, 8,10,12,14
         let map4: PieceMap = [0b11001100u8, 0b01010101u8].as_slice().into(); // Bits: 2-3,6-7, 9,11,13,15
-        let result2 = map3.intersection(map4);
+        let result2 = map3.intersection(&map4);
         let bits2: Vec<usize> = result2.iter().collect();
         assert_eq!(bits2, vec![6, 7]); // Only bits 6 and 7 overlap
     }

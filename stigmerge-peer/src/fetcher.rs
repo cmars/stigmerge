@@ -1,28 +1,31 @@
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use stigmerge_fileindex::{Index, Indexer, BLOCK_SIZE_BYTES};
+use backoff::{backoff::Backoff, ExponentialBackoff};
+use stigmerge_fileindex::{Index, Indexer};
 use tokio::select;
 use tokio::sync::watch;
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 use veilid_core::RecordKey;
 use veilnet::Connection;
 
 use crate::block_fetcher::BlockFetcher;
 use crate::content_addressable::ContentAddressable;
 use crate::error::{CancelError, Unrecoverable};
+use crate::piece_leases::{
+    self, CompletionResult, FailureReason, LeaseManagerConfig, PieceLease, PieceLeaseManager,
+    RejectedReason,
+};
 use crate::piece_map::PieceMap;
 use crate::piece_verifier::{PieceStatus, PieceStatusNotifier, PieceVerifier};
-use crate::record::StableHaveMap;
 use crate::share_resolver::{ShareNotifier, ShareResolver};
 use crate::types::{FileBlockFetch, LocalShareInfo, PieceState, RemoteShareInfo};
-use crate::{piece_verifier, Result, Retry};
+use crate::{piece_verifier, Error, Result, Retry};
 
 pub struct Fetcher<C: Connection> {
     conn: C,
@@ -35,14 +38,13 @@ pub struct Fetcher<C: Connection> {
 
     piece_verifier: PieceVerifier,
 
-    // Blocks to be fetched
-    pending_blocks_tx: flume::Sender<FileBlockFetch>,
-    pending_blocks_rx: flume::Receiver<FileBlockFetch>,
-
     remote_share_rx: flume::Receiver<crate::types::RemoteShareInfo>,
 
     piece_verified_rx: flume::Receiver<piece_verifier::PieceStatus>,
     share_resolver: ShareResolver<C>,
+
+    // Piece lease management
+    piece_lease_manager: PieceLeaseManager,
 }
 
 #[derive(Debug)]
@@ -100,13 +102,17 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
         share_resolver: ShareResolver<C>,
     ) -> Self {
         let (status_tx, status_rx) = watch::channel(Status::NotStarted);
-        let (pending_blocks_tx, pending_blocks_rx) = flume::unbounded();
 
         let (share_notifier, remote_share_rx) = ShareNotifier::new("fetcher");
         share_resolver.subscribe(Box::new(share_notifier)).await;
 
         let (piece_notifier, piece_verified_rx) = PieceStatusNotifier::new();
         piece_verifier.subscribe(Box::new(piece_notifier)).await;
+
+        // Initialize piece lease manager with default config
+        let lease_config = LeaseManagerConfig::default();
+        let piece_lease_manager = PieceLeaseManager::new(lease_config);
+
         Fetcher {
             conn,
             share,
@@ -117,13 +123,11 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
 
             piece_verifier,
 
-            pending_blocks_tx,
-            pending_blocks_rx,
-
             remote_share_rx,
 
             piece_verified_rx,
             share_resolver,
+            piece_lease_manager,
         }
     }
 
@@ -131,11 +135,12 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
         self.status_rx.clone()
     }
 
-    #[instrument(skip_all)]
+    #[instrument(skip_all, err)]
     pub async fn run(mut self, cancel: CancellationToken, retry: Retry) -> Result<()> {
         loop {
             info!(state = %self.state);
             if matches!(self.state, State::Done) {
+                cancel.cancelled().await;
                 return Ok(());
             }
             backoff_retry!(
@@ -234,15 +239,16 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
         let diff = self.share.want_index.diff(&have_index);
         let mut want_length = 0;
         let total_length = self.share.want_index.payload().length();
-        for want_block in diff.want {
-            self.pending_blocks_tx.send(FileBlockFetch {
-                file_index: want_block.file_index,
-                piece_index: want_block.piece_index,
-                piece_offset: want_block.piece_offset,
-                block_index: want_block.block_index,
-            })?;
+
+        // Initialize wanted pieces in lease manager
+        let mut wanted_pieces = PieceMap::new();
+        for want_block in &diff.want {
+            wanted_pieces.set(TryInto::<u32>::try_into(want_block.piece_index).unwrap());
             want_length += want_block.block_length;
         }
+        self.piece_lease_manager
+            .set_wanted_pieces(&wanted_pieces)
+            .await;
         let mut have_length = 0;
         for have_block in diff.have {
             self.piece_verifier
@@ -292,7 +298,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                         .await
                         .into_iter()
                         .collect::<Result<()>>()?;
-                    if self.piece_verifier.is_complete().await && self.pending_blocks_rx.is_empty() {
+                    if self.piece_verifier.is_complete().await && self.piece_lease_manager.is_empty().await {
                         return Ok(State::Done);
                     }
                     return Err(CancelError.into());
@@ -323,18 +329,16 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                         );
                         continue;
                     }
+                    self.piece_lease_manager.add_peer(&remote_share.key, &remote_share.have_map).await;
                     if !share_tasks.contains_key(&remote_share.key) {
                         let remote_share_key = remote_share.key.clone();
-                        let pool = FetchPool::new(
-                            self.conn.clone(),
-                            self.share.clone(),
-                            remote_share.clone(),
-                            self.pending_blocks_tx.clone(),
-                            self.pending_blocks_rx.clone(),
-                            self.status_tx.clone(),
-                            self.piece_verifier.clone(),
-                            self.share_resolver.clone(),
-                        );
+                        let pool = FetchPool::new(FetchPoolParams {
+                            conn: self.conn.clone(),
+                            local_share: self.share.clone(),
+                            remote_share: Arc::new(remote_share),
+                            piece_verifier: self.piece_verifier.clone(),
+                            piece_lease_manager: self.piece_lease_manager.clone(),
+                        });
                         {
                             let task_cancel = task_cancel.child_token();
                             let handle = tasks.spawn(pool.run(task_cancel));
@@ -359,16 +363,13 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                     share_tasks.remove(&remote_share_key);
 
                     let remote_share = self.share_resolver.add_share(&remote_share_key).await?;
-                    let pool = FetchPool::new(
-                        self.conn.clone(),
-                        self.share.clone(),
-                        remote_share,
-                        self.pending_blocks_tx.clone(),
-                        self.pending_blocks_rx.clone(),
-                        self.status_tx.clone(),
-                        self.piece_verifier.clone(),
-                        self.share_resolver.clone(),
-                    );
+                    let pool = FetchPool::new(FetchPoolParams {
+                        conn: self.conn.clone(),
+                        local_share: self.share.clone(),
+                        remote_share: Arc::new(remote_share),
+                        piece_verifier: self.piece_verifier.clone(),
+                        piece_lease_manager: self.piece_lease_manager.clone(),
+                    });
                     {
                         let task_cancel = task_cancel.child_token();
                         let handle = tasks.spawn(pool.run(task_cancel));
@@ -379,10 +380,18 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                 res = self.piece_verified_rx.recv_async() => {
                     let piece_status = res?;
                     match piece_status {
-                        PieceStatus::ValidPiece{ index_complete, .. } => {
+                        PieceStatus::ValidPiece{ index_complete, piece_index, .. } => {
+                            let piece_length = self.share.want_index.payload().pieces()[piece_index].length();
+                            if let Err(err) = self.piece_lease_manager.release_piece(
+                                piece_index,
+                                CompletionResult::Success,
+                            ).await {
+                                warn!(?err, ?piece_index, "failed to release valid piece");
+                            }
                             self.status_tx.send_modify(|status| {
-                                if let Status::FetchProgress { verify_position, .. } = status {
+                                if let Status::FetchProgress { verify_position, fetch_position, .. } = status {
                                     *verify_position += 1;
+                                    *fetch_position += TryInto::<i64>::try_into(piece_length).unwrap();
                                 }
                             });
                             if index_complete {
@@ -390,31 +399,14 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                                 return Ok(State::Done);
                             }
                         }
-                        PieceStatus::InvalidPiece{ file_index, piece_index } => {
+                        PieceStatus::InvalidPiece{ piece_index, .. } => {
                             // Re-queue all the blocks in the failed piece
-                            let piece_length = self.share.want_index.payload().pieces()[piece_index].length();
-                            let piece_blocks = piece_length / BLOCK_SIZE_BYTES + if !piece_length.is_multiple_of(BLOCK_SIZE_BYTES) { 1 } else { 0 };
-                            for block_index in 0..piece_blocks  {
-                                let block = FileBlockFetch {
-                                    file_index,
-                                    piece_index,
-                                    piece_offset: 0,
-                                    block_index
-                                };
-                                self.pending_blocks_tx.send_async(block).await?;
-                                // TODO: punish peer for excessive bad blocks?
+                            if let Err(err) = self.piece_lease_manager.release_piece(
+                                piece_index,
+                                CompletionResult::Failure(FailureReason::VerificationFailed),
+                            ).await {
+                                warn!(?err, ?piece_index, "failed to release invalid piece");
                             }
-                            self.status_tx.send_modify(|status| {
-                                if let Status::FetchProgress { fetch_position, .. } = status {
-                                    let piece_length = TryInto::<i64>::try_into(piece_length).unwrap();
-                                    if *fetch_position > piece_length {
-                                        *fetch_position -= piece_length;
-                                    } else {
-                                        *fetch_position = 0;
-                                    }
-                                }
-                            });
-
                         }
                         PieceStatus::IncompletePiece { .. } => {}
                     }
@@ -427,244 +419,141 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
 struct FetchPool<C: Connection + Clone> {
     conn: C,
     local_share: LocalShareInfo,
-    remote_share: RemoteShareInfo,
-    tasks: JoinSet<Result<()>>,
+    remote_share: Arc<RemoteShareInfo>,
 
-    pending_blocks_tx: flume::Sender<FileBlockFetch>,
-    pending_blocks_rx: flume::Receiver<FileBlockFetch>,
-    status_tx: watch::Sender<Status>,
     piece_verifier: PieceVerifier,
-    share_resolver: ShareResolver<C>,
+    piece_lease_manager: PieceLeaseManager,
+}
+
+/// Parameters for creating a FetchPool
+struct FetchPoolParams<C: Connection + Clone> {
+    conn: C,
+    local_share: LocalShareInfo,
+    remote_share: Arc<RemoteShareInfo>,
+    piece_verifier: PieceVerifier,
+    piece_lease_manager: PieceLeaseManager,
 }
 
 impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
-    fn new(
-        conn: C,
-        local_share: LocalShareInfo,
-        remote_share: RemoteShareInfo,
-        pending_blocks_tx: flume::Sender<FileBlockFetch>,
-        pending_blocks_rx: flume::Receiver<FileBlockFetch>,
-        status_tx: watch::Sender<Status>,
-        piece_verifier: PieceVerifier,
-        share_resolver: ShareResolver<C>,
-    ) -> Self {
+    fn new(params: FetchPoolParams<C>) -> Self {
         Self {
-            conn,
-            local_share,
-            remote_share,
-            tasks: JoinSet::new(),
-            pending_blocks_tx,
-            pending_blocks_rx,
-            status_tx,
-            piece_verifier,
-            share_resolver,
+            conn: params.conn,
+            local_share: params.local_share,
+            remote_share: params.remote_share,
+            piece_verifier: params.piece_verifier,
+            piece_lease_manager: params.piece_lease_manager,
         }
     }
 
-    const MAX_REMOTE_TASKS: usize = 64;
-    const MISSING_PIECE_DELAY: Duration = Duration::from_secs(30);
-
+    #[tracing::instrument(skip_all, err)]
     async fn run(mut self, cancel: CancellationToken) -> Result<()> {
-        let (fetch_success_tx, fetch_success_rx) = flume::unbounded();
-        let mut consecutive_good_fetches = 0;
-
-        let have_map = {
-            let have_map_key = match self.remote_share.header.have_map() {
-                Some(have_map_ref) => have_map_ref.key(),
-                None => {
-                    warn!(
-                        share_key = ?self.remote_share.key,
-                        delay = ?Self::MISSING_PIECE_DELAY,
-                        "missing have map, waiting for it to announce",
-                    );
-                    return select! {
-                        _ = cancel.cancelled() => {
-                            Err(CancelError.into())
-                        }
-                        _ = tokio::time::sleep(Self::MISSING_PIECE_DELAY) => {
-                            Ok(())
-                        }
-                    };
-                }
-            };
-            Arc::new(
-                StableHaveMap::read_remote(&mut self.conn, have_map_key, &self.remote_share.index)
-                    .await?,
-            )
+        debug!(share_key = ?self.remote_share.key, "starting fetch pool");
+        let mut backoff = ExponentialBackoff {
+            initial_interval: Duration::from_millis(50),
+            max_interval: Duration::from_secs(30),
+            ..Default::default()
         };
 
         loop {
-            if self.tasks.is_empty() {
-                let task = FetchTask::new(
-                    self.conn.clone(),
-                    self.local_share.root.to_path_buf(),
-                    self.remote_share.clone(),
-                    self.pending_blocks_tx.clone(),
-                    self.pending_blocks_rx.clone(),
-                    self.status_tx.clone(),
-                    fetch_success_tx.clone(),
-                    self.piece_verifier.clone(),
-                    have_map.clone(),
-                );
-                trace!(share_key = ?self.remote_share.key, "spawning fetch task");
-                self.tasks.spawn(task.run(cancel.child_token()));
-            }
             select! {
-                _ = cancel.cancelled() => {
-                    return self.tasks
-                        .join_all()
-                        .await
-                        .into_iter()
-                        .collect::<Result<()>>();
-                }
-                res = self.tasks.join_next() => {
-                    match res {
-                        Some(Ok(Ok(()))) => {
-                            if self.pending_blocks_rx.is_empty() {
-                                return Ok(());
-                            }
-                        }
-                        Some(res) => {
-                            trace!(share_key = ?self.remote_share.key, ?res, "task exited");
-                        }
-                        None => {
-                            trace!(share_key = ?self.remote_share.key, "no tasks scheduled");
-                        }
-                    }
-                    consecutive_good_fetches = 0;
-                }
-                res = fetch_success_rx.recv_async(), if self.tasks.len() < Self::MAX_REMOTE_TASKS => {
-                    if res? {
-                        consecutive_good_fetches += 1;
-                    } else {
-                        consecutive_good_fetches = 0;
-                        continue;
-                    }
-                    if consecutive_good_fetches >= self.tasks.len() * 2 {
-                        for _ in 0..self.tasks.len() {
-                            let task = FetchTask::new(
-                                self.conn.clone(),
-                                self.local_share.root.to_path_buf(),
-                                self.remote_share.clone(),
-                                self.pending_blocks_tx.clone(),
-                                self.pending_blocks_rx.clone(),
-                                self.status_tx.clone(),
-                                fetch_success_tx.clone(),
-                                self.piece_verifier.clone(),
-                                have_map.clone(),
-                            );
-                            trace!(share_key = ?self.remote_share.key, "spawning fetch task");
-                            self.tasks.spawn(task.run(cancel.child_token()));
-                        }
-                    }
-                }
-            }
-            if consecutive_good_fetches == 0 && self.tasks.is_empty() {
-                if let Err(err) = self
-                    .share_resolver
-                    .refresh_share(&self.remote_share.route_id)
-                    .await
-                {
-                    warn!(
-                        ?err,
-                        key = ?self.remote_share.key,
-                        route_id = ?self.remote_share.route_id,
-                        "refreshing share",
-                    );
-                }
-
-                // Cooldown so we don't thrash while network is down?
-                // TODO: exp backoff until we get a good fetch?
-                trace!(key = ?self.remote_share.key, "all fetch tasks have exited");
-                return Ok(());
-            }
-        }
-    }
-}
-
-struct FetchTask<C: Connection> {
-    conn: C,
-    local_root: PathBuf,
-    remote_share: RemoteShareInfo,
-    pending_blocks_tx: flume::Sender<FileBlockFetch>,
-    pending_blocks_rx: flume::Receiver<FileBlockFetch>,
-    status_tx: watch::Sender<Status>,
-    fetch_success_tx: flume::Sender<bool>,
-    piece_verifier: PieceVerifier,
-    have_map: Arc<PieceMap>,
-}
-
-impl<C: Connection + Clone + Send + Sync> FetchTask<C> {
-    fn new(
-        conn: C,
-        local_root: PathBuf,
-        remote_share: RemoteShareInfo,
-        pending_blocks_tx: flume::Sender<FileBlockFetch>,
-        pending_blocks_rx: flume::Receiver<FileBlockFetch>,
-        status_tx: watch::Sender<Status>,
-        fetch_success_tx: flume::Sender<bool>,
-        piece_verifier: PieceVerifier,
-        have_map: Arc<PieceMap>,
-    ) -> Self {
-        Self {
-            conn: conn.clone(),
-            local_root,
-            remote_share,
-            pending_blocks_tx,
-            pending_blocks_rx,
-            status_tx,
-            fetch_success_tx,
-            piece_verifier,
-            have_map,
-        }
-    }
-
-    async fn run(self, cancel: CancellationToken) -> Result<()> {
-        let mut block_fetcher =
-            BlockFetcher::new(self.conn, self.remote_share.index, self.local_root.clone());
-        let mut errors = 0;
-        loop {
-            select! {
+                biased;
                 _ = cancel.cancelled() => {
                     return Err(CancelError.into());
                 }
-                res = self.pending_blocks_rx.recv_async() => {
-                    let block_fetch = res?;
-                    if !self.have_map.get(TryInto::<u32>::try_into(block_fetch.piece_index).unwrap()) {
-                        // We don't have this piece, requeue it.
-                        // Nack the fetch, for pool task accounting. Remote lacks these blocks.
-                        self.fetch_success_tx.send_async(false).await?;
-                        // Re-queue the block fetch.
-                        self.pending_blocks_tx.send_async(block_fetch).await?;
-                        return Ok(());
-                    } else {
-                        match block_fetcher.fetch_block(&self.remote_share.route_id, &block_fetch, true).await {
-                            Ok((piece_state, fetch_len)) => {
-                                self.status_tx.send_modify(|status| {
-                                    if let Status::FetchProgress { fetch_position, .. } = status {
-                                        *fetch_position += TryInto::<i64>::try_into(fetch_len).unwrap();
-                                    }
-                                });
-                                self.piece_verifier.update_piece(piece_state).await?;
-                                self.fetch_success_tx.send_async(true).await?;
-                                errors = 0;
+                res = async {
+                    trace!("requesting lease");
+                    self.piece_lease_manager.acquire_lease(&self.remote_share.key).await
+                } => {
+                    trace!(is_ok = res.is_ok(), "response from lease manager");
+                    let err = match res {
+                        Ok(lease) => {
+                            if let Err(err) = self.fetch_lease(&lease, cancel.clone()).await {
+                                self.piece_lease_manager.release_piece(lease.piece_index(), CompletionResult::Failure(FailureReason::NetworkError)).await?;
+                                err
+                            } else {
+                                backoff.reset();
+                                continue;
                             }
-                            Err(err) => {
-                                trace!(?err, "fetch block");
-                                // Nack the fetch, for pool task accounting.
-                                self.fetch_success_tx.send_async(false).await?;
-                                // Re-queue the block fetch.
-                                self.pending_blocks_tx.send_async(block_fetch).await?;
+                        }
+                        Err(err) => {
+                            if let piece_leases::Error::LeaseRejected(RejectedReason::PeerAtCapacity) = err { backoff.reset() };
+                            err.into()
+                        }
+                    };
+                    warn!(?err, share_key = ?self.remote_share.key);
+                    let delay = backoff
+                        .next_backoff()
+                        .ok_or(Error::msg("max attempts reached"))?;
+                    tokio::time::sleep(delay).await;
+                    debug!(?delay, "resuming");
+                }
+            }
+        }
+    }
 
-                                errors += 1;
-                                if errors > 10 {
+    /// Fetch a leased piece
+    async fn fetch_lease(&mut self, lease: &PieceLease, cancel: CancellationToken) -> Result<()> {
+        let task_cancel = cancel.child_token();
+
+        // Generate blocks for the leased piece
+        let file_index = self
+            .local_share
+            .want_index
+            .file_index_for_piece(lease.piece_index());
+        let piece_info = &self.local_share.want_index.payload().pieces()[lease.piece_index()];
+
+        let (blocks_tx, blocks_rx) = flume::bounded(piece_info.block_count());
+
+        for block_index in 0..piece_info.block_count() {
+            blocks_tx.send(FileBlockFetch {
+                file_index,
+                piece_index: lease.piece_index(),
+                piece_offset: 0,
+                block_index,
+            })?;
+        }
+
+        // Five concurrent block fetchers
+        let mut tasks = JoinSet::new();
+        for _ in 0..5 {
+            let blocks_rx = blocks_rx.clone();
+            let cancel = task_cancel.clone();
+            let conn = self.conn.clone();
+            let local_root = self.local_share.root.clone();
+            let remote_share = self.remote_share.clone();
+            let piece_verifier = self.piece_verifier.clone();
+            tasks.spawn(async move {
+                let mut block_fetcher = BlockFetcher::new(conn, local_root);
+                loop {
+                    select! {
+                        _ = cancel.cancelled() => {
+                            return Err(CancelError.into());
+                        }
+                        res = blocks_rx.recv_async() => {
+                            let block_fetch = res?;
+                            match block_fetcher.fetch_block(remote_share.clone(), &block_fetch, true).await {
+                                Ok((piece_state, _)) => {
+                                    piece_verifier.update_piece(piece_state).await?;
+                                }
+                                Err(err) => {
                                     return Err(err);
                                 }
+                            }
+                            if blocks_rx.is_empty() {
+                                return Ok(());
                             }
                         }
                     }
                 }
-            }
+
+            });
         }
+
+        tasks
+            .join_all()
+            .await
+            .into_iter()
+            .find(|res| res.is_err())
+            .unwrap_or(Ok(()))
     }
 }

@@ -528,11 +528,15 @@ impl StableHaveMap {
     ) -> Result<PieceMap> {
         let record = StablePublicRecord::new_remote(conn, key).await?;
         let subkeys = PieceMap::subkeys(index.payload().pieces().len());
+
+        // Handle the case where we have 0 or 1 subkeys
+        if subkeys == 0 {
+            return Ok(PieceMap::new());
+        }
+
+        let range_end = subkeys - 1;
         let piece_map_bytes = record
-            .read(
-                conn,
-                ValueSubkeyRangeSet::single_range(0, (subkeys - 1).into()),
-            )
+            .read(conn, ValueSubkeyRangeSet::single_range(0, range_end.into()))
             .await?;
         Ok(PieceMap::from(piece_map_bytes.as_slice()))
     }

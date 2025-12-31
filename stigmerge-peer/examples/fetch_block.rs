@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use stigmerge_peer::new_connection;
@@ -90,16 +91,12 @@ async fn main() -> std::result::Result<(), Error> {
     let key: RecordKey = share_key.parse()?;
 
     // Resolve the header and index
-    let remote_share = share_resolver.add_share(&key).await?;
+    let remote_share = Arc::new(share_resolver.add_share(&key).await?);
 
     info!(?key, "resolved remote share");
 
     // Create the block fetcher
-    let mut block_fetcher = BlockFetcher::new(
-        conn.clone(),
-        remote_share.index.clone(),
-        output_path.clone(),
-    );
+    let mut block_fetcher = BlockFetcher::new(conn.clone(), output_path.clone());
 
     // Create the block fetch request
     let block = FileBlockFetch {
@@ -115,7 +112,7 @@ async fn main() -> std::result::Result<(), Error> {
     );
 
     let (_, length) = block_fetcher
-        .fetch_block(&remote_share.route_id, &block, true)
+        .fetch_block(remote_share, &block, true)
         .await?;
     info!("Successfully fetched block of length: {} bytes", length);
 

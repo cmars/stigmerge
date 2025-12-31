@@ -50,7 +50,9 @@ impl Encoder for Header {
             key_builder.set_p3(u64::from_be_bytes(key_bytes[24..32].try_into()?));
 
             if let Some(secret) = have_map_ref.key.ref_value().ref_encryption_key() {
-                let secret_builder = typed_key_builder.reborrow().init_secret(secret.len().try_into().unwrap());
+                let secret_builder = typed_key_builder
+                    .reborrow()
+                    .init_secret(secret.len().try_into().unwrap());
                 secret_builder.copy_from_slice(secret);
             }
 
@@ -72,7 +74,9 @@ impl Encoder for Header {
             key_builder.set_p3(u64::from_be_bytes(key_bytes[24..32].try_into()?));
 
             if let Some(secret) = peer_map_ref.key.ref_value().ref_encryption_key() {
-                let secret_builder = typed_key_builder.reborrow().init_secret(secret.len().try_into().unwrap());
+                let secret_builder = typed_key_builder
+                    .reborrow()
+                    .init_secret(secret.len().try_into().unwrap());
                 secret_builder.copy_from_slice(secret);
             }
 
@@ -290,7 +294,9 @@ mod tests {
     use std::path::PathBuf;
 
     use stigmerge_fileindex::{Index, PayloadSpec};
-    use veilid_core::{BareOpaqueRecordKey, BareRecordKey, BareSharedSecret, CryptoKind, RecordKey};
+    use veilid_core::{
+        BareOpaqueRecordKey, BareRecordKey, BareSharedSecret, CryptoKind, RecordKey,
+    };
 
     use crate::proto::{Decoder, Encoder, HaveMapRef, Header, PeerMapRef};
 
@@ -319,11 +325,17 @@ mod tests {
         // Create TypedKeys for peer map and have map
         let peer_key = RecordKey::new(
             CryptoKind::default(),
-            BareRecordKey::new(BareOpaqueRecordKey::new(&[0xaa; 32]), Some(BareSharedSecret::new(&[0x55, 32]))),
+            BareRecordKey::new(
+                BareOpaqueRecordKey::new(&[0xaa; 32]),
+                Some(BareSharedSecret::new(&[0x55, 32])),
+            ),
         );
         let have_key = RecordKey::new(
             CryptoKind::default(),
-            BareRecordKey::new(BareOpaqueRecordKey::new(&[0xbb; 32]), Some(BareSharedSecret::new(&[0x66, 32]))),
+            BareRecordKey::new(
+                BareOpaqueRecordKey::new(&[0xbb; 32]),
+                Some(BareSharedSecret::new(&[0x66, 32])),
+            ),
         );
 
         // Create the peer map ref and have map ref
