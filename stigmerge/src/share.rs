@@ -4,9 +4,15 @@ use anyhow::{Error, Result};
 use path_absolutize::Absolutize;
 use stigmerge_fileindex::{Indexer, Progress};
 use stigmerge_peer::{
-    content_addressable::ContentAddressable, fetcher, peer_gossip::PeerGossip, piece_verifier,
-    proto::Digest, seeder, share_announcer, share_resolver, types::LocalShareInfo, CancelError,
-    Retry,
+    content_addressable::ContentAddressable,
+    fetcher,
+    peer_gossip::PeerGossip,
+    piece_verifier,
+    proto::Digest,
+    record::{StableHaveMap, StableShareRecord},
+    seeder, share_announcer, share_resolver,
+    types::{LocalShareInfo, RemoteShareInfo},
+    CancelError, Retry,
 };
 use tokio::{
     select,
@@ -14,9 +20,12 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 use veilid_core::RecordKey;
-use veilnet::Connection;
+use veilnet::{
+    connection::{RoutingContext, API},
+    Connection,
+};
 
 #[derive(Debug)]
 pub enum Mode {
@@ -126,6 +135,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Share<C> {
 
         // Resolve or create index based on mode
         let mut want_index = None;
+        let mut remote_shares = vec![];
         match &self.mode {
             Mode::Fetch {
                 share_keys,
@@ -146,21 +156,57 @@ impl<C: Connection + Clone + Send + Sync + 'static> Share<C> {
                     };
 
                     // Resolve the index from the bootstrap peer
-                    let mut remote_share = share_resolver.add_share(share_key).await?;
-                    let remote_index_digest = remote_share.index.digest()?;
+                    let (_, header) =
+                        StableShareRecord::new_remote(&mut self.conn, share_key).await?;
+                    let mut index =
+                        StableShareRecord::read_index(&mut self.conn, share_key, &header, &root)
+                            .await?;
+                    let remote_index_digest = index.digest()?;
 
                     // Verify the index matches what we want
                     if let Some(want_digest) = want_index_digest {
                         if remote_index_digest != want_digest {
-                            anyhow::bail!(
+                            warn!(
                                 "remote share does not match wanted index digest: expected {}, got {}",
                                 hex::encode(&want_digest[..]),
                                 hex::encode(&remote_index_digest[..])
                             );
+                            continue;
                         }
                     }
 
-                    want_index.get_or_insert(remote_share.index);
+                    if let Err(err) = async {
+                        let route_id = self
+                            .conn
+                            .routing_context()
+                            .api()
+                            .import_remote_private_route(header.route_data().to_vec())?;
+                        let have_map = StableHaveMap::read_remote(
+                            &mut self.conn,
+                            header.have_map().unwrap().key(),
+                            &index,
+                        )
+                        .await?;
+
+                        // Store the remote share
+                        remote_shares.push(RemoteShareInfo {
+                            key: share_key.clone(),
+                            header,
+                            index: index.clone(),
+                            index_digest: remote_index_digest,
+                            route_id,
+                            have_map,
+                        });
+                        Ok::<(), anyhow::Error>(())
+                    }
+                    .await
+                    {
+                        warn!(?err, ?share_key, "failed to resolve share");
+                        continue;
+                    }
+
+                    // Store the index for piece verification below
+                    want_index.get_or_insert(index);
                 }
             }
             Mode::Seed { path } => {
@@ -245,12 +291,17 @@ impl<C: Connection + Clone + Send + Sync + 'static> Share<C> {
                 self.events_tx.send(Event::SeederAvailable)?;
             }
             Mode::Fetch { .. } => {
+                if remote_shares.is_empty() {
+                    anyhow::bail!("failed to resolve initial shares");
+                }
+
                 // Set up fetcher for fetching mode
                 let fetcher = fetcher::Fetcher::new(
                     self.conn.clone(),
                     share.clone(),
                     piece_verifier,
                     share_resolver.clone(),
+                    remote_shares,
                 )
                 .await;
 

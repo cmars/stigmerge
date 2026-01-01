@@ -45,6 +45,8 @@ pub struct Fetcher<C: Connection> {
 
     // Piece lease management
     piece_lease_manager: PieceLeaseManager,
+
+    initial_shares: Vec<RemoteShareInfo>,
 }
 
 #[derive(Debug)]
@@ -100,6 +102,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
         share: LocalShareInfo,
         piece_verifier: PieceVerifier,
         share_resolver: ShareResolver<C>,
+        initial_shares: Vec<RemoteShareInfo>,
     ) -> Self {
         let (status_tx, status_rx) = watch::channel(Status::NotStarted);
 
@@ -128,6 +131,8 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
             piece_verified_rx,
             share_resolver,
             piece_lease_manager,
+
+            initial_shares,
         }
     }
 
@@ -249,7 +254,6 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
         self.piece_lease_manager
             .set_wanted_pieces(&wanted_pieces)
             .await;
-        let mut have_length = 0;
         for have_block in diff.have {
             self.piece_verifier
                 .update_piece(PieceState::new(
@@ -260,7 +264,6 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                     have_block.block_index,
                 ))
                 .await?;
-            have_length += have_block.block_length;
         }
         self.status_tx.send_modify(|status| {
             *status = Status::FetchProgress {
@@ -287,6 +290,25 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
         let mut task_shares = HashMap::new();
         let mut share_tasks: HashMap<RecordKey, AbortHandle> = HashMap::new();
         let task_cancel = cancel.child_token();
+
+        for remote_share in self.initial_shares.iter() {
+            let remote_share_key = remote_share.key.clone();
+            let remote_share = Arc::new(remote_share.clone());
+            let pool = FetchPool::new(FetchPoolParams {
+                conn: self.conn.clone(),
+                local_share: self.share.clone(),
+                remote_share,
+                piece_verifier: self.piece_verifier.clone(),
+                piece_lease_manager: self.piece_lease_manager.clone(),
+            });
+            {
+                let task_cancel = task_cancel.child_token();
+                let handle = tasks.spawn(pool.run(task_cancel));
+                task_shares.insert(handle.id(), remote_share_key.clone());
+                share_tasks.insert(remote_share_key, handle);
+            }
+        }
+
         loop {
             select! {
                 _ = cancel.cancelled() => {
@@ -467,17 +489,20 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
                     trace!(is_ok = res.is_ok(), "response from lease manager");
                     let err = match res {
                         Ok(lease) => {
-                            if let Err(err) = self.fetch_lease(&lease, cancel.clone()).await {
-                                self.piece_lease_manager.release_piece(lease.piece_index(), CompletionResult::Failure(FailureReason::NetworkError)).await?;
-                                err
-                            } else {
-                                backoff.reset();
-                                continue;
+                            match self.fetch_lease(&lease, cancel.clone()).await {
+                                Ok(()) => {
+                                    backoff.reset();
+                                    continue;
+                                }
+                                Err(err) => {
+                                    self.piece_lease_manager.release_piece(lease.piece_index(), CompletionResult::Failure(FailureReason::NetworkError)).await?;
+                                    return Err(err);
+                                }
                             }
                         }
                         Err(err) => {
-                            if let piece_leases::Error::LeaseRejected(RejectedReason::PeerAtCapacity) = err { backoff.reset() };
-                            err.into()
+                            if let piece_leases::Error::LeaseRejected(RejectedReason::PeerAtCapacity) = err { backoff.reset() }
+                            err
                         }
                     };
                     warn!(?err, share_key = ?self.remote_share.key);

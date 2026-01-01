@@ -124,10 +124,9 @@ async fn main() -> std::result::Result<(), Error> {
         share_info.clone(),
         piece_verifier.clone(),
         share_resolver.clone(),
+        vec![remote_share],
     )
     .await;
-
-    share_resolver.add_share(&remote_share.key).await?;
 
     info!("Starting fetch...");
 
