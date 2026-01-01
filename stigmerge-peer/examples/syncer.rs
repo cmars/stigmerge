@@ -150,9 +150,11 @@ async fn main() -> std::result::Result<(), Error> {
     tasks.spawn(seeder.run(cancel.clone(), retry.clone()));
 
     // Add bootstrap shares for fetching
+    let mut initial_shares = vec![];
     for share_key_str in args.share_keys.iter() {
         let share_key: RecordKey = share_key_str.parse()?;
-        let _ = share_resolver.add_share(&share_key).await?;
+        let remote_share = share_resolver.add_share(&share_key).await?;
+        initial_shares.push(remote_share);
     }
 
     let peer_gossip =
@@ -165,6 +167,7 @@ async fn main() -> std::result::Result<(), Error> {
         share_info.clone(),
         piece_verifier.clone(),
         share_resolver,
+        initial_shares,
     )
     .await;
 

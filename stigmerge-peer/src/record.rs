@@ -167,7 +167,7 @@ impl StablePublicRecord {
         Ok(())
     }
 
-    #[instrument(skip(conn, data))]
+    #[instrument(skip(conn, data), err)]
     pub async fn write<C: Connection + Send + Sync + 'static>(
         &self,
         conn: &mut C,
@@ -186,7 +186,7 @@ impl StablePublicRecord {
         .await
     }
 
-    #[instrument(skip_all)]
+    #[instrument(skip_all, err)]
     pub async fn write_key<C: Connection + Send + Sync + 'static>(
         conn: &mut C,
         key: &RecordKey,

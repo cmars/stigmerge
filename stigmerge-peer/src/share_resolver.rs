@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -226,7 +226,7 @@ impl<C: Connection + Send + Sync + 'static> ShareResolverInner<C> {
 }
 
 pub trait ShareHandler {
-    fn share_changed(&self, share: &RemoteShareInfo) -> Result<()>;
+    fn share_changed(&mut self, share: &RemoteShareInfo) -> Result<()>;
 }
 
 pub struct ShareNotifier {
@@ -249,7 +249,7 @@ impl ShareNotifier {
 
 impl ShareHandler for ShareNotifier {
     #[instrument(skip_all, fields(label = self.label), err)]
-    fn share_changed(&self, share: &RemoteShareInfo) -> Result<()> {
+    fn share_changed(&mut self, share: &RemoteShareInfo) -> Result<()> {
         self.remote_share_tx.send(share.clone())?;
         Ok(())
     }
@@ -268,11 +268,32 @@ impl HandlerChain {
 
 impl ShareHandler for HandlerChain {
     #[instrument(skip_all, fields(key = ?share.key))]
-    fn share_changed(&self, share: &RemoteShareInfo) -> Result<()> {
-        for handler in self.handlers.iter() {
+    fn share_changed(&mut self, share: &RemoteShareInfo) -> Result<()> {
+        let mut to_remove = VecDeque::new();
+        for (i, handler) in self.handlers.iter_mut().enumerate() {
             if let Err(err) = handler.share_changed(share) {
                 warn!(?err);
+                to_remove.push_back(i);
             }
+        }
+        if !to_remove.is_empty() {
+            self.handlers = self
+                .handlers
+                .drain(..)
+                .enumerate()
+                .filter(|(i, _)| {
+                    if to_remove.is_empty() {
+                        return true;
+                    }
+                    if to_remove[0] != *i {
+                        true
+                    } else {
+                        to_remove.pop_front();
+                        false
+                    }
+                })
+                .map(|(_, h)| h)
+                .collect();
         }
         Ok(())
     }
