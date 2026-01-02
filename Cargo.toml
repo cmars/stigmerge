@@ -70,4 +70,4 @@ inherits = "release"
 lto = "thin"
 
 [patch.crates-io]
-veilid-core = { path = "../veilid/veilid-core" }
+veilid-core = { git = "https://gitlab.com/veilid/veilid", branch = "0.5.2-pre" }
