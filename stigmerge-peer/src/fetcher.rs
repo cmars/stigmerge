@@ -473,6 +473,7 @@ impl<C: Connection + Clone + Send + Sync + 'static> FetchPool<C> {
         let mut backoff = ExponentialBackoff {
             initial_interval: Duration::from_millis(50),
             max_interval: Duration::from_secs(30),
+            max_elapsed_time: Some(Duration::from_secs(60)),
             ..Default::default()
         };
 
