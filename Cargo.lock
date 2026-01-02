@@ -2163,18 +2163,18 @@ dependencies = [
 
 [[package]]
 name = "keyvaluedb"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cf5f716c938c5720860919731f933740c437f7eb1e35d194b877f85a6be992f"
+checksum = "f82f6a6d061554e431c5d30117f5fb8192ce2aed4c67a37cf8a11430a1182017"
 dependencies = [
  "smallvec",
 ]
 
 [[package]]
 name = "keyvaluedb-memorydb"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e15911696a5b7e2a88f40d38c9c33d8ac0722bc5b88ad6ecdd0b3dada0eef575"
+checksum = "58507837ab456eb0b3e16f83abbabda214cd85e78878da03f0d62a5b77e05ad3"
 dependencies = [
  "keyvaluedb",
  "parking_lot",
@@ -2182,9 +2182,9 @@ dependencies = [
 
 [[package]]
 name = "keyvaluedb-sqlite"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81123fd2c40c4406a3bfd1f4ee2e6810d2dd9ef9254d10ddceb67a3156337344"
+checksum = "1e5a996ef8caa7a6e7cf2e333388edbd048389a1d8d301464b57baa4fa4fd38b"
 dependencies = [
  "async-sqlite",
  "hex",
@@ -2195,9 +2195,9 @@ dependencies = [
 
 [[package]]
 name = "keyvaluedb-web"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "744d5c74aed22b16ffd5c48fc99f5bb9c1889766c653db5181148451725c8cd5"
+checksum = "6369c136e5778a4f4c9d0c2587c9c22b8b708d139fbed39098247174a014ba87"
 dependencies = [
  "flume",
  "futures",
@@ -4342,8 +4342,6 @@ dependencies = [
 [[package]]
 name = "veilid-core"
 version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92e8139b5b31e0b38d0214e4688b112f5904da7e1e6e98867fa7dfe575c7aea5"
 dependencies = [
  "argon2",
  "async-tls",
@@ -4464,8 +4462,6 @@ dependencies = [
 [[package]]
 name = "veilid-tools"
 version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dde1fe3a2bb1d1efeab8c639036cb7cebafa618f316878bc2832dee1e9ef1aa6"
 dependencies = [
  "android_logger 0.13.3",
  "async-io",
@@ -4483,6 +4479,7 @@ dependencies = [
  "getrandom 0.2.16",
  "ifstructs",
  "imbl",
+ "indent",
  "jni",
  "jni-sys",
  "js-sys",

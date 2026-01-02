@@ -38,7 +38,7 @@ indicatif = { version = "0.18", features = ["tokio", "futures"] }
 path-absolutize = "3.1"
 
 # Networking and P2P
-veilid-core = { version = "0.5.1" }
+veilid-core = "0.5.1"
 veilnet = "0.4.2"
 
 # Platform-specific
@@ -68,3 +68,6 @@ opt-level = "z"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[patch.crates-io]
+veilid-core = { path = "../veilid/veilid-core" }

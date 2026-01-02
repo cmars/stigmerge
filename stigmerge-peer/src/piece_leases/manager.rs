@@ -45,9 +45,7 @@ impl Inner {
     }
 
     fn add_peer(&mut self, peer_key: &RecordKey, have_map: &PieceMap) {
-        self.peer_has
-            .entry(peer_key.clone())
-            .or_insert_with(|| have_map.clone());
+        self.peer_has.insert(peer_key.clone(), have_map.clone());
     }
 
     fn acquire_lease(&mut self, peer_key: &RecordKey) -> Result<PieceLease> {
