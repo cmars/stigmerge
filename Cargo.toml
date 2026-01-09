@@ -50,7 +50,7 @@ num_cpus = "1.16"
 
 # Serialization and protocols
 capnp = "0.21"
-capnpc = "0.21"
+capnpc = "0.25"
 
 # Utilities
 thiserror = "2.0"
