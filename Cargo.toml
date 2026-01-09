@@ -49,7 +49,7 @@ flume = { version = "0.11", features = ["async"] }
 num_cpus = "1.16"
 
 # Serialization and protocols
-capnp = "0.21"
+capnp = "0.25"
 capnpc = "0.21"
 
 # Utilities
