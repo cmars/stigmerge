@@ -39,7 +39,7 @@ path-absolutize = "3.1"
 
 # Networking and P2P
 veilid-core = "0.5.2"
-veilnet = "0.4.2"
+veilnet = "0.4.3"
 
 # Platform-specific
 jni = { version = "0.21", features = ["invocation"] }

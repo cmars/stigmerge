@@ -4442,9 +4442,9 @@ dependencies = [
 
 [[package]]
 name = "veilnet"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3da85db7091c614713043a682873ff586cf4d1cfc9561b0c489c88140c6a0175"
+checksum = "e96667b81d842ca32b636a724f83174d1c8ee4ba65366c8d176bab74e8986c63"
 dependencies = [
  "anyhow",
  "async-trait",
