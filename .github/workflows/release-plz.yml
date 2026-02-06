@@ -23,7 +23,7 @@ jobs:
           components: clippy,rustfmt
 
       - name: Run release-plz
-        uses: release-plz/action@068d76d2aa32d3c9cd0b1ccdd9ac921e28ba2be9
+        uses: release-plz/action@52440b50d383aa252927de395c8b2c1e0a9cf8e9
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
