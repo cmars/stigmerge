@@ -45,7 +45,7 @@ veilnet = "0.4.3"
 jni = { version = "0.21", features = ["invocation"] }
 
 # Concurrency and async
-flume = { version = "0.11", features = ["async"] }
+flume = { version = "0.12", features = ["async"] }
 num_cpus = "1.16"
 
 # Serialization and protocols
