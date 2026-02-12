@@ -1,4 +1,4 @@
-FROM rust:1.91-slim-trixie AS base
+FROM rust:1.93-slim-trixie AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && \
