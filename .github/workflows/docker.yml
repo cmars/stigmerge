@@ -49,7 +49,7 @@ jobs:
 
       - name: Build and push Docker image
         id: push
-        uses: docker/build-push-action@ccc2b40e9ea6518f9252a22a990f8e868370f62e
+        uses: docker/build-push-action@ef1fb9688fc3626d0fd5e462f502cbbdc6456feb
         with:
           context: .
           file: ./Dockerfile
