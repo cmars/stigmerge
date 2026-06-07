@@ -24,7 +24,9 @@ pub fn get_config(state_dir: String, ns: Option<String>) -> VeilidConfig {
 
 #[cfg(not(target_os = "android"))]
 fn always_use_insecure_storage() -> bool {
-    false
+    // TODO: investigate why this returning false crashes on startup
+    // Seems to block when running from an async thread
+    true
 }
 
 #[cfg(target_os = "android")]
