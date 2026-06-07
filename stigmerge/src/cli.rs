@@ -1,7 +1,7 @@
 use std::{io::IsTerminal, path::PathBuf};
 
 use anyhow::{Error, Result};
-use clap::{arg, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 
 use crate::share;
