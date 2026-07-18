@@ -130,7 +130,7 @@ mod tests {
             <(Vec<PayloadPiece>, Vec<FileSpec>)>::decode(message.as_slice())
                 .expect("decode payload pieces and files");
         let idx2 = Index::new(
-            tempf.path().parent().unwrap().to_owned(),
+            tempf.path().canonicalize().unwrap().parent().unwrap().to_owned(),
             PayloadSpec::new(
                 header.payload_digest(),
                 header.payload_length(),
