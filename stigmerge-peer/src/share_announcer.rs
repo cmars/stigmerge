@@ -126,7 +126,7 @@ impl ShareAnnounce {
                 .new_custom_private_route(
                     &VALID_CRYPTO_KINDS,
                     Stability::LowLatency,
-                    Sequencing::NoPreference,
+                    Sequencing::PreferUnordered,
                 )
                 .await?;
             let index_bytes = index.encode()?;
@@ -188,7 +188,7 @@ impl ShareAnnounce {
                 .new_custom_private_route(
                     &VALID_CRYPTO_KINDS,
                     Stability::LowLatency,
-                    Sequencing::NoPreference,
+                    Sequencing::PreferUnordered,
                 )
                 .await?;
             // Update header with new route data

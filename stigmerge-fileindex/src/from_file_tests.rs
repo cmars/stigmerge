@@ -23,7 +23,7 @@ async fn single_file_index() {
 
     assert_eq!(
         index.root().to_owned(),
-        tempf.path().parent().unwrap().to_owned()
+        tempf.path().canonicalize().unwrap().parent().unwrap().to_owned()
     );
 
     // Index files
@@ -71,7 +71,7 @@ async fn empty_file_index() {
 
     assert_eq!(
         index.root().to_owned(),
-        tempf.path().parent().unwrap().to_owned()
+        tempf.path().canonicalize().unwrap().parent().unwrap().to_owned()
     );
 
     // Index files
@@ -106,7 +106,7 @@ async fn large_file_index() {
 
     assert_eq!(
         index.root().to_owned(),
-        tempf.path().parent().unwrap().to_owned()
+        tempf.path().canonicalize().unwrap().parent().unwrap().to_owned()
     );
 
     // Index files
