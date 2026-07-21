@@ -24,7 +24,7 @@ tag-name = "v{{version}}"
 # Core dependencies
 anyhow = { version = "1.0", features = ["std", "backtrace"] }
 backoff = { version = "0.4", features = ["tokio"] }
-sha2 = { version = "0.10", features = ["asm"] }
+sha2 = { version = "0.11", features = ["asm"] }
 tokio = { version = "1.40", features = ["full"] }
 tokio-util = { version = "0.7" }
 tracing = { version = "0.1", features = ["log", "attributes"] }
