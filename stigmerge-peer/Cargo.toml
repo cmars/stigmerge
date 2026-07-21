@@ -37,7 +37,7 @@ refactor = []
 sha2 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 
 [build-dependencies]
 capnpc = { workspace = true }
@@ -47,7 +47,7 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 
 [target.'cfg(windows)'.build-dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = { workspace = true }
