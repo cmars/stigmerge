@@ -42,7 +42,7 @@ veilid-core = "0.5.6"
 veilnet = "0.4.5"
 
 # Platform-specific
-jni = { version = "0.21", features = ["invocation"] }
+jni = { version = "0.22", features = ["invocation"] }
 
 # Concurrency and async
 flume = { version = "0.11", features = ["async"] }
