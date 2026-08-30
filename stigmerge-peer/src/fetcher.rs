@@ -417,6 +417,13 @@ impl<C: Connection + Clone + Send + Sync + 'static> Fetcher<C> {
                                 }
                             });
                             if index_complete {
+                                // Status::Done is already sent on the
+                                // nothing-to-fetch path above; a fetch that
+                                // actually downloaded pieces returned
+                                // State::Done without ever saying so on the
+                                // status channel, so consumers of
+                                // subscribe_status waited forever.
+                                self.status_tx.send_replace(Status::Done);
                                 task_cancel.cancel();
                                 return Ok(State::Done);
                             }
