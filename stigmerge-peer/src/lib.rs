@@ -12,6 +12,7 @@ pub mod piece_map;
 pub mod piece_verifier;
 pub mod proto;
 pub mod record;
+pub mod route_registry;
 
 pub mod share_announcer;
 pub mod share_resolver;

@@ -130,6 +130,7 @@ impl ShareAnnounce {
                 )
                 .await?;
             let index_bytes = index.encode()?;
+            crate::route_registry::added(&route_blob.route_id);
             (
                 Header::from_index(&index, index_bytes.as_slice(), route_blob.blob.as_slice()),
                 route_blob.route_id,
@@ -181,6 +182,7 @@ impl ShareAnnounce {
             {
                 debug!(?err, route_id = ?self.route_id, "release prior private route");
             }
+            crate::route_registry::removed(&self.route_id);
 
             // Establish a new route
             let route_blob = routing_context
@@ -193,6 +195,7 @@ impl ShareAnnounce {
                 .await?;
             // Update header with new route data
             self.header.set_route_data(route_blob.blob);
+            crate::route_registry::added(&route_blob.route_id);
             self.route_id = route_blob.route_id.clone();
             route_blob.route_id
         };
