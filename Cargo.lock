@@ -444,6 +444,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "capnp"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da8a6b90513bfc04aa5360e5278e0582b98c30460b1ea64b7d5d4971f449cd5f"
+dependencies = [
+ "embedded-io 0.7.1",
+]
+
+[[package]]
 name = "capnpc"
 version = "0.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -459,6 +468,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13aea06b902f885cb0313b11e900e96cd57fef775e9e601a96e14e1d655f3cd3"
 dependencies = [
  "capnp 0.26.2",
+]
+
+[[package]]
+name = "capnpc"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46e419b5984a8843f3192d7ffa6d51745a872081bbcca7a476e1da4aede7044e"
+dependencies = [
+ "capnp 0.28.0",
 ]
 
 [[package]]
@@ -3290,12 +3308,12 @@ dependencies = [
 
 [[package]]
 name = "stigmerge_peer"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "backoff",
  "capnp 0.21.7",
- "capnpc 0.21.4",
+ "capnpc 0.28.1",
  "clap",
  "dashmap",
  "flume 0.11.1",
