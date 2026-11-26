@@ -22,6 +22,7 @@ dashmap = "6.1.0"
 flume = { workspace = true }
 hex = { workspace = true }
 path-absolutize = { workspace = true }
+serde_json = "1"
 stigmerge_fileindex = { version = "0", path = "../stigmerge-fileindex" }
 thiserror = { workspace = true }
 tokio = { workspace = true }

@@ -339,17 +339,15 @@ impl UpdateHandler for DeadRoutesHandler {
 mod tests {
     use std::{str::FromStr, sync::Arc};
 
-    use sha2::{Digest as _, Sha256};
     use stigmerge_fileindex::Indexer;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
     use veilid_core::{
-        BarePublicKey, BareRouteId, DHTSchemaDFLT, RecordKey, RouteId, ValueSubkeyRangeSet,
-        CRYPTO_KIND_VLD0,
+        BareRouteId, DHTSchema, RecordKey, RouteId, ValueSubkeyRangeSet, CRYPTO_KIND_VLD0,
     };
     use veilnet::connection::{
         testing::{create_test_api, StubAPI, StubConnection, StubRoutingContext},
-        Connection, RoutingContext,
+        RoutingContext,
     };
 
     use crate::{
@@ -359,6 +357,55 @@ mod tests {
         tests::temp_file,
     };
 
+    // ValueData has no public constructor. Populate local records and replay their
+    // values so resolver reads can be observed without contacting the network.
+    async fn stub_share_reads(
+        real_rc: veilid_core::RoutingContext,
+        rc: &mut StubRoutingContext,
+        index: &stigmerge_fileindex::Index,
+        peer_map: Option<PeerMapRef>,
+        calls: Arc<std::sync::Mutex<Vec<(RecordKey, u32)>>>,
+    ) -> (RecordKey, RecordKey) {
+        let share = rc
+            .create_dht_record(CRYPTO_KIND_VLD0, DHTSchema::dflt(2).unwrap(), None)
+            .await
+            .unwrap()
+            .key();
+        let have = rc
+            .create_dht_record(CRYPTO_KIND_VLD0, DHTSchema::dflt(1).unwrap(), None)
+            .await
+            .unwrap()
+            .key();
+        let index_bytes = index.encode().expect("encode index");
+        let mut header = Header::from_index(index, &index_bytes, &[0xde, 0xad, 0xbe, 0xef]);
+        header.set_have_map(HaveMapRef::new(have.clone(), 1));
+        if let Some(peer_map) = peer_map {
+            header.set_peer_map(peer_map);
+        }
+        let mut values = std::collections::HashMap::new();
+        for (key, subkey, bytes) in [
+            (&share, 0, header.encode().expect("encode header")),
+            (&share, 1, index_bytes),
+            (&have, 0, vec![0u8; 100]),
+        ] {
+            real_rc
+                .set_dht_value(key.clone(), subkey, bytes, None)
+                .await
+                .unwrap();
+            let value = real_rc
+                .get_dht_value(key.clone(), subkey, false)
+                .await
+                .unwrap()
+                .expect("local DHT value");
+            values.insert((key.clone(), subkey), value);
+        }
+        rc.get_dht_value = Arc::new(tokio::sync::Mutex::new(move |key: RecordKey, subkey, _| {
+            calls.lock().unwrap().push((key.clone(), subkey));
+            Ok(values.get(&(key, subkey)).cloned())
+        }));
+        (share, have)
+    }
+
     #[tokio::test]
     async fn test_resolve_index() {
         let tf = temp_file(0xa5u8, 65536);
@@ -366,12 +413,10 @@ mod tests {
             .await
             .expect("indexer");
         let index = indexer.index().await.expect("index");
-        let mut index_digest = Sha256::new();
-        index_digest.update(index.encode().expect("encode index"));
-
         // Create a connection with mock behavior
         let temp_dir = TempDir::new().unwrap();
         let veilid_api = create_test_api(temp_dir.path()).await.unwrap();
+        let real_rc = veilid_api.routing_context().unwrap();
         let mut api = StubAPI::new(veilid_api);
 
         // Mock route import
@@ -379,65 +424,19 @@ mod tests {
             Ok(RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0u8; 32])))
         }));
 
-        // Create a dummy public key for ValueData::new
-        let dummy_public_key =
-            veilid_core::PublicKey::new(CRYPTO_KIND_VLD0, BarePublicKey::new(&[0u8; 32]));
-
-        let fake_have_map_key: Arc<std::sync::Mutex<Option<RecordKey>>> =
-            Arc::new(std::sync::Mutex::new(None));
-
-        let mock_index = index.clone();
-        let mock_have_map_key = fake_have_map_key.clone();
         let get_dht_calls = Arc::new(std::sync::Mutex::new(vec![]));
         let watch_calls = Arc::new(std::sync::Mutex::new(vec![]));
         let cancel_watch_calls = Arc::new(std::sync::Mutex::new(Vec::<RecordKey>::new()));
 
         let mut routing_context = StubRoutingContext::new(api);
-
-        {
-            let get_dht_calls = get_dht_calls.clone();
-            let dummy_public_key = dummy_public_key.clone();
-            let mock_have_map_key = mock_have_map_key.clone();
-            routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
-                move |key: RecordKey, subkey: u32, _force_refresh| {
-                    get_dht_calls.lock().unwrap().push((key.clone(), subkey));
-                    if subkey == 0 {
-                        // Return header data with have_map
-                        let index_internal = mock_index.clone();
-                        let index_bytes = index_internal.encode().expect("encode index");
-                        let mut header = Header::from_index(
-                            &index_internal,
-                            index_bytes.as_slice(),
-                            &[0xde, 0xad, 0xbe, 0xef],
-                        );
-                        header.set_have_map(HaveMapRef::new(
-                            mock_have_map_key.lock().unwrap().as_ref().unwrap().clone(),
-                            1u16,
-                        ));
-                        let header_bytes = header.encode().expect("encode header");
-                        Ok(Some(
-                            veilid_core::ValueData::new(header_bytes, dummy_public_key.clone())
-                                .unwrap(),
-                        ))
-                    } else if key == mock_have_map_key.lock().unwrap().as_ref().unwrap().clone() {
-                        // Return have_map data for any subkey of the have_map
-                        let have_map_data = vec![0u8; 100]; // Dummy have map data
-                        Ok(Some(
-                            veilid_core::ValueData::new(have_map_data, dummy_public_key.clone())
-                                .unwrap(),
-                        ))
-                    } else {
-                        // Return index data for subkey 1
-                        let index_internal = mock_index.clone();
-                        let index_bytes = index_internal.encode().expect("encode index");
-                        Ok(Some(
-                            veilid_core::ValueData::new(index_bytes, dummy_public_key.clone())
-                                .unwrap(),
-                        ))
-                    }
-                },
-            ));
-        }
+        let (fake_key, _) = stub_share_reads(
+            real_rc,
+            &mut routing_context,
+            &index,
+            None,
+            get_dht_calls.clone(),
+        )
+        .await;
 
         {
             let watch_calls = watch_calls.clone();
@@ -461,34 +460,6 @@ mod tests {
         let mut conn = StubConnection::new(routing_context);
         conn.require_attachment = Arc::new(tokio::sync::Mutex::new(|| Ok(())));
         conn.add_update_handler = Arc::new(std::sync::Mutex::new(|_| ()));
-
-        let dht_rec = conn
-            .routing_context()
-            .create_dht_record(
-                CRYPTO_KIND_VLD0,
-                veilid_core::DHTSchema::DFLT(DHTSchemaDFLT::new(2).unwrap()),
-                None,
-            )
-            .await
-            .unwrap();
-        let fake_key = dht_rec.key().clone();
-
-        // Set have_map key from a created dht record. This puts the DHT record
-        // in the local record table, so it appears to be "available" and the
-        // connection doesn't try to go out onto the network.
-        {
-            let dht_rec = conn
-                .routing_context()
-                .create_dht_record(
-                    CRYPTO_KIND_VLD0,
-                    veilid_core::DHTSchema::DFLT(DHTSchemaDFLT::new(2).unwrap()),
-                    None,
-                )
-                .await
-                .unwrap();
-            let mut have_map_key = fake_have_map_key.lock().unwrap();
-            *have_map_key = Some(dht_rec.key().clone());
-        }
 
         let cancel = CancellationToken::new();
         let retry = Retry::default();
@@ -550,12 +521,11 @@ mod tests {
 
         let fake_peer_map_key =
             RecordKey::from_str("VLD0:hIfQGdXUq-oO5wwzODJukR7zOGwpNznKYaFoh6uTp2A").expect("key");
-        let fake_have_map_key: Arc<std::sync::Mutex<Option<RecordKey>>> =
-            Arc::new(std::sync::Mutex::new(None));
 
         // Create a connection with mock behavior
         let temp_dir = TempDir::new().unwrap();
         let veilid_api = create_test_api(temp_dir.path()).await.unwrap();
+        let real_rc = veilid_api.routing_context().unwrap();
         let mut api = StubAPI::new(veilid_api);
 
         // Mock route import
@@ -563,62 +533,18 @@ mod tests {
             Ok(RouteId::new(CRYPTO_KIND_VLD0, BareRouteId::new(&[0u8; 32])))
         }));
 
-        // Create a dummy public key for ValueData::new
-        let dummy_public_key =
-            veilid_core::PublicKey::new(CRYPTO_KIND_VLD0, BarePublicKey::new(&[0u8; 32]));
-
-        let mock_index = index.clone();
-        let mock_peer_map_key = fake_peer_map_key.clone();
-        let mock_have_map_key = fake_have_map_key.clone();
         let get_dht_calls = Arc::new(std::sync::Mutex::new(vec![]));
         let watch_calls = Arc::new(std::sync::Mutex::new(vec![]));
 
         let mut routing_context = StubRoutingContext::new(api);
-        {
-            let get_dht_calls = get_dht_calls.clone();
-            let dummy_public_key = dummy_public_key.clone();
-            let mock_have_map_key = mock_have_map_key.clone();
-            routing_context.get_dht_value = Arc::new(tokio::sync::Mutex::new(
-                move |key: RecordKey, subkey: u32, _force_refresh| {
-                    get_dht_calls.lock().unwrap().push((key.clone(), subkey));
-                    if subkey == 0 {
-                        // Return header data with peer_map and have_map
-                        let index_internal = mock_index.clone();
-                        let index_bytes = index_internal.encode().expect("encode index");
-                        let mut header = Header::from_index(
-                            &index_internal,
-                            index_bytes.as_slice(),
-                            &[0xde, 0xad, 0xbe, 0xef],
-                        );
-                        header.set_peer_map(PeerMapRef::new(mock_peer_map_key.clone(), 1u16));
-                        header.set_have_map(HaveMapRef::new(
-                            mock_have_map_key.lock().unwrap().as_ref().unwrap().clone(),
-                            1u16,
-                        ));
-                        let header_bytes = header.encode().expect("encode header");
-                        Ok(Some(
-                            veilid_core::ValueData::new(header_bytes, dummy_public_key.clone())
-                                .unwrap(),
-                        ))
-                    } else if &key == mock_have_map_key.lock().unwrap().as_ref().unwrap() {
-                        // Return have_map data for any subkey of have_map
-                        let have_map_data = vec![0u8; 100]; // Dummy have map data
-                        Ok(Some(
-                            veilid_core::ValueData::new(have_map_data, dummy_public_key.clone())
-                                .unwrap(),
-                        ))
-                    } else {
-                        // Return index data for subkey 1
-                        let index_internal = mock_index.clone();
-                        let index_bytes = index_internal.encode().expect("encode index");
-                        Ok(Some(
-                            veilid_core::ValueData::new(index_bytes, dummy_public_key.clone())
-                                .unwrap(),
-                        ))
-                    }
-                },
-            ));
-        }
+        let (fake_key, fake_have_map_key) = stub_share_reads(
+            real_rc,
+            &mut routing_context,
+            &index,
+            Some(PeerMapRef::new(fake_peer_map_key.clone(), 1)),
+            get_dht_calls.clone(),
+        )
+        .await;
 
         {
             let watch_calls = watch_calls.clone();
@@ -629,7 +555,7 @@ mod tests {
                 },
             ));
         }
-        let mut conn = StubConnection::new(routing_context.clone());
+        let mut conn = StubConnection::new(routing_context);
         conn.require_attachment = Arc::new(tokio::sync::Mutex::new(|| Ok(())));
         conn.add_update_handler = Arc::new(std::sync::Mutex::new(|_| ()));
 
@@ -637,32 +563,6 @@ mod tests {
         let retry = Retry::default();
         let (resolver, resolver_task) =
             ShareResolver::new_task(cancel.clone(), retry, conn, index.root());
-
-        let dht_rec = routing_context
-            .create_dht_record(
-                CRYPTO_KIND_VLD0,
-                veilid_core::DHTSchema::DFLT(DHTSchemaDFLT::new(2).unwrap()),
-                None,
-            )
-            .await
-            .unwrap();
-        let fake_key = dht_rec.key().clone();
-
-        // Set have_map key from a created dht record. This puts the DHT record
-        // in the local record table, so it appears to be "available" and the
-        // connection doesn't try to go out onto the network.
-        {
-            let dht_rec = routing_context
-                .create_dht_record(
-                    CRYPTO_KIND_VLD0,
-                    veilid_core::DHTSchema::DFLT(DHTSchemaDFLT::new(2).unwrap()),
-                    None,
-                )
-                .await
-                .unwrap();
-            let mut have_map_key = fake_have_map_key.lock().unwrap();
-            *have_map_key = Some(dht_rec.key().clone());
-        }
 
         // Test adding a share - this should resolve to header with peer_map and have_map
         let share_info = resolver.add_share(&fake_key).await.expect("add share");
@@ -674,7 +574,7 @@ mod tests {
         // Verify the header was created correctly with peer_map and have_map
         assert_eq!(
             share_info.header.have_map().map(|m| m.key()),
-            fake_have_map_key.lock().unwrap().as_ref(),
+            Some(&fake_have_map_key),
         );
         assert_eq!(
             share_info.header.peer_map().map(|m| m.key()),
