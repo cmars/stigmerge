@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use stigmerge_fileindex::{FileSpec, Index, PayloadPiece, PayloadSpec};
+use tokio_util::bytes::Bytes;
 use tracing::{debug, instrument, Level};
 use veilid_core::{
     BareKeyPair, DHTRecordDescriptor, DHTSchema, KeyPair, RecordKey, SetDHTValueOptions, Timestamp,
@@ -49,17 +50,28 @@ impl StablePublicRecord {
 
         let routing_context = conn.routing_context();
         let api = routing_context.api();
-        let table_store = api.table_store()?;
-        let db = table_store.open(table_name, 2).await?;
+        let db = api.open_table_db(table_name, 2).await?;
 
-        let existing_dht_key: Option<RecordKey> = db.load_json(0, db_key_id).await?;
-        let existing_owner_keypair: Option<KeyPair> = db.load_json(1, db_key_id).await?;
+        // Keep the JSON encoding used by earlier versions of the table store.
+        let db_key = Bytes::copy_from_slice(db_key_id);
+        let existing_dht_key: Option<RecordKey> = db
+            .load(0, db_key.clone())
+            .await?
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()?;
+        let existing_owner_keypair: Option<KeyPair> = db
+            .load(1, db_key.clone())
+            .await?
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()?;
 
         let dht_rec = match (existing_dht_key, existing_owner_keypair) {
             (Some(dht_key), Some(owner_keypair)) => {
                 return Ok(Self {
                     dht_rec: routing_context
-                        .open_dht_record(dht_key.clone(), Some(owner_keypair.clone()))
+                        .open_dht_record(dht_key.clone(), Some(owner_keypair.clone()), None)
                         .await?,
                     key: dht_key,
                     owner_keypair: Some(owner_keypair),
@@ -81,8 +93,14 @@ impl StablePublicRecord {
                     .value(),
             ),
         );
-        db.store_json(0, db_key_id, &dht_rec.key()).await?;
-        db.store_json(1, db_key_id, &dht_owner).await?;
+        db.store(
+            0,
+            db_key.clone(),
+            serde_json::to_vec(&dht_rec.key())?.into(),
+        )
+        .await?;
+        db.store(1, db_key, serde_json::to_vec(&dht_owner)?.into())
+            .await?;
         Ok(Self {
             key: dht_rec.key(),
             dht_rec,
@@ -99,7 +117,9 @@ impl StablePublicRecord {
             conn.require_attachment().await?;
         }
         let routing_context = conn.routing_context();
-        let dht_rec = routing_context.open_dht_record(key.clone(), None).await?;
+        let dht_rec = routing_context
+            .open_dht_record(key.clone(), None, None)
+            .await?;
         Ok(Self {
             dht_rec,
             key: key.clone(),
